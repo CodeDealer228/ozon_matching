@@ -39,9 +39,7 @@ kernels ...` ниже): положите `kaggle.json` в `~/.kaggle/kaggle.json
 его**. Получить можно на https://www.kaggle.com/settings → API Tokens →
 Create Legacy API Key.
 
-## Данные — скачать с Kaggle (не в git, слишком тяжёлые)
-
-Все данные соревнования: **[maxamsecret/ozon-ecup-2026-matching](https://www.kaggle.com/datasets/maxamsecret/ozon-ecup-2026-matching)**.
+## Данные (не в git, слишком тяжёлые)
 
 | Файл | Размер | Для чего |
 |---|---|---|
@@ -49,6 +47,24 @@ Create Legacy API Key.
 | `items_human.parquet` | 214MB | Каждый товар, на который ссылается `matches.parquet` — **используйте это для локальной разработки/тестов**, а не полный `items.parquet` |
 | `matches_llm.parquet` | 104MB | 11.19M пар с LLM-разметкой (слабые/мягкие метки, непрерывные 0..1) — используется для второй стадии continued LoRA SFT, см. ниже |
 | `items.parquet` | 4.1GB | Полный каталог товаров (13M+ строк) — нужен только для полномасштабного прогона |
+
+### Вариант A: прямая ссылка (без Kaggle-аккаунта)
+
+Организаторский bucket на Yandex Cloud, публичный, без креденшлов:
+
+```bash
+python scripts/download_data.py                              # все 4 файла в data/
+python scripts/download_data.py matches.parquet items_human.parquet   # только нужные
+python scripts/download_data.py --overwrite items.parquet     # перекачать заново
+```
+
+Скрипт пропускает файл, если он уже лежит в `data/` (кроме `--overwrite`), и
+пишет во временный `*.parquet.part`, атомарно переименовывая по завершении —
+битый файл в `data/` не останется, даже если скачивание прервётся.
+
+### Вариант B: Kaggle-датасет
+
+Все данные соревнования также лежат в **[maxamsecret/ozon-ecup-2026-matching](https://www.kaggle.com/datasets/maxamsecret/ozon-ecup-2026-matching)** (приватный — нужен доступ):
 
 ```bash
 mkdir -p data
