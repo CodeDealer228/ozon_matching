@@ -89,15 +89,36 @@ MAX_ATTR_CHARS = 384
 MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 640
 
 EPOCHS = 1
-LR = 4e-4
+LR = 2e-4                        # peak LR -- was 4e-4; a 500K-row real (not
+                                  # just mechanics-smoke) test at 4e-4 showed
+                                  # val_macro_pr_auc dropping from the 0.5282
+                                  # starting point to ~0.50-0.51 and never
+                                  # recovering even after full cosine anneal
+                                  # to 0. Reverted to the original run's own
+                                  # successful peak LR.
 WEIGHT_DECAY = 0.01
-WARMUP_RATIO = 0.03
+WARMUP_RATIO = 0.10              # was 0.03 -- a more gradual ramp to peak LR
+                                  # instead of an almost-immediate jump, per
+                                  # the same finding above.
 N_CHECKPOINTS = 10
 PUSH_MILESTONES = [0.25, 0.50, 0.75, 1.00]
 
-CHUNK_SIZE = 8_000
-TOKENIZE_BATCH_START = 8_000
+# Adaptive tokenization chunk size: v3/v4 development runs proved
+# ctypes-malloc_trim keeps RSS from accumulating across chunks (flat at
+# ~6.5GB/32GB even at 500K rows) -- that headroom was being wasted at a
+# fixed CHUNK_SIZE=8_000. Instead of a static constant, tokenize_to_memmap
+# now grows the chunk size while measured RSS stays under RAM_TARGET_GB, and
+# shrinks it if RSS crosses RAM_HARD_GB -- using more of the ~32GB container
+# without needing to guess a single safe constant up front.
+CHUNK_SIZE_START = 20_000
+CHUNK_SIZE_MIN = 4_000
+CHUNK_SIZE_MAX = 300_000
 TOKENIZE_BATCH_MIN = 1_000
+RAM_TARGET_GB = 20.0              # grow chunk size while RSS stays under this
+RAM_HARD_GB = 26.0                 # shrink if RSS exceeds this (confirmed
+                                    # cgroup limit is 32.21GB -- 6GB margin)
+RAM_GROWTH_FACTOR = 1.5
+RAM_SHRINK_FACTOR = 0.5
 
 TOTAL_BATCH_SIZE = 2048
 MICRO_BATCH_SIZE = 512
@@ -108,7 +129,20 @@ SAFETY_MARGIN_GB = 1.5
 PROBE_CAP = 8192
 PROBE_ROUND_TO = 8
 
-MAX_TRAIN_ROWS = 500_000         # SMOKE TEST VALUE -- set back to None before the real run
+# Training pool composition. Previously LLM-only; a real 500K-row LLM-only
+# test regressed val_macro_pr_auc (see LR comment above), so this run mixes
+# the human 80% train split back in alongside the LLM sample instead of
+# training on LLM data in isolation -- human rows keep the model anchored to
+# the signal it was originally tuned on while it also sees the wider-
+# coverage weak-label data.
+INCLUDE_HUMAN_TRAIN = True
+TARGET_TOTAL_TRAIN_ROWS = 2_000_000   # None = use ALL of matches_llm (full
+                                       # run); a number caps the COMBINED
+                                       # pool -- all human train rows are
+                                       # always kept, matches_llm is sampled
+                                       # to fill the remainder up to this
+                                       # total.
+
 ENABLE_DATASET_PUSH = False      # flip to True only after Kaggle Secrets are set (see plan)
 LORA_DATASET_ID = "maxamsecret/ozon-lora-minilm-finetuned"
 LORA_DATASET_NESTED_PATH = "lora_mini_self_attention_memmap/best"
@@ -160,24 +194,36 @@ def _log_cgroup_limit():
     print("[MEM] cgroup limit: unavailable (not running under a readable cgroup)")
 
 
-def _log_memory(stage):
+def _current_rss_gb():
+    """Returns current process RSS in GB, or None if it can't be determined
+    (used both for the human-readable _log_memory prints and to drive the
+    adaptive tokenization chunk sizing below)."""
     try:
         import psutil
-        p = psutil.Process(os.getpid())
-        print(f"[MEM] {stage}: rss={p.memory_info().rss / 1e9:.2f}GB "
-              f"available={psutil.virtual_memory().available / 1e9:.2f}GB")
-        return
+        return psutil.Process(os.getpid()).memory_info().rss / 1e9
     except ImportError:
         pass
     try:
         with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
-                    print(f"[MEM] {stage}: rss={int(line.split()[1]) / 1e6:.2f}GB (via /proc, psutil unavailable)")
-                    return
+                    return int(line.split()[1]) / 1e6
     except Exception:
         pass
-    print(f"[MEM] {stage}: unavailable")
+    return None
+
+
+def _log_memory(stage):
+    rss_gb = _current_rss_gb()
+    if rss_gb is None:
+        print(f"[MEM] {stage}: unavailable")
+        return
+    try:
+        import psutil
+        avail = psutil.virtual_memory().available / 1e9
+        print(f"[MEM] {stage}: rss={rss_gb:.2f}GB available={avail:.2f}GB")
+    except ImportError:
+        print(f"[MEM] {stage}: rss={rss_gb:.2f}GB (via /proc, psutil unavailable)")
 
 
 def _require_disk_space(path, required_bytes, label, margin=1.35):
@@ -298,9 +344,12 @@ def tokenize_to_memmap(
                                       # silently truncates soft labels to 0/1
                                       # on memmap write (numpy does not raise).
     cache_dir: str,
-    chunk_size: int = CHUNK_SIZE,
-    tokenize_batch_start: int = TOKENIZE_BATCH_START,
+    chunk_size_start: int = CHUNK_SIZE_START,
+    chunk_size_min: int = CHUNK_SIZE_MIN,
+    chunk_size_max: int = CHUNK_SIZE_MAX,
     tokenize_batch_min: int = TOKENIZE_BATCH_MIN,
+    ram_target_gb: float = RAM_TARGET_GB,
+    ram_hard_gb: float = RAM_HARD_GB,
 ):
     n_max = len(pairs_pd)
     paths = _memmap_paths(cache_dir, prefix)
@@ -333,12 +382,27 @@ def tokenize_to_memmap(
     item_texts_id2 = item_texts.select(["id", "text"]).rename({"id": "id2", "text": "text2"})
 
     unknown_id = category_to_id.get("UNKNOWN", -1)
-    tokenize_batch_box = [tokenize_batch_start]
     written = 0
-    total_chunks = math.ceil(n_max / chunk_size)
+    start = 0
 
-    for start in tqdm(range(0, n_max, chunk_size), total=total_chunks, desc=f"Tokenize {prefix}", dynamic_ncols=True):
-        chunk_pd = pairs_pd.iloc[start:start + chunk_size]
+    # Adaptive chunk size: grow geometrically while measured RSS stays under
+    # ram_target_gb, shrink if it crosses ram_hard_gb. malloc_trim() (called
+    # after every chunk, see below) confirmed RSS doesn't accumulate across
+    # chunks at any scale tested (flat ~6.5GB/32GB even at 500K rows) -- that
+    # left most of the container's RAM unused at the old fixed CHUNK_SIZE, so
+    # this replaces a single guessed constant with a live control loop that
+    # actually uses the available headroom while still backing off before
+    # the (confirmed) 32.21GB cgroup ceiling. tokenize_batch_box is reset to
+    # match the new chunk_size each iteration (tokenize the whole chunk in
+    # one tokenizer() call by default) -- _tokenize_adaptive's own
+    # MemoryError back-off still applies within a single chunk if that one
+    # call is too big.
+    chunk_size = chunk_size_start
+    pbar = tqdm(total=n_max, desc=f"Tokenize {prefix}", dynamic_ncols=True)
+
+    while start < n_max:
+        cur_chunk_size = min(chunk_size, n_max - start)
+        chunk_pd = pairs_pd.iloc[start:start + cur_chunk_size]
         chunk_pl = pl.from_pandas(chunk_pd).with_row_index("_row_idx")
 
         # maintain_order + the row-index sort are belt-and-suspenders: polars

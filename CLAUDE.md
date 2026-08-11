@@ -4,6 +4,7 @@
 
 ## Conventions
 - Think in English, but respond to me in Russian.
+- Write README.md in Russian.
 
 ## Task
 
