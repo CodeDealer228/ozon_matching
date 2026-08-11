@@ -1,0 +1,17 @@
+{
+  "id": "maxamsecret/ozon-merge-lora-adapter-into-base-weights",
+  "title": "Ozon: merge LoRA adapter into base weights",
+  "code_file": "merge_lora.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-lora-minilm-finetuned"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

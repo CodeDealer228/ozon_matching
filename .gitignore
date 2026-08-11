@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Raw competition data -- heavy, fetch from the Kaggle dataset instead
+# (see README.md for exact download commands). data/splits/ is OUR derived
+# artifact (small, reproducibility-critical) and IS tracked -- don't add a
+# blanket data/ rule here.
+data/*.parquet
+
+# Model / tokenizer weight files -- heavy, fetch from Kaggle datasets or
+# regenerate via scripts/merge_lora.py (see README.md).
+*.safetensors
+*.onnx
+*.msgpack
+*.bin
+submits/lora/models/
+submits/lora/classifier.pt
+
+# Submission archives -- regenerate via scripts/build_submission_zip.py.
+# The tiny organizer-provided lightweight baseline zip IS tracked as
+# reference; the 1.2GB weights-bundled one is not (also exceeds GitHub's
+# 100MB per-file limit regardless).
+submits/lora/matching-lora-submit.zip
+submits/lora.zip
+submits/baseline/matching-baseline-submit.zip
+
+# Kaggle kernel run artifacts -- downloaded outputs/pulled sources,
+# regenerate by re-running the kernel (see kaggle_kernels/*/kernel-metadata.json).
+kaggle_kernels/*/output/
+kaggle_kernels/*/pulled/
+
+# Scratch / local test artifacts (downloaded adapters, extracted zips for
+# testing, sampled parquet files, prediction CSVs from smoke tests).
+artifacts/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+
+# Claude Code local/ephemeral state -- per-machine permissions and runtime
+# locks, not shared project config (.claude/skills/ IS tracked, it's the
+# project's Kaggle skill).
+.claude/settings.local.json
+.claude/*.lock
