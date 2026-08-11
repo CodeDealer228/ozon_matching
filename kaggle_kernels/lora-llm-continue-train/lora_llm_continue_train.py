@@ -1,14 +1,27 @@
 """
 Continue LoRA SFT of the already-trained cross-encoder checkpoint
 (maxamsecret/ozon-lora-minilm-finetuned, best/ = epoch 7, val macro PR-AUC
-0.5282) on matches_llm.parquet -- the large-scale LLM-labeled pool
-(11.19M pairs, continuous target in [0,1], never used before).
+0.5282) on a MIX of the original human train split and matches_llm.parquet
+-- the large-scale LLM-labeled pool (11.19M pairs, continuous target in
+[0,1], previously unused).
+
+History (see CLAUDE.md "Continued LoRA SFT on matches_llm.parquet" for the
+full story): an earlier version trained on matches_llm ALONE at LR=4e-4. A
+real (not just mechanics-smoke) 500K-row run at that config regressed
+val_macro_pr_auc from 0.5282 to ~0.50-0.51 and never recovered, even after a
+full cosine anneal to 0. This version reverts LR to 2e-4 (the original run's
+own peak), lengthens warmup for a gentler ramp instead of an near-instant
+jump to peak, and mixes the human 80% train split back into the training
+pool (INCLUDE_HUMAN_TRAIN) so the model keeps seeing the signal it was
+originally tuned on, not just the noisier weak-label pool in isolation.
 
 Key differences from notebooks/cross-encoder-sft-pipline (3).ipynb (which
 this script extends, not replaces):
-  - Trains on matches_llm.parquet instead of matches.parquet. The soft label
-    is fed directly into BCEWithLogitsLoss (no >=0.5 threshold) -- that's the
-    whole point of using LLM-scored data instead of human binary labels.
+  - Trains on human train (matches.parquet's 80% split, label cast to
+    float32) concatenated with a matches_llm sample (soft label fed directly
+    into BCEWithLogitsLoss, no >=0.5 threshold -- that's the point of using
+    LLM-scored data). TARGET_TOTAL_TRAIN_ROWS caps the combined pool; human
+    rows are always kept in full, matches_llm is sampled to fill the rest.
   - Validates on the *same* canonical val split used for the original LoRA
     run (recomputed inline from matches.parquet, byte-identical code) --
     matches_llm and matches.parquet are confirmed disjoint in both pairs and
@@ -21,9 +34,10 @@ this script extends, not replaces):
     (not just at epoch end), so the best-so-far adapter is never far from
     disk, and pushes it as a new dataset version at 25/50/75/100% progress
     milestones so progress survives a hard Kaggle session crash too.
-  - LR=4e-4 (2x the original run's 2e-4) with a cosine schedule instead of
-    linear -- see kaggle_kernels/lora-llm-continue-train/../../CLAUDE.md and
-    the plan this script was built from for the log-based reasoning.
+  - Tokenization chunk size is live-adaptive (grows/shrinks off measured
+    RSS, see CHUNK_SIZE_START/RAM_TARGET_GB/RAM_HARD_GB in CONFIG) instead of
+    a fixed constant, to actually use the ~32GB container instead of the
+    ~6.5GB a static conservative chunk size left on the table.
 
 Structured as importable functions + a main() guarded by
 `if __name__ == "__main__"` so the mechanics (tokenize_to_memmap, the
@@ -421,6 +435,12 @@ def tokenize_to_memmap(
         )
 
         if joined.height == 0:
+            # NOTE: must still advance start/pbar -- this is a `while` loop
+            # with a dynamic step now, not a `for start in range(...)` where
+            # `continue` used to auto-advance via the iterator.
+            del joined, chunk_pl, chunk_pd
+            start += cur_chunk_size
+            pbar.update(cur_chunk_size)
             continue
 
         texts1 = joined.get_column("text1").to_list()
@@ -431,6 +451,10 @@ def tokenize_to_memmap(
             dtype=np.int16,
         )
 
+        # Try to tokenize this whole chunk in one call; _tokenize_adaptive's
+        # own MemoryError back-off (a separate, tighter safety net) still
+        # applies within just this chunk if that single call is too big.
+        tokenize_batch_box = [cur_chunk_size]
         for enc, t_start, b in _tokenize_adaptive(
             tokenizer, texts1, texts2, max_length, tokenize_batch_box, tokenize_batch_min
         ):
@@ -455,6 +479,19 @@ def tokenize_to_memmap(
         del joined, texts1, texts2, labels, cat_ids, chunk_pl, chunk_pd
         gc.collect()
         _malloc_trim()
+
+        rss_gb = _current_rss_gb()
+        if rss_gb is not None:
+            if rss_gb < ram_target_gb:
+                chunk_size = min(chunk_size_max, int(chunk_size * RAM_GROWTH_FACTOR))
+            elif rss_gb > ram_hard_gb:
+                chunk_size = max(chunk_size_min, int(chunk_size * RAM_SHRINK_FACTOR))
+            pbar.set_postfix(rss_gb=round(rss_gb, 2), next_chunk=chunk_size)
+
+        start += cur_chunk_size
+        pbar.update(cur_chunk_size)
+
+    pbar.close()
 
     for mm in (input_ids_mm, attention_mm, token_type_mm, labels_mm, category_mm):
         mm.flush()
@@ -765,7 +802,8 @@ def main():
     print(f"lr:               {LR}")
     print(f"total_batch_size: {TOTAL_BATCH_SIZE}")
     print(f"micro_batch_size: {MICRO_BATCH_SIZE}")
-    print(f"max_train_rows:   {MAX_TRAIN_ROWS}")
+    print(f"include_human_train: {INCLUDE_HUMAN_TRAIN}")
+    print(f"target_total_train_rows: {TARGET_TOTAL_TRAIN_ROWS}")
     print(f"enable_dataset_push: {ENABLE_DATASET_PUSH}")
     print(f"cache_dir:        {CACHE_DIR}")
     print(f"output_dir:       {OUTPUT_DIR}")
@@ -818,6 +856,22 @@ def main():
     ).hexdigest()[:16]
     print(f"[DATA] val_fingerprint={val_fingerprint}")
 
+    # Human train split (the 80% side of the canonical split) -- extracted
+    # BEFORE matches_pd is freed below. Mixed into the training pool
+    # alongside matches_llm (see INCLUDE_HUMAN_TRAIN comment in CONFIG): an
+    # earlier LLM-only run regressed val_macro_pr_auc, so this keeps the
+    # model anchored to the human signal it was originally tuned on while it
+    # also sees matches_llm's wider catalog coverage. label is human binary
+    # (0/1) here but stored as float32 to share dtype/memmap with the LLM
+    # pool's continuous soft labels -- BCEWithLogitsLoss treats a hard 0.0/1.0
+    # target as just a special case of a soft one, no special-casing needed.
+    if INCLUDE_HUMAN_TRAIN:
+        human_train_pd = matches_pd.iloc[train_idx][["id1", "id2", "label"]].reset_index(drop=True).copy()
+        human_train_pd["label"] = human_train_pd["label"].astype(np.float32)
+        print(f"[DATA] human train rows (mixed into training pool): {len(human_train_pd):,}")
+    else:
+        human_train_pd = None
+
     del matches_pd, labels_all, indices, train_idx, val_idx
     gc.collect()
 
@@ -850,14 +904,25 @@ def main():
         print(f"[WARN] {n_dropped:,} matches_llm pairs overlapped the val split and were dropped -- "
               f"Kaggle's hosted matches_llm.parquet may differ from the local copy checked during planning.")
 
-    if MAX_TRAIN_ROWS is not None:
-        llm_pl = llm_pl.sample(n=min(MAX_TRAIN_ROWS, llm_pl.height), seed=SEED)
-        print(f"[SMOKE] MAX_TRAIN_ROWS set -> sampled down to {llm_pl.height:,} train rows")
+    n_human = len(human_train_pd) if human_train_pd is not None else 0
+    if TARGET_TOTAL_TRAIN_ROWS is not None:
+        llm_cap = max(0, TARGET_TOTAL_TRAIN_ROWS - n_human)
+        llm_pl = llm_pl.sample(n=min(llm_cap, llm_pl.height), seed=SEED)
+        print(f"[DATA] TARGET_TOTAL_TRAIN_ROWS={TARGET_TOTAL_TRAIN_ROWS:,} -> matches_llm sampled to "
+              f"{llm_pl.height:,} rows (+ {n_human:,} human train rows = "
+              f"{llm_pl.height + n_human:,} total)")
 
-    train_pd = llm_pl.to_pandas()
+    llm_train_pd = llm_pl.to_pandas()
     del llm_pl, val_pairs_norm
     gc.collect()
-    print(f"[DATA] train (matches_llm) rows: {len(train_pd):,}")
+
+    if human_train_pd is not None:
+        train_pd = pd.concat([human_train_pd, llm_train_pd], ignore_index=True)
+        del human_train_pd, llm_train_pd
+    else:
+        train_pd = llm_train_pd
+    gc.collect()
+    print(f"[DATA] combined train rows: {len(train_pd):,} (human={n_human:,} + llm={len(train_pd) - n_human:,})")
 
     # -----------------------------------------------------------------
     # items.parquet -- semi-join to needed ids + streaming collect.
@@ -1066,6 +1131,9 @@ def main():
         "val_fingerprint": val_fingerprint,
         "train_rows": train_len,
         "val_rows": val_len,
+        "include_human_train": INCLUDE_HUMAN_TRAIN,
+        "human_train_rows": n_human,
+        "target_total_train_rows": TARGET_TOTAL_TRAIN_ROWS,
         "n_checkpoints_per_epoch": N_CHECKPOINTS,
         "enable_dataset_push": ENABLE_DATASET_PUSH and has_kaggle_creds,
     })

@@ -41,7 +41,7 @@ Create Legacy API Key.
 
 ## Данные — скачать с Kaggle (не в git, слишком тяжёлые)
 
-Все данные соревнования: **[maxamsecret/ozon-ecup-2026-matching](https://www.kaggle.com/datasets/maxamsecret/ozon-ecup-2026-matching)** (приватный — если получите 403, попросите добавить вас как коллаборатора).
+Все данные соревнования: **[maxamsecret/ozon-ecup-2026-matching](https://www.kaggle.com/datasets/maxamsecret/ozon-ecup-2026-matching)**.
 
 | Файл | Размер | Для чего |
 |---|---|---|
