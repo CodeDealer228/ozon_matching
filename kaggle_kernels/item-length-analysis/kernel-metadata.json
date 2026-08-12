@@ -1,0 +1,16 @@
+{
+  "id": "maxamsecret/item-length-analysis",
+  "title": "Item Length Analysis",
+  "code_file": "item_length_analysis.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": false,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

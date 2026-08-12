@@ -1,0 +1,16 @@
+{
+  "id": "maxamsecret/giga3b-quantize-benchmark-bi-encoder-probe",
+  "title": "Giga3B quantize + benchmark (bi-encoder probe)",
+  "code_file": "giga3b_quantize_benchmark.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

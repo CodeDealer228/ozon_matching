@@ -1,0 +1,16 @@
+{
+  "id": "maxamsecret/publish-token-cache",
+  "title": "Publish Token Cache",
+  "code_file": "publish_token_cache.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [
+    "maxamsecret/lora-llm-continue-train"
+  ],
+  "model_sources": []
+}
