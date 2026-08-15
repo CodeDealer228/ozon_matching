@@ -13,7 +13,9 @@ cross-encoder (`[CLS] item1 [SEP] item2 [SEP]`, совместное внима�
 новой головы — чистая матричная арифметика на фиксированной матрице
 365,654×768, без GPU-энкодера в цикле.
 
-- **Kaggle:** ещё не запушен
+- **Kaggle:** https://www.kaggle.com/code/maxamsecret/berta-lora-pair-embedding-cache
+  (slug определился по заголовку, не по `id` в metadata — разошлось с тем,
+  что было в `kernel-metadata.json` при первом пуше, поправлено)
 - **Тип:** script · **GPU:** 2×T4 · **интернет:** вкл
 
 ## Время (посчитано, не оценено)
@@ -79,6 +81,17 @@ cache_meta.json         category_vocab, batch_size_used, source_checkpoint, ...
 ## Запуск
 ```bash
 kaggle kernels push -p kaggle_kernels/berta-lora-pair-cache
-kaggle kernels status maxamsecret/berta-lora-pair-cache
-kaggle kernels output maxamsecret/berta-lora-pair-cache -p kaggle_kernels/berta-lora-pair-cache/output
+kaggle kernels status maxamsecret/berta-lora-pair-embedding-cache
+kaggle kernels output maxamsecret/berta-lora-pair-embedding-cache -p kaggle_kernels/berta-lora-pair-cache/output
 ```
+
+## v1 упал — `mp.spawn` → `torch.distributed.run`
+Первая версия (`torch.multiprocessing.spawn`) упала: rank 0 умер без
+Python-трейсбека прямо во время `PeftModel.from_pretrained(...)` (похоже
+на OOM-kill — см. CLAUDE.md "a real Linux OOM-kill isn't a catchable
+MemoryError"), rank 1 словил обрыв TCPStore-соединения. Корень не
+локализован до конца — переключились на `torch.distributed.run
+--standalone --nproc_per_node=N`, тот же механизм запуска, что уже
+доказанно работает в этом окружении в
+[`../qwen3-bi-encoder-lora-sft`](../qwen3-bi-encoder-lora-sft) (ветка
+`bi-encoder`) — не гадание, а известно рабочий вариант.

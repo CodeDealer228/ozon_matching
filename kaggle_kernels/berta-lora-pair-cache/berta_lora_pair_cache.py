@@ -39,18 +39,29 @@ matters), but its per-batch scatter/replicate/gather round trip through
 the main process is pure overhead for an embarrassingly-parallel workload
 where the two GPUs never need to exchange anything until the very end.
 
-Instead: torch.multiprocessing.spawn launches 2 fully independent worker
-processes, each pinned to one GPU via CUDA_VISIBLE_DEVICES-equivalent
-(torch.cuda.set_device(rank)), each loading its OWN full copy of the model
-and processing its OWN disjoint half of the data, writing its own shard to
-disk. dist.init_process_group is used only for a cheap barrier before rank
-0 merges the two shards -- not for gradient sync. A useful side effect:
-each rank is a genuinely separate OS process with its own Python main
-thread, so the specific DataParallel+autocast pitfall documented in
-frida-nan-diagnose (autocast entered in a calling thread not propagating
-into DataParallel's per-replica WORKER threads within one process)
-structurally cannot occur here at all -- there are no worker threads,
-only worker processes, each running its own autocast normally.
+Instead: `torch.distributed.run --standalone --nproc_per_node=N` launches N
+fully independent worker processes, each pinned to one GPU
+(torch.cuda.set_device(local_rank)), each loading its OWN full copy of the
+model and processing its OWN disjoint half of the data, writing its own
+shard to disk. dist.init_process_group is used only for a cheap barrier
+before rank 0 merges the two shards -- not for gradient sync. A useful
+side effect: each rank is a genuinely separate OS process with its own
+Python main thread, so the specific DataParallel+autocast pitfall
+documented in frida-nan-diagnose (autocast entered in a calling thread not
+propagating into DataParallel's per-replica WORKER threads within one
+process) structurally cannot occur here at all -- there are no worker
+threads, only worker processes, each running its own autocast normally.
+
+This is the SAME launch mechanism already proven on this exact Kaggle
+2xT4 environment by kaggle_kernels/qwen3-bi-encoder-lora-sft (bi-encoder
+branch) -- deliberately reused rather than torch.multiprocessing.spawn,
+which was tried first here and crashed: rank 0 died with no Python
+traceback at all (an OOM-kill signature -- see CLAUDE.md's own documented
+"a real Linux OOM-kill isn't a catchable MemoryError") partway through
+loading the checkpoint, taking down its TCPStore server and rank 1 with
+a "connection closed" error. Root cause wasn't fully isolated before
+switching mechanisms; torch.distributed.run is the known-safe choice, not
+a guess that it'll avoid the same issue.
 
 Sequential model loading across ranks (rank 0 first, then rank 1, with a
 barrier between) -- same lesson already applied in this project's other
@@ -81,7 +92,6 @@ import polars as pl
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, Dataset
 
 from tqdm.auto import tqdm
@@ -154,8 +164,6 @@ PROBE_ROUND_TO = 8
 WORKING_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 SHARD_DIR = os.path.join(WORKING_DIR, "shards")
 CACHE_DIR = os.path.join(WORKING_DIR, "berta_lora_pair_cache")
-
-MASTER_PORT = 29501
 
 
 # =====================================================================
@@ -548,14 +556,18 @@ def merge_split(split_name, world_size, rank):
 # WORKER
 # =====================================================================
 
-def worker(rank, world_size):
+def worker():
+    """Entry point when launched BY `torch.distributed.run` (RANK/WORLD_SIZE/
+    LOCAL_RANK already set in the environment -- see main_launcher() and the
+    module docstring's launch-mechanism note)."""
     PeftModel = _import_peft()
 
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = str(MASTER_PORT)
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-    device = torch.device(f"cuda:{rank}")
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
     set_seed(SEED)
 
     if rank == 0:
@@ -693,11 +705,43 @@ def worker(rank, world_size):
     dist.destroy_process_group()
 
 
-def main():
-    # Exactly once, in the parent process, before any child is spawned --
-    # see the module-level note above _import_peft() for why this can't
-    # just be a module-level pip install call.
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "peft"])
+def main_launcher():
+    """Top-level kernel entry point (RANK not set in the environment yet).
+    Re-invokes THIS SAME FILE under `torch.distributed.run`, which sets
+    RANK/WORLD_SIZE/LOCAL_RANK and spawns one process per GPU -- each of
+    those re-imports this module and, finding RANK set, calls worker()
+    instead. This is the exact launch mechanism already proven on this
+    Kaggle 2xT4 environment by kaggle_kernels/qwen3-bi-encoder-lora-sft (on
+    the bi-encoder branch) -- deliberately reused rather than
+    torch.multiprocessing.spawn, which crashed here: rank 0 died with no
+    Python traceback (an OOM-kill signature -- see CLAUDE.md's own
+    documented "a real Linux OOM-kill isn't a catchable MemoryError")
+    somewhere inside PeftModel.from_pretrained, killing its TCPStore server
+    and taking rank 1 down with a "connection closed" error. Root cause
+    wasn't fully isolated before switching mechanisms -- torch.distributed.run
+    is the known-safe choice already validated in this exact environment,
+    not a guess."""
+    # v2 crashed differently: a clean traceback this time (elastic launcher
+    # surfaces it properly, unlike mp.spawn) --
+    # "ImportError: cannot import name 'EmbeddingParallel' from
+    # transformers.integrations.tensor_parallel", raised from inside
+    # PeftModel.from_pretrained -> peft's own set_peft_model_state_dict ->
+    # _maybe_shard_state_dict_for_tp. Unpinned `pip install peft` pulled
+    # PyPI's latest, which has newer tensor-parallel-aware state-dict
+    # loading code expecting a transformers class this Kaggle image's
+    # pre-installed transformers doesn't have -- plain version skew, not a
+    # launch-mechanism issue (the mp.spawn crash was almost certainly this
+    # exact same ImportError, just not surfaced cleanly). Fix: pin to
+    # exactly the transformers/peft/huggingface-hub triple
+    # qwen3-bi-encoder-lora-sft (bi-encoder branch) already proved
+    # compatible on this same Kaggle image, --no-deps --force-reinstall for
+    # the same reason that notebook uses it (pip's normal resolver would
+    # otherwise happily "fix" half the environment trying to satisfy these
+    # three exactly).
+    subprocess.check_call([
+        sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--force-reinstall",
+        "huggingface-hub==0.36.0", "transformers==4.57.6", "peft==0.17.1",
+    ])
 
     if not torch.cuda.is_available():
         raise RuntimeError("No GPU available -- this kernel needs at least 1 GPU (2 expected).")
@@ -707,13 +751,20 @@ def main():
     os.makedirs(CACHE_DIR, exist_ok=True)
     os.makedirs(SHARD_DIR, exist_ok=True)
 
-    if world_size == 1:
-        print("[MAIN] only 1 GPU visible -- running single-process (world_size=1), "
-              "still correct, just no cross-GPU parallelism.", flush=True)
-
-    mp.spawn(worker, args=(world_size,), nprocs=world_size, join=True)
+    cmd = [
+        sys.executable, "-m", "torch.distributed.run",
+        "--standalone", f"--nproc_per_node={world_size}",
+        os.path.abspath(__file__),
+    ]
+    print(f"[MAIN] launching: {' '.join(cmd)}", flush=True)
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        raise RuntimeError(f"torch.distributed.run exited with code {result.returncode}")
     print("[MAIN] all ranks finished.", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    if "RANK" in os.environ:
+        worker()
+    else:
+        main_launcher()
