@@ -231,6 +231,31 @@ is only in the local, gitignored zip) — worth promoting `run.py`/
 pattern, once it's decided which checkpoint (epoch 1, epoch 2, or a
 resumed/finished FRIDA run) should be the one tracked.
 
+### Known val ↔ leaderboard pairs
+
+macro PR-AUC on our val split vs. the contest leaderboard's Mean PR-AUC:
+
+| Variant | val macro PR-AUC | leaderboard |
+|---|---|---|
+| MiniLM baseline | 0.3710 | 0.1333 |
+| MiniLM LoRA (shipped) | 0.5282 | 0.265 |
+| FRIDA epoch 1 (submitted, passed test bench) | 0.652 | **0.3459** |
+| FRIDA epoch 2 (not submitted) | 0.675 | ? |
+| BERTA (not submitted) | 0.711 | ? |
+| Qwen3 bi-encoder + LoRA + MLP head (teammate `grigoriyyy`, `bi-encoder` branch, not submitted, **different val split** — see caveat below) | 0.726 | ? |
+
+A least-squares fit on the three *confirmed* points (all cross-encoders on
+the same seed-42 val split) — `leaderboard ≈ 0.763 × val − 0.146` (R²≈0.996
+on just those 3 points) — would put BERTA around **~0.40** and FRIDA epoch 2
+around **~0.37** leaderboard. Treat as a rough sanity check, not a
+prediction: it's a 3-point fit extrapolated past its own range, and it says
+nothing about a *bi-encoder*'s val→test generalization (different
+architecture family than every point used to fit it; its 0.726 is also on
+a private item-disjoint 5-fold split, not the seed-42 one the other rows
+share — see `kaggle_kernels/qwen3-bi-encoder-lora-sft/README.md` on the
+`bi-encoder` branch). A real second data point from a non-cross-encoder
+submission would be worth far more than refining this fit further.
+
 ## Repo layout
 
 ```
@@ -311,14 +336,31 @@ Always also extract the actual built zip to a clean dir and test *that*
 2. First real training run since the batch-size auto-probe (VRAM-target
    search before training starts) and mlflow logging were added to
    `notebooks/cross-encoder-sft-pipline (3).ipynb` — watch it once end-to-end.
-3. FRIDA/BERTA exploration (see above) — both checkpoints (FRIDA 0.674,
-   BERTA 0.7111) only exist as locally-pulled kernel output, not published
-   as Kaggle datasets; publish both. BERTA specifically needs Kaggle Secrets
-   configured on the `rays0n` kernel so its own auto-publish-checkpoint step
-   works, then resume for the remaining ~16 of 20 planned epochs. FRIDA's
-   sessions are bottlenecked by eval (~2h per full 73,131-row val pass, most
-   of a 12h session) more than by training itself — worth shrinking/
-   subsampling val between checkpoints before the next run. Both already
-   beat the shipped MiniLM checkpoint mid-training and unconverged, which
-   raises the question of whether either should become the new base
-   architecture instead of an addition to it.
+3. FRIDA/BERTA exploration (see above) — checkpoints (FRIDA 0.674, BERTA
+   0.7111, both with full optimizer/scheduler state) are being published as
+   Kaggle datasets directly by the team, not by an agent session. **Do not
+   re-run/relaunch `frida-lora-sft-epoch2` or
+   `berta-lora-sft-human-only-20-epochs` as-is** — both already spent a full
+   12h session each; re-running from scratch would waste that. Root cause
+   of why neither finished an epoch, confirmed independently by two
+   measurements (this repo's own log analysis and the team's): eval, not
+   training, dominates session time. FRIDA ran a full 73,131-row val pass
+   every ~20% of train steps (5/epoch) — each pass alone ~2h, more than the
+   training between checkpoints; BERTA's smaller val passes were cheaper but
+   still ran every ~20% of an epoch (5/epoch) for no real benefit once a
+   session reliably clears 4+ epochs anyway. Planned fix for the next
+   kernel versions (prepared, **not launched** — GPU sessions on either
+   Kaggle account need explicit go-ahead first): FRIDA evals on a fixed
+   ~25% val subsample for interim checkpoints (full val only once, after the
+   loop) plus fewer checkpoints/epoch (5→3); BERTA checkpoints/evals only at
+   epoch boundaries. Both resume from the published checkpoints'
+   optimizer+scheduler state, not a fresh LoRA init.
+4. Teammate `grigoriyyy` is running a parallel **bi-encoder** track (Qwen3-
+   Embedding-0.6B + LoRA + MLP head, `bi-encoder` git branch, not merged
+   here) that already beat every cross-encoder variant on val (0.726) in a
+   single session — see "Known val ↔ leaderboard pairs" above for the
+   caveat about its different (private, item-disjoint) val split. Worth
+   getting a real leaderboard submission from it to anchor the val→test
+   projection with a non-cross-encoder point, and getting access to
+   whatever produces `human_pairs_5fold_item_disjoint.parquet` if the team
+   wants to evaluate other variants on that split too.

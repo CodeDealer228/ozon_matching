@@ -90,6 +90,22 @@ sessions" for the exact steps.
 
 NOT launched by this commit -- explicit instruction: write and locally
 validate now, run on Kaggle later.
+
+UPDATE after the first real run: checkpoint/eval below now triggers only
+at EPOCH BOUNDARIES, not N_CHECKPOINTS_PER_EPOCH times within an epoch
+(that was this script's original design, used unchanged for the first real
+run). That run reached global_step=5016/22840 (~4.4 of 20 epochs, ~22%)
+before the 12h wall, evaluating the full 73,131-row val set 5 times/epoch
+the whole way -- real wall-clock cost even at BERTA's much smaller size,
+for no real benefit once a session already reliably clears 4+ epochs:
+losing a whole session's progress to a hard cancellation was never actually
+the risk here the way it is for FRIDA (which barely clears half an epoch
+per session -- see kaggle_kernels/frida-lora-sft-epoch3, which keeps a
+reduced-but-nonzero mid-epoch eval cadence for exactly that reason; BERTA
+doesn't need the same tradeoff). This is a resume of that same checkpoint,
+not a fresh run -- only the checkpoint trigger condition changed, nothing
+about the checkpoint format or resume path (a checkpoint saved by the
+original mid-epoch logic resumes here identically).
 """
 import os
 import sys
@@ -208,9 +224,14 @@ LR = 3e-4                # peak LR, warmup then cosine decay -- same schedule
 WEIGHT_DECAY = 0.01
 WARMUP_RATIO = 0.10
 
-N_CHECKPOINTS_PER_EPOCH = 5   # 100 checkpoints across 20 epochs -- frequent
-                                # enough that a crash never loses much more
-                                # than a fraction of an epoch's progress.
+N_CHECKPOINTS_PER_EPOCH = 5   # UNUSED as of the resume fix below -- kept only
+                                # so a diff against the original first-run
+                                # script stays easy to read. Checkpoint/eval
+                                # now happens only at epoch boundaries (see
+                                # the training loop and the module docstring
+                                # UPDATE for why: the real first run's 5x/
+                                # epoch full-val eval cost real wall-clock
+                                # for no benefit BERTA actually needed).
 
 MICRO_BATCH_SIZE = 16          # VRAM-probe starting point, not the final value.
 EVAL_MICRO_BATCH_SIZE = 32
@@ -1155,11 +1176,11 @@ def main():
     steps_per_epoch = math.ceil(len(train_loader) / grad_accum)
     total_steps = steps_per_epoch * EPOCHS
     warmup_steps = max(1, int(total_steps * WARMUP_RATIO))
-    checkpoint_interval = max(1, steps_per_epoch // N_CHECKPOINTS_PER_EPOCH)
     print(f"[TRAIN] steps/epoch: {steps_per_epoch} | total steps: {total_steps} | "
           f"warmup: {warmup_steps} ({WARMUP_RATIO:.0%}) -> cosine decay to 0")
-    print(f"[TRAIN] checkpoint every {checkpoint_interval} optimizer steps "
-          f"(~{N_CHECKPOINTS_PER_EPOCH}/epoch), publish_to_dataset={ENABLE_DATASET_PUSH and has_kaggle_creds}")
+    print(f"[TRAIN] checkpoint/eval only at epoch boundaries (was "
+          f"{N_CHECKPOINTS_PER_EPOCH}/epoch on the first real run -- see module "
+          f"docstring UPDATE), publish_to_dataset={ENABLE_DATASET_PUSH and has_kaggle_creds}")
 
     pos_weight = torch.tensor((1.0 - pos_rate) / max(pos_rate, 1e-9), device=device)
     loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -1292,8 +1313,13 @@ def main():
                     optimizer.zero_grad()
 
                     is_epoch_end = (step + 1) == len(train_loader)
-                    if grad_ok and ((global_step % checkpoint_interval == 0) or is_epoch_end):
-                        run_checkpoint(epoch + 1 if is_epoch_end else epoch, is_epoch_end=is_epoch_end)
+                    # Epoch boundaries only -- was (global_step % checkpoint_interval
+                    # == 0) or is_epoch_end (5x/epoch) on the first real run. See
+                    # module docstring UPDATE: mid-epoch eval cost real wall-clock
+                    # (full 73,131-row val pass, 5x/epoch) for no benefit BERTA
+                    # actually needed -- a session here reliably clears 4+ epochs.
+                    if grad_ok and is_epoch_end:
+                        run_checkpoint(epoch + 1, is_epoch_end=is_epoch_end)
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
