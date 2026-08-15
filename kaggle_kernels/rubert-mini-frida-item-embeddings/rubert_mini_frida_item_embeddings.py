@@ -70,7 +70,7 @@ MODEL_NAME = "sergeyzh/rubert-mini-frida"
 # hidden_dim is discovered at runtime from the loaded model's own config
 # (encoder.config.hidden_size) -- not assumed/hardcoded here.
 
-TOKEN_CACHE_HINT = "/kaggle/input/datasets/maxamsecret/rubert-mini-frida-tokenize"
+TOKEN_CACHE_HINT = "/kaggle/input/datasets/maxamsecret/rubert-mini-frida-item-tokenized/rubert_mini_frida_item_tokens"
 ITEM_MAX_LENGTH = 256  # MUST match ../rubert-mini-frida-tokenize's own ITEM_MAX_LENGTH
 
 BATCH_SIZE_START = 512

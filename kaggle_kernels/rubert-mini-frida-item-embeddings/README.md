@@ -7,9 +7,8 @@
 cross-encoder (пара кодируется совместно, per-item вектора не существует).
 Без LoRA-адаптера — базовые веса как есть.
 
-- **Kaggle:** ещё не запушен — **зависит от**
-  [`../rubert-mini-frida-tokenize`](../rubert-mini-frida-tokenize),
-  его нужно прогнать и опубликовать датасетом первым
+- **Kaggle:** https://www.kaggle.com/code/maxamsecret/rubert-mini-frida-item-embeddings-2xt4
+  (токен-кэш: [maxamsecret/rubert-mini-frida-item-tokenized](https://www.kaggle.com/datasets/maxamsecret/rubert-mini-frida-item-tokenized))
 - **Тип:** script · **GPU:** 2×T4 · **интернет:** вкл
 
 ## Зачем
@@ -44,8 +43,9 @@ TPU-инстансе (ради RAM, не ради TPU-чипов, см. его R
 нет необходимости в токенизации-на-rank0-и-расшаривании.
 
 ## Что использовалось
-- **Датасет:** `maxamsecret/rubert-mini-frida-tokenize` (токен-кэш,
-  предпосылка).
+- **Датасет:** `maxamsecret/rubert-mini-frida-item-tokenized` (токен-кэш,
+  711,304×256 — размер файлов сверен байт-в-байт с ожидаемым перед
+  запуском).
 - **Модель:** `sergeyzh/rubert-mini-frida` (тянется по интернету).
 
 ## Что на выходе
@@ -56,9 +56,7 @@ TPU-инстансе (ради RAM, не ради TPU-чипов, см. его R
 
 ## Запуск
 ```bash
-# сначала ../rubert-mini-frida-tokenize, опубликовать его output датасетом,
-# затем:
 kaggle kernels push -p kaggle_kernels/rubert-mini-frida-item-embeddings
-kaggle kernels status maxamsecret/rubert-mini-frida-item-embeddings
-kaggle kernels output maxamsecret/rubert-mini-frida-item-embeddings -p kaggle_kernels/rubert-mini-frida-item-embeddings/output
+kaggle kernels status maxamsecret/rubert-mini-frida-item-embeddings-2xt4
+kaggle kernels output maxamsecret/rubert-mini-frida-item-embeddings-2xt4 -p kaggle_kernels/rubert-mini-frida-item-embeddings/output
 ```

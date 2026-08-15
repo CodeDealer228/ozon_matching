@@ -1,5 +1,6 @@
 {
-  "id": "maxamsecret/rubert-mini-frida-item-embeddings",
+  "id": "maxamsecret/rubert-mini-frida-item-embeddings-2xt4",
+  "id_no": 130835541,
   "title": "rubert-mini-frida item embeddings (2xT4)",
   "code_file": "rubert_mini_frida_item_embeddings.py",
   "language": "python",
@@ -10,7 +11,7 @@
   "enable_internet": true,
   "keywords": [],
   "dataset_sources": [
-    "maxamsecret/rubert-mini-frida-tokenize"
+    "maxamsecret/rubert-mini-frida-item-tokenized"
   ],
   "kernel_sources": [],
   "competition_sources": [],
