@@ -1,0 +1,24 @@
+{
+  "id": "maxamsecret/frida-nan-diagnose",
+  "id_no": 130669247,
+  "title": "FRIDA NaN Diagnose",
+  "code_file": "frida-nan-diagnose.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [
+    "gpu"
+  ],
+  "dataset_sources": [
+    "maxamsecret/frida-item-tokens-human",
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "NvidiaTeslaT4"
+}

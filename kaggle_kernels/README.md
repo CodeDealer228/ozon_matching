@@ -5,8 +5,14 @@ Kaggle-кернелы проекта Ozon E-CUP 2026 (matching). Каждый к
 `items.parquet` и бесплатный GPU) и складывает результат либо в свой `output/`,
 либо в отдельный Kaggle-датасет.
 
-Все кернелы приватные, владелец `maxamsecret`. Ссылка вида
-`https://www.kaggle.com/code/maxamsecret/<slug>`.
+Кернелы разведки основной (MiniLM) архитектуры приватные, владелец
+`maxamsecret` — `https://www.kaggle.com/code/maxamsecret/<slug>`.
+
+Кернелы разведки новых энкодеров (FRIDA/BERTA, см. ниже) частично лежат на
+**втором Kaggle-аккаунте `rays0n`** — отдельная недельная GPU-квота, кернелы
+там **публичные** — `https://www.kaggle.com/code/rays0n/<slug>`. Креды обоих
+аккаунтов — вне репозитория (`maximus/kaggle creds/`); перед запуском новой
+GPU-сессии уточняй, с какого аккаунта.
 
 ## Как запускать
 ```bash
@@ -42,7 +48,26 @@ kaggle kernels output maxamsecret/<slug> -p kaggle_kernels/<name>/output   # з�
 | Кернел | Суть | GPU | Итог |
 |---|---|---|---|
 | [item-length-analysis](item-length-analysis) | распределение длин полей / доля обрезки | CPU | `attributes` режется у **47%** товаров |
-| [giga3b-quantize-benchmark](giga3b-quantize-benchmark) | проба bi-encoder Giga-3B (корректность/качество/скорость/int8) | T4/P100 | `RUNNING` (pending) |
+| [giga3b-quantize-benchmark](giga3b-quantize-benchmark) | проба bi-encoder Giga-3B (корректность/качество/скорость/int8) | T4/P100 | `COMPLETE` — результат ещё не забран в репо |
+
+### Разведка новых энкодеров — FRIDA / BERTA (LoRA SFT)
+Замена MiniLM (33M) на что-то более мощное. FRIDA — T5-энкодер 823M;
+BERTA — дистиллят FRIDA в BERT-форме, 128.3M. Оба прогона упёрлись в
+12-часовой лимит сессии не сойдясь, но уже сильно обгоняют продакшен MiniLM
+(0.5282 val). `frida-lora-sft-epoch2` и `berta-lora-sft-human-only-20-epochs`
+— на втором аккаунте (`rays0n`), остальное — на `maxamsecret`.
+
+| Кернел | Суть | GPU | Итог |
+|---|---|---|---|
+| [frida-lora-sft-human-only-10-epochs](frida-lora-sft-human-only-10-epochs) | FRIDA LoRA SFT, эпоха 1 (human-only) | 1×T4 | **0.652** val @ 60% эпохи (лимит сессии) → датасет `frida-lora`, **подтверждённый (sha256) источник** сабмита `matching-frida_lora_adapter-submit.zip`, прошедшего тестовый стенд |
+| [frida-nan-diagnose](frida-nan-diagnose) | диагностика NaN под fp16/DataParallel | 2×T4 | root cause: autocast не пробрасывается в потоки DataParallel-реплик |
+| [frida-lora-sft-epoch2](frida-lora-sft-epoch2) (аккаунт `rays0n`) | продолжение SFT FRIDA, эпоха 2 | 1×T4 | **0.674** val @ 40% эпохи (лимит сессии) — лучше эпохи 1, но ещё не сабмичен и не опубликован как датасет |
+| [berta-lora-sft-human-only-20-epochs](berta-lora-sft-human-only-20-epochs) (аккаунт `rays0n`) | BERTA LoRA SFT, план 20 эпох | 1×T4 | **0.7111** val @ 22% плана (лимит сессии) — **лучший результат проекта на сегодня** |
+
+Незавершённое в этой ветке: `frida-tokenize-items(-llm/-human)`,
+`frida-lora-batch-size-probe`, `giga3b-cross-encoder-classifier-fit` —
+вспомогательные/смежные кернелы на `maxamsecret`, ещё не затянуты в
+`kaggle_kernels/`.
 
 ## Датасеты, которые производят/потребляют кернелы
 - `maxamsecret/ozon-ecup-2026-matching` — исходные данные (вход почти всюду).
@@ -50,3 +75,6 @@ kaggle kernels output maxamsecret/<slug> -p kaggle_kernels/<name>/output   # з�
 - `maxamsecret/ozon-lora-merged-minilm` — смёрженные веса (выход merge-lora, вход timing/val-per-category).
 - `maxamsecret/ozon-lora-llm-token-cache` — токен-кэш 11.48M (выход publish-token-cache, вход continue-train).
 - `maxamsecret/ozon-lora-submission-code` — код сабмита для оффлайн timing-прогона.
+- `maxamsecret/frida-item-tokens-human` / `frida-tokenized-items-human` — тот же item-level токен-кэш FRIDA (711,304 товаров), опубликован дважды под разными именами; вход `frida-lora-sft-*`.
+- `maxamsecret/frida-lora` — чекпоинт FRIDA LoRA SFT после эпохи 1 (0.652 val); вход `frida-lora-sft-epoch2`.
+- `rays0n/berta-lora-sft-checkpoint` — заявлен в коде `berta-lora-sft-human-only-20-epochs` для кросс-сессионного резюма, но ещё не создан (публикация из кернела не сработала — нет Kaggle Secrets).
