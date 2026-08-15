@@ -1,5 +1,5 @@
 {
-  "id": "rays0n/berta-lora-sft-continue-5epoch",
+  "id": "maxamsecret/berta-lora-sft-continue-5epoch",
   "title": "BERTA LoRA SFT continue (+5 epochs)",
   "code_file": "berta-lora-sft-continue-5epoch.py",
   "language": "python",

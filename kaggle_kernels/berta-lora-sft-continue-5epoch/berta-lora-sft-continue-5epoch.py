@@ -274,7 +274,31 @@ MAX_EPOCHS_THIS_RUN = 5   # this run's own stopping point -- caps the loop,
 
 LORA_R = 16
 LORA_ALPHA = 32
-LORA_DROPOUT = 0.10
+LORA_DROPOUT = 0.15   # was 0.10 in the original run -- raised after real
+                        # evidence of overfitting starting right at the
+                        # resume point (val_loss bottomed 0.5998 @ step
+                        # 4568, then rose 3 checkpoints straight to 0.6228
+                        # @ step 5016 while train_loss kept falling;
+                        # val_macro_pr_auc peaked 0.7111 @ step 4788 then
+                        # declined to 0.7104 @ 5016 -- two independent
+                        # metrics agreeing). NOTE: this constant only takes
+                        # effect for a FRESH LoraConfig (build_fresh_model);
+                        # PeftModel.from_pretrained() on resume reconstructs
+                        # dropout from the adapter's own saved
+                        # adapter_config.json (still 0.10), NOT from this
+                        # constant -- see _reapply_lora_dropout() below,
+                        # called explicitly after resume-loading the
+                        # adapter, or this value would silently do nothing.
+CLASSIFIER_DROPOUT = 0.10   # NEW this run -- classifier head had no
+                              # dropout at all before (bare nn.Linear
+                              # straight on the pooled vector), the most
+                              # direct place to add it given the same
+                              # overfitting evidence above concentrates in
+                              # the task-specific head. Rate not specified
+                              # by name in the request that added this --
+                              # matched to the original LORA_DROPOUT's own
+                              # starting value (0.10) as the least-arbitrary
+                              # default, not independently tuned.
 LORA_TARGET_MODULES = ["query", "key", "value", "dense"]   # BERT's real Linear
                                                               # leaf names,
                                                               # verified via
@@ -294,7 +318,14 @@ LR = 3e-4                # peak LR, warmup then cosine decay -- same schedule
                            # BERTA specifically; this is a reasonable general
                            # LoRA fine-tuning rate, kept consistent with the
                            # sibling script rather than newly guessed).
-WEIGHT_DECAY = 0.01
+WEIGHT_DECAY = 0.04   # was 0.01 -- raised for the same overfitting evidence
+                        # as LORA_DROPOUT above. NOTE: optimizer.load_state_dict()
+                        # on resume overwrites param_groups (which is where
+                        # weight_decay actually lives) with whatever the
+                        # ORIGINAL run saved (0.01) -- this constant alone
+                        # would silently be a no-op for the resumed AdamW
+                        # instance without the explicit re-apply after
+                        # load_state_dict() in the resume section below.
 WARMUP_RATIO = 0.10
 
 N_CHECKPOINTS_PER_EPOCH = 5   # UNUSED as of the resume fix below -- kept only
@@ -745,6 +776,62 @@ def make_pair_loader(pairs_pd, id_to_row, category_to_id, item_input_ids_mm, ite
 # MODEL
 # =====================================================================
 
+class ClassifierHead(nn.Module):
+    """Dropout before the final Linear -- added this run after real evidence
+    of overfitting right at the resume point (see CLASSIFIER_DROPOUT's own
+    config comment for the exact numbers). A plain nn.Sequential(Dropout,
+    Linear) would also work for a FRESH run, but the checkpoint being
+    resumed here was saved by a run where the head was a bare nn.Linear
+    (state dict keys "weight"/"bias") -- Sequential renumbers children, so
+    loading that old state dict into a Sequential wrapper directly would
+    raise on key mismatch ("1.weight" expected, "weight" found). An
+    explicit .linear submodule makes the old-checkpoint load path a
+    deliberate, visible step (see load_model_from_checkpoint) instead of a
+    state_dict shape footgun."""
+
+    def __init__(self, hidden_dim, dropout_p):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout_p)
+        self.linear = nn.Linear(hidden_dim, 1)
+
+    def forward(self, pooled):
+        return self.linear(self.dropout(pooled))
+
+
+def _reapply_lora_dropout(peft_model, dropout_p):
+    """PeftModel.from_pretrained() reconstructs the LoraConfig (including
+    lora_dropout) from the adapter's OWN saved adapter_config.json, not
+    from this script's LORA_DROPOUT constant -- the checkpoint being
+    resumed here was created with lora_dropout=0.10, so simply changing
+    the constant is a silent no-op for a resumed adapter unless the
+    already-loaded LoRA layers' dropout modules are mutated directly here.
+    Dropout has no learned weights, so this is purely a forward-pass rate
+    change -- doesn't touch/invalidate anything in the loaded state dict."""
+    changed = 0
+    for module in peft_model.modules():
+        lora_dropout = getattr(module, "lora_dropout", None)
+        if lora_dropout is None:
+            continue
+        for key in lora_dropout:
+            layer = lora_dropout[key]
+            if isinstance(layer, nn.Dropout):
+                layer.p = dropout_p
+                changed += 1
+    # Also update the stored PeftConfig metadata, not just the live module
+    # tree -- otherwise save_pretrained() later this run would write a NEW
+    # adapter_config.json that still claims the OLD dropout (0.10) despite
+    # every actual nn.Dropout already running at the new rate. Cosmetic
+    # only (a future resume re-applies this function regardless of what
+    # the file says), but avoids a metadata/behavior mismatch that would
+    # otherwise persist into every checkpoint this run saves.
+    for cfg in getattr(peft_model, "peft_config", {}).values():
+        if hasattr(cfg, "lora_dropout"):
+            cfg.lora_dropout = dropout_p
+    print(f"[RESUME] LoRA dropout re-applied to {changed} layer(s): p={dropout_p} "
+          f"(both the live modules and the stored PeftConfig metadata)")
+    return changed
+
+
 class BertaCrossEncoderClassifier(nn.Module):
     """Mean pooling (mask-weighted average over last_hidden_state) -- BERTA's
     own model card explicitly replaces FRIDA's CLS pooling with mean pooling
@@ -791,7 +878,7 @@ def build_fresh_model(device):
     assert n_trainable_lora > 0, "LoRA adapter has zero trainable params -- target_modules likely matched nothing."
     print(f"[MODEL] trainable LoRA params: {n_trainable_lora:,}")
 
-    classifier_head = nn.Linear(hidden_dim, 1)
+    classifier_head = ClassifierHead(hidden_dim, CLASSIFIER_DROPOUT)
     model = BertaCrossEncoderClassifier(peft_model, classifier_head).to(device)
     return model
 
@@ -801,18 +888,41 @@ def load_model_from_checkpoint(device, adapter_dir, classifier_path):
     instead of a fresh LoRA init. is_trainable=True is NOT the default --
     this repo's own documented gotcha (CLAUDE.md / lora-llm-continue-train
     history): PeftModel.from_pretrained defaults is_trainable=False, which
-    silently freezes every LoRA weight (loss would never move, no error)."""
+    silently freezes every LoRA weight (loss would never move, no error).
+
+    Two more resume-specific fixes live here this run (both new -- see
+    their own definitions for the full why): _reapply_lora_dropout()
+    because PeftModel.from_pretrained reconstructs dropout from the
+    adapter's own saved config, not this script's LORA_DROPOUT constant;
+    and the classifier state dict is loaded into ClassifierHead.linear
+    specifically, not the whole head, because the checkpoint being resumed
+    predates the dropout wrapper (bare nn.Linear state dict keys)."""
     print(f"[RESUME] Loading base encoder {MODEL_NAME} + resuming adapter from {adapter_dir} ...")
     base_model = AutoModel.from_pretrained(MODEL_NAME)
     hidden_dim = base_model.config.hidden_size
     peft_model = PeftModel.from_pretrained(base_model, adapter_dir, is_trainable=True)
     peft_model.print_trainable_parameters()
+    _reapply_lora_dropout(peft_model, LORA_DROPOUT)
 
     n_trainable_lora = sum(p.numel() for n, p in peft_model.named_parameters() if "lora_" in n and p.requires_grad)
     assert n_trainable_lora > 0, "Resumed LoRA adapter has zero trainable params -- is_trainable didn't take."
 
-    classifier_head = nn.Linear(hidden_dim, 1)
-    classifier_head.load_state_dict(torch.load(classifier_path, map_location="cpu"))
+    classifier_head = ClassifierHead(hidden_dim, CLASSIFIER_DROPOUT)
+    raw_state = torch.load(classifier_path, map_location="cpu")
+    if "linear.weight" in raw_state:
+        # A checkpoint saved BY a run that already has this ClassifierHead
+        # wrapper (i.e. resuming a resume) -- keys already match.
+        classifier_head.load_state_dict(raw_state)
+        print("[RESUME] classifier state loaded directly (checkpoint already has the dropout wrapper)")
+    else:
+        # The actual case for THIS run: checkpoint predates ClassifierHead,
+        # saved from a bare nn.Linear (keys "weight"/"bias"). Load into the
+        # Linear submodule specifically -- loading into the whole
+        # ClassifierHead would KeyError (it expects "linear.weight"), and
+        # skipping this reload entirely would silently discard the trained
+        # classifier weights in favor of a fresh random Linear.
+        classifier_head.linear.load_state_dict(raw_state)
+        print("[RESUME] classifier state loaded into .linear (pre-dropout checkpoint format)")
     model = BertaCrossEncoderClassifier(peft_model, classifier_head).to(device)
     return model
 
@@ -1089,6 +1199,8 @@ def main():
     print(f"max_epochs_this_run:{MAX_EPOCHS_THIS_RUN}")
     print(f"lr:                 {LR}  (peak, 10% warmup then cosine decay)")
     print(f"lora r/alpha/drop:  {LORA_R}/{LORA_ALPHA}/{LORA_DROPOUT}")
+    print(f"classifier_dropout: {CLASSIFIER_DROPOUT}")
+    print(f"weight_decay:       {WEIGHT_DECAY}")
     print(f"lora target_modules:{LORA_TARGET_MODULES}")
     print(f"total_batch_size:   {TOTAL_BATCH_SIZE}")
     print(f"micro_batch_size:   {MICRO_BATCH_SIZE} (probe start)")
@@ -1295,7 +1407,17 @@ def main():
     if resumed:
         optimizer.load_state_dict(torch.load(os.path.join(checkpoint_dir, "optimizer.pt"), map_location=device))
         scheduler.load_state_dict(torch.load(os.path.join(checkpoint_dir, "scheduler.pt")))
-        print("[RESUME] optimizer + scheduler state restored")
+        # load_state_dict just overwrote param_groups (incl. weight_decay)
+        # with whatever the ORIGINAL run saved (0.01) -- re-apply the new
+        # value now, or WEIGHT_DECAY=0.04 silently never takes effect for
+        # this resumed optimizer. lr is deliberately NOT touched here: it's
+        # supposed to keep following the resumed scheduler, unlike
+        # weight_decay which is a fixed architectural choice, not a
+        # per-step schedule value.
+        for group in optimizer.param_groups:
+            group["weight_decay"] = WEIGHT_DECAY
+        print(f"[RESUME] optimizer + scheduler state restored, weight_decay re-applied: {WEIGHT_DECAY} "
+              f"(checkpoint's own saved value was overwritten by load_state_dict, then reset to this)")
 
     global_step = resume_state["global_step"]
     best_val_macro_pr_auc = resume_state["best_val_macro_pr_auc"]
@@ -1372,6 +1494,7 @@ def main():
         mlflow.log_params({
             "model": MODEL_NAME, "pair_max_length": PAIR_MAX_LENGTH, "epochs": EPOCHS, "lr": LR,
             "lora_r": LORA_R, "lora_alpha": LORA_ALPHA, "lora_dropout": LORA_DROPOUT,
+            "classifier_dropout": CLASSIFIER_DROPOUT, "weight_decay": WEIGHT_DECAY,
             "lora_target_modules": ",".join(LORA_TARGET_MODULES), "total_batch_size": total_batch_size,
             "micro_batch_size": micro_batch_size, "val_fingerprint": val_fingerprint, "resumed": resumed,
             "max_epochs_this_run": MAX_EPOCHS_THIS_RUN, "start_epoch": start_epoch, "end_epoch": end_epoch,

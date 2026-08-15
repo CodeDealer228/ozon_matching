@@ -1,13 +1,53 @@
 # berta-lora-sft-continue-5epoch
 
-**Подготовлено, не запущено.** Продолжение
+Продолжение
 [`../berta-lora-sft-human-only-20-epochs`](../berta-lora-sft-human-only-20-epochs)
-— резюмирует `maxamsecret/berta-lora-sft-5epoch` (val macro PR-AUC
-**0.7111**, `global_step=5016/22840`, ~4.4 из запланированных 20 эпох) и
-проходит ещё **5 эпох**, затем останавливается.
+— резюмирует `maxamsecret/berta-lora-sft-5epoch` и проходит ещё **5
+эпох**, затем останавливается.
 
-- **Kaggle:** ещё не запушен
-- **Тип:** script · **GPU:** 2×T4 (план, как у базового кернела) · **интернет:** вкл
+- **Kaggle:** запущен на аккаунте `maxamsecret`
+- **Тип:** script · **GPU:** 2×T4 · **интернет:** вкл
+
+## Поправка: резюмимый чекпоинт — 0.7104, не 0.7111
+Сверено по сырым mlflow-метрикам (`val_macro_pr_auc`), не по
+`train_state.json`: пик 0.7111 был на step 4788, но `save_checkpoint()`
+безусловно перезаписывает одну и ту же папку на каждом чекпоинте — то,
+что реально лежит на диске (step 5016, последний перед лимитом сессии),
+показывает **0.7104**. Разница крошечная (0.0007), но фактически резюмим
+слегка просевший чекпоинт, не пиковый.
+
+## Регуляризация — добавлена по итогам разбора реального переобучения
+Полные метрики по последним чекпоинтам (train_loss / val_loss / val AP):
+
+| step | train_loss | val_loss | val_macro_pr_auc |
+|---|---|---|---|
+| 4568 | 0.591 | **0.600** (мин.) | 0.709 |
+| 4788 | 0.568 | 0.621 | **0.7111** (пик) |
+| 5016 | 0.571 | 0.623 | 0.7104 |
+
+`val_loss` растёт 3 чекпоинта подряд от минимума, `train_loss` падает —
+две независимые метрики согласны, это не шум. По итогам добавлено (в
+коде, с сохранением совместимости с существующим чекпоинтом):
+
+- **Dropout перед головой классификатора** (`ClassifierHead`, p=0.10) —
+  головы раньше не было вообще (голый `nn.Linear`). Старый `classifier.pt`
+  грузится в `.linear` конкретно, не в весь модуль — иначе `load_state_dict`
+  упал бы на несовпадении ключей (`weight`/`bias` vs `linear.weight`/`linear.bias`).
+- **`LORA_DROPOUT` 0.10→0.15** — при резюме `PeftModel.from_pretrained`
+  восстанавливает dropout из `adapter_config.json` адаптера, а не из
+  константы скрипта; добавлена `_reapply_lora_dropout()`, которая явно
+  переписывает `p` на уже загруженных LoRA-слоях (и метаданные
+  `PeftConfig`, чтобы новый `adapter_config.json` при сохранении не
+  расходился с реальным поведением).
+- **`WEIGHT_DECAY` 0.01→0.04** — `optimizer.load_state_dict()` перетирает
+  `param_groups` (включая `weight_decay`) сохранённым старым значением;
+  переприменяется явно **после** загрузки состояния оптимизатора
+  (momentum/variance буферы не трогаются — только скалярный
+  гиперпараметр). `lr` намеренно не трогается — он должен продолжать
+  идти по резюмнутому scheduler'у.
+
+Домайненные hard negatives — осознанно не в этом прогоне, отдельная
+задача на потом.
 
 ## Найденный баг — исправлен здесь, не косметика
 В `train_state.json` реального чекпоинта: `"completed_epochs": 0` при
@@ -56,16 +96,9 @@ if is_epoch_end else start_epoch` — раз `is_epoch_end` ни разу не
 потребовал бы более сложного чекпоинтинга (сохранять позицию в
 DataLoader) — не запрошено, не делалось.
 
-## Что нужно решить перед запуском
-1. **Аккаунт.** `kernel-metadata.json` сейчас указывает `rays0n` (та же
-   цепочка, что у базового кернела) — чекпоинт-источник на `maxamsecret`,
-   монтирование между аккаунтами работает нормально (публичные/доступные
-   датасеты), но стоит явно подтвердить.
-2. Явное «поехали».
-
-## Запуск (когда будет добро)
+## Запуск
 ```bash
 kaggle kernels push -p kaggle_kernels/berta-lora-sft-continue-5epoch
-kaggle kernels status rays0n/berta-lora-sft-continue-5epoch
-kaggle kernels output rays0n/berta-lora-sft-continue-5epoch -p kaggle_kernels/berta-lora-sft-continue-5epoch/output
+kaggle kernels status maxamsecret/berta-lora-sft-continue-5epoch
+kaggle kernels output maxamsecret/berta-lora-sft-continue-5epoch -p kaggle_kernels/berta-lora-sft-continue-5epoch/output
 ```
