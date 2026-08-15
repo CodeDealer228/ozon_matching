@@ -53,20 +53,23 @@ train тратится 0.8 датасета за эпоху, а на eval — в
   комментарий в коде).
 
 ## Предпосылка
-Ожидает, что чекпоинт epoch2 (val 0.67397 @ step 458/1143, **с** optimizer/
-scheduler state) опубликован как **новая версия того же датасета**
-`maxamsecret/frida-lora` (та же логика, что уже resuméила epoch1→epoch2) —
-таково допущение в `kernel-metadata.json`. Если он в итоге опубликован под
-другим именем — поправить `dataset_sources` перед пушем; сам код ищет по
-содержимому (`adapter_config.json` где угодно в `/kaggle/input`), не по
-имени.
+Чекпоинт epoch2 (val 0.67397 @ step 458/1143, с optimizer/scheduler state)
+опубликован — как отдельный датасет
+[maxamsecret/frida-lora-sft-epoch2-40](https://www.kaggle.com/datasets/maxamsecret/frida-lora-sft-epoch2-40),
+не как новая версия `frida-lora` (версионирование не удалось —
+`kaggle datasets version` возвращал `Incompatible Dataset Type` на всех
+режимах `-r`, разбор в [`../frida-lora-sft-epoch2`](../frida-lora-sft-epoch2)).
+`kernel-metadata.json` уже указывает на `frida-lora-sft-epoch2-40` в
+`dataset_sources`. Код резюма ищет по содержимому (`adapter_config.json`
+где угодно в `/kaggle/input`), не по имени датасета — если чекпоинт ещё раз
+переедет, менять нужно только `dataset_sources`.
 
 `kernel-metadata.json` сейчас указывает аккаунт `rays0n` (продолжение той
 же цепочки, что и epoch2) — сменить на `maxamsecret`, если решите иначе.
 
 ## Что нужно проверить перед запуском
-1. Чекпоинт epoch2 опубликован (см. вопрос пользователю в чате).
-2. `dataset_sources` действительно указывает на актуальный датасет.
+1. Чекпоинт epoch2 опубликован — готово (`frida-lora-sft-epoch2-40`).
+2. `dataset_sources` указывает на актуальный датасет — готово.
 3. Выбран аккаунт для сессии.
 4. `kaggle kernels push -p kaggle_kernels/frida-lora-sft-epoch3` — только
-   после 1-3.
+   после явного «поехали».

@@ -79,20 +79,20 @@ micro=256, eval micro=512 — отдельный auto-probe для eval, т.к. 
 очевидный следующий шаг.
 
 ## Возобновление между сессиями
-Опубликовать [`output/lora_berta_sft/checkpoint/`](output/lora_berta_sft/checkpoint)
-как датасет `rays0n/berta-lora-sft-checkpoint` (или новую версию, если он
-уже существует), добавить его в `dataset_sources` кернела и перезапустить —
-`_find_checkpoint_dir()` подхватит `train_state.json` автоматически и
-продолжит с `global_step=5016`. Чтобы скрипт публиковал чекпоинт
-автоматически на будущих запусках, в настройках кернела нужно включить
-Kaggle Secrets (Add-ons → Secrets → `KAGGLE_USERNAME`/`KAGGLE_KEY`).
+Чекпоинт опубликован — датасет
+[maxamsecret/berta-lora-sft-5epoch](https://www.kaggle.com/datasets/maxamsecret/berta-lora-sft-5epoch)
+(не `rays0n/berta-lora-sft-checkpoint`, как ожидал сам скрипт — публикация
+из кернела не сработала, датасет создан вручную на другом аккаунте).
+`kernel-metadata.json` уже указывает на `berta-lora-sft-5epoch` в
+`dataset_sources` — при следующем пуше `_find_checkpoint_dir()` подхватит
+`train_state.json` из него автоматически и продолжит с `global_step=5016`.
 
-`kernel-metadata.json` уже содержит `rays0n/berta-lora-sft-checkpoint` в
-`dataset_sources` (ровно тот id, что зашит в `CHECKPOINT_DATASET_ID` самого
-скрипта) — **если чекпоинт в итоге опубликован под другим именем/id,
-поправить `dataset_sources` перед пушем**; сам `_find_checkpoint_dir()`
-ищет по содержимому (`train_state.json`), а не по имени датасета, так что
-имя важно только для `dataset_sources`, не для логики резюма.
+`CHECKPOINT_DATASET_ID` внутри самого скрипта всё ещё `rays0n/berta-lora-sft-checkpoint`
+(влияет только на опциональную авто-публикацию чекпоинта из кернела, не на
+резюм — резюм ищет по содержимому, не по имени). Если когда-нибудь включите
+Kaggle Secrets и авто-публикацию, стоит либо поменять эту константу на
+`maxamsecret/berta-lora-sft-5epoch`, либо публиковать новой веткой отдельно
+на `rays0n` — на усмотрение.
 
 ## Фикс: eval только в конце эпохи (не запущено)
 Первый реальный прогон делал eval (полный 73,131-пара val) **5 раз за
@@ -108,5 +108,5 @@ Kaggle Secrets (Add-ons → Secrets → `KAGGLE_USERNAME`/`KAGGLE_KEY`).
 
 **Не запускалось** — правки внесены в существующий кернел (это будет новая
 версия того же `rays0n/berta-lora-sft-human-only-20-epochs`, не новый
-кернел), но `kaggle kernels push` не выполнялся. Перед запуском: опубликовать
-чекпоинт (см. выше) и явно решить, с какого аккаунта запускать сессию.
+кернел), но `kaggle kernels push` не выполнялся. Чекпоинт уже подключён
+(см. выше) — осталось явно решить, с какого аккаунта запускать сессию.

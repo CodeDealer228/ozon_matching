@@ -12,7 +12,7 @@
   "keywords": [],
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
-    "rays0n/berta-lora-sft-checkpoint"
+    "maxamsecret/berta-lora-sft-5epoch"
   ],
   "kernel_sources": [],
   "competition_sources": [],

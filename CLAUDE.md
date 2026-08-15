@@ -193,11 +193,24 @@ Both scripts also apply the already-known "PEFT `is_trainable=True`" and
 "`del logits, loss` before `continue` on a skipped NaN microbatch" lessons
 from the MiniLM continue-train history instead of rediscovering them.
 
-Neither checkpoint is fully trained or published as a durable Kaggle
-dataset: FRIDA epoch 2's best (0.674) and BERTA's best (0.7111, with full
-optimizer/scheduler state) currently exist only as `kaggle kernels
-output`-recovered files under `kaggle_kernels/*/output/` (gitignored,
-local-only, pulled during this session).
+Both checkpoints are now published as Kaggle datasets (by the team, not
+from a kernel's own auto-publish step): `maxamsecret/frida-lora-sft-epoch2-40`
+(FRIDA epoch 2, 0.674) and `maxamsecret/berta-lora-sft-5epoch` (BERTA,
+0.7111, with full optimizer/scheduler state). Neither ended up as a new
+*version* of the older canonical dataset it continues (`maxamsecret/frida-lora`
+for FRIDA, `rays0n/berta-lora-sft-checkpoint` for BERTA, which was never
+actually created) -- `kaggle datasets version` returned `Incompatible
+Dataset Type` for every `-r` mode tried (skip/zip/tar) against
+`frida-lora`, uploading real bandwidth each time without ever committing;
+the older datasets are unchanged. `kaggle_kernels/frida-lora-sft-epoch3`
+and `kaggle_kernels/berta-lora-sft-human-only-20-epochs`'s
+`kernel-metadata.json` both point `dataset_sources` at the actual new
+dataset names now (not the old ones) -- if a checkpoint ever needs to move
+again, only `dataset_sources` needs updating, since the resume code
+searches `/kaggle/input` by file content (`adapter_config.json` /
+`train_state.json`), not by dataset name. The bi-encoder checkpoint is
+also published, as `maxamsecret/qwen-0-6-lora-sft-1epoch` (no prior
+dataset existed for it -- nothing to version).
 
 **A working FRIDA submission already passed the contest's external test
 bench**: `matching-frida_lora_adapter-submit.zip` (downloaded locally to
@@ -336,25 +349,21 @@ Always also extract the actual built zip to a clean dir and test *that*
 2. First real training run since the batch-size auto-probe (VRAM-target
    search before training starts) and mlflow logging were added to
    `notebooks/cross-encoder-sft-pipline (3).ipynb` — watch it once end-to-end.
-3. FRIDA/BERTA exploration (see above) — checkpoints (FRIDA 0.674, BERTA
-   0.7111, both with full optimizer/scheduler state) are being published as
-   Kaggle datasets directly by the team, not by an agent session. **Do not
-   re-run/relaunch `frida-lora-sft-epoch2` or
-   `berta-lora-sft-human-only-20-epochs` as-is** — both already spent a full
-   12h session each; re-running from scratch would waste that. Root cause
-   of why neither finished an epoch, confirmed independently by two
-   measurements (this repo's own log analysis and the team's): eval, not
-   training, dominates session time. FRIDA ran a full 73,131-row val pass
-   every ~20% of train steps (5/epoch) — each pass alone ~2h, more than the
-   training between checkpoints; BERTA's smaller val passes were cheaper but
-   still ran every ~20% of an epoch (5/epoch) for no real benefit once a
-   session reliably clears 4+ epochs anyway. Planned fix for the next
-   kernel versions (prepared, **not launched** — GPU sessions on either
-   Kaggle account need explicit go-ahead first): FRIDA evals on a fixed
-   ~25% val subsample for interim checkpoints (full val only once, after the
-   loop) plus fewer checkpoints/epoch (5→3); BERTA checkpoints/evals only at
-   epoch boundaries. Both resume from the published checkpoints'
-   optimizer+scheduler state, not a fresh LoRA init.
+3. FRIDA/BERTA exploration (see above) — checkpoints published (FRIDA
+   0.674 as `maxamsecret/frida-lora-sft-epoch2-40`, BERTA 0.7111 as
+   `maxamsecret/berta-lora-sft-5epoch`, both with full optimizer/scheduler
+   state; neither became a version of the older canonical dataset it
+   continues -- Kaggle rejected that, see above). `kaggle_kernels/
+   frida-lora-sft-epoch3` and `berta-lora-sft-human-only-20-epochs` are
+   wired to resume from them and have the eval-bottleneck fix applied
+   (FRIDA: fixed ~25% val subsample for interim checkpoints + fewer
+   checkpoints/epoch, 5→3, full val only once at the end; BERTA:
+   checkpoint/eval only at epoch boundaries) -- **prepared, not launched**.
+   GPU sessions on either Kaggle account still need explicit go-ahead
+   before pushing either. **Do not re-run/relaunch the ORIGINAL
+   `frida-lora-sft-epoch2` or `berta-lora-sft-human-only-20-epochs` kernels
+   as they were** — both already spent a full 12h session each on the
+   pre-fix code; that's what the checkpoints above already paid for.
 4. Teammate `grigoriyyy` is running a parallel **bi-encoder** track (Qwen3-
    Embedding-0.6B + LoRA + MLP head, `bi-encoder` git branch, not merged
    here) that already beat every cross-encoder variant on val (0.726) in a

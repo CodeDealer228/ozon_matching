@@ -10,7 +10,7 @@
   "enable_internet": true,
   "keywords": [],
   "dataset_sources": [
-    "maxamsecret/frida-lora",
+    "maxamsecret/frida-lora-sft-epoch2-40",
     "maxamsecret/frida-tokenized-items-human",
     "maxamsecret/ozon-ecup-2026-matching"
   ],

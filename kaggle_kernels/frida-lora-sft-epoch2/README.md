@@ -58,8 +58,16 @@ eval**: полный проход по 73,131 val-парам при `EVAL_BATCH_
 
 Лучший чекпоинт (**0.67397 @ 40%**, `lora_frida_sft/best/`: адаптер +
 classifier + optimizer + scheduler + tokenizer) восстановлен из output
-кернела и лежит в [`output/lora_frida_sft/best/`](output/lora_frida_sft/best)
-— **пока не опубликован как Kaggle-датасет**.
+кернела и опубликован как отдельный датасет
+[`maxamsecret/frida-lora-sft-epoch2-40`](https://www.kaggle.com/datasets/maxamsecret/frida-lora-sft-epoch2-40)
+(попытка сделать его новой **версией** `maxamsecret/frida-lora` не удалась —
+`kaggle datasets version` вернул `Incompatible Dataset Type` что с `-r zip`,
+что с `-r tar`, что вовсе без `-r` (папки просто пропускались); похоже,
+исходный `frida-lora` создан не через CLI-версионирование, а как-то иначе,
+и API не даёт примешать к нему новую версию с вложенными папками таким
+путём — датасет остался нетронутым, `v1` (эпоха 1, 0.652) там и лежит).
+[`../frida-lora-sft-epoch3`](../frida-lora-sft-epoch3) резюмится именно от
+`frida-lora-sft-epoch2-40`, не от `frida-lora`.
 
 > Проверено байт-в-байт (`sha256` адаптера и `classifier.pt`) против
 > `submits/matching-frida_lora_adapter-submit/`: сабмит,

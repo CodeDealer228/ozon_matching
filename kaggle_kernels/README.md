@@ -59,11 +59,11 @@ BERTA — дистиллят FRIDA в BERT-форме, 128.3M. Оба прого
 
 | Кернел | Суть | GPU | Итог |
 |---|---|---|---|
-| [frida-lora-sft-human-only-10-epochs](frida-lora-sft-human-only-10-epochs) | FRIDA LoRA SFT, эпоха 1 (human-only) | 1×T4 | **0.652** val @ 60% эпохи (лимит сессии) → датасет `frida-lora`, **подтверждённый (sha256) источник** сабмита `matching-frida_lora_adapter-submit.zip`, прошедшего тестовый стенд |
+| [frida-lora-sft-human-only-10-epochs](frida-lora-sft-human-only-10-epochs) | FRIDA LoRA SFT, эпоха 1 (human-only) | 1×T4 | **0.652** val / **0.3459 LB** @ 60% эпохи (лимит сессии) → датасет `frida-lora`, **подтверждённый (sha256) источник** сабмита `matching-frida_lora_adapter-submit.zip`, прошедшего тестовый стенд |
 | [frida-nan-diagnose](frida-nan-diagnose) | диагностика NaN под fp16/DataParallel | 2×T4 | root cause: autocast не пробрасывается в потоки DataParallel-реплик |
-| [frida-lora-sft-epoch2](frida-lora-sft-epoch2) (аккаунт `rays0n`) | продолжение SFT FRIDA, эпоха 2 | 1×T4 | **0.674** val @ 40% эпохи (лимит сессии) — лучше эпохи 1, но ещё не сабмичен и не опубликован как датасет |
-| [berta-lora-sft-human-only-20-epochs](berta-lora-sft-human-only-20-epochs) (аккаунт `rays0n`) | BERTA LoRA SFT, план 20 эпох | 1×T4 | **0.7111** val @ 22% плана (лимит сессии) — **лучший результат проекта на сегодня**; правка eval-only-at-epoch-end подготовлена, не запущена |
-| [frida-lora-sft-epoch3](frida-lora-sft-epoch3) (аккаунт `rays0n`, план) | продолжение epoch2 с фиксом eval (сабсэмпл 25% + 3/эпоху вместо 5) | 1×T4 | **подготовлено, не запущено** — ждёт публикации чекпоинта epoch2 и добро на GPU-сессию |
+| [frida-lora-sft-epoch2](frida-lora-sft-epoch2) (аккаунт `rays0n`) | продолжение SFT FRIDA, эпоха 2 | 1×T4 | **0.674** val @ 40% эпохи (лимит сессии) — лучше эпохи 1, ещё не сабмичен; чекпоинт опубликован отдельным датасетом `frida-lora-sft-epoch2-40` (версией `frida-lora` стать не смог, см. его README) |
+| [berta-lora-sft-human-only-20-epochs](berta-lora-sft-human-only-20-epochs) (аккаунт `rays0n`) | BERTA LoRA SFT, план 20 эпох | 1×T4 | **0.7111** val @ 22% плана (лимит сессии) — **лучший результат проекта на сегодня**; чекпоинт опубликован (`berta-lora-sft-5epoch`), правка eval-only-at-epoch-end подготовлена, не запущена |
+| [frida-lora-sft-epoch3](frida-lora-sft-epoch3) (аккаунт `rays0n`, план) | продолжение epoch2 с фиксом eval (сабсэмпл 25% + 3/эпоху вместо 5) | 1×T4 | **подготовлено, не запущено** — чекпоинт подключён, ждёт добро на GPU-сессию |
 
 И FRIDA (`frida-lora-sft-epoch2`), и BERTA упёрлись в 12-часовой лимит
 **из-за eval, не обучения**: полный проход по 73,131 val-парам съедал
@@ -72,6 +72,11 @@ BERTA — дистиллят FRIDA в BERT-форме, 128.3M. Оба прого
 кернела дальше **не перезапускаются с нуля** — каждый уже сжёг полную
 сессию и дал реальный прогресс; продолжение — через новые
 кернелы/версии, которые резюмят сохранённое состояние optimizer+adapter.
+Оба чекпоинта опубликованы командой как отдельные Kaggle-датасеты
+(`maxamsecret/frida-lora-sft-epoch2-40`, `maxamsecret/berta-lora-sft-5epoch`)
+— попытка сделать их версиями старых датасетов (`frida-lora`,
+`rays0n/berta-lora-sft-checkpoint`) через `kaggle datasets version`
+не удалась (`Incompatible Dataset Type`), так и остались отдельными.
 
 Незавершённое в этой ветке: `frida-tokenize-items(-llm/-human)`,
 `frida-lora-batch-size-probe`, `giga3b-cross-encoder-classifier-fit` —
