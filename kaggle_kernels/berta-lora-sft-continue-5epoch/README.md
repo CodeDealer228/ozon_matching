@@ -99,6 +99,6 @@ DataLoader) — не запрошено, не делалось.
 ## Запуск
 ```bash
 kaggle kernels push -p kaggle_kernels/berta-lora-sft-continue-5epoch
-kaggle kernels status maxamsecret/berta-lora-sft-continue-5epoch
-kaggle kernels output maxamsecret/berta-lora-sft-continue-5epoch -p kaggle_kernels/berta-lora-sft-continue-5epoch/output
+kaggle kernels status maxamsecret/berta-lora-sft-continue-5-epochs
+kaggle kernels output maxamsecret/berta-lora-sft-continue-5-epochs -p kaggle_kernels/berta-lora-sft-continue-5epoch/output
 ```
