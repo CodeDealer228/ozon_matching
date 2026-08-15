@@ -44,6 +44,11 @@ kaggle kernels output maxamsecret/<slug> -p kaggle_kernels/<name>/output   # з�
 | [item-length-analysis](item-length-analysis) | распределение длин полей / доля обрезки | CPU | `attributes` режется у **47%** товаров |
 | [giga3b-quantize-benchmark](giga3b-quantize-benchmark) | проба bi-encoder Giga-3B (корректность/качество/скорость/int8) | T4/P100 | `RUNNING` (pending) |
 
+### Bi-encoder ветка (тиммейт, аккаунт `grigoriyyy`)
+| Кернел | Суть | GPU | Итог |
+|---|---|---|---|
+| [qwen3-bi-encoder-lora-sft](qwen3-bi-encoder-lora-sft) | Qwen3-Embedding-0.6B + LoRA + симметричная MLP-голова | 2×T4 (DDP) | **macro_ap_mlp 0.726** за 1 сессию — лучший val-результат проекта на сегодня (но на другом, item-disjoint 5-fold сплите — не 1:1 сравнимо с остальным) |
+
 ## Датасеты, которые производят/потребляют кернелы
 - `maxamsecret/ozon-ecup-2026-matching` — исходные данные (вход почти всюду).
 - `maxamsecret/ozon-lora-minilm-finetuned` — PEFT-адаптер (выход cross-encoder-sft, вход merge/continue-train).
