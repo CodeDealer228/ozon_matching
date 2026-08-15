@@ -43,6 +43,12 @@ kaggle_kernels/*/pulled/
 # testing, sampled parquet files, prediction CSVs from smoke tests).
 artifacts/
 
+# Kaggle API credentials -- real API keys, never commit. Root-anchored so
+# this doesn't touch kaggle_kernels/*/kernel-metadata.json or the tracked
+# .claude/skills/kaggle/ skill.
+/kaggle.json
+/kaggle*.json
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

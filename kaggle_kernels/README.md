@@ -86,12 +86,22 @@ BERTA — дистиллят FRIDA в BERT-форме, 128.3M. Оба прого
 ### Голова поверх кэша + майнинг негативов (в работе)
 Идея: кэшировать pooled-выход LoRA-BERTA по всем парам один раз, дальше
 экспериментировать с архитектурой головы (MLP вместо `Linear`) без
-GPU-энкодера в цикле. Плюс — понять, какие негативы стоит домайнить.
+GPU-энкодера в цикле. Плюс — понять, какие негативы стоит домайнить: не
+просто анализ FP, а воспроизведение retrieval-логики организаторов через
+recall@k (независимо от target — сам факт присутствия пары в
+`matches.parquet` уже свидетельство, что retrieval счёл её кандидатом),
+дальше топ-K соседей за вычетом размеченных — hard negatives по
+построению.
 
 | Кернел | Суть | GPU | Итог |
 |---|---|---|---|
-| [berta-lora-pair-cache](berta-lora-pair-cache) | кэш pooled-представлений (768-мерных) по всем 365,654 парам, train/val отдельно | 2×T4 | **в процессе** (v3, после 2 реальных багфиксов — см. README) |
-| [fasttext-category-similarity-probe](fasttext-category-similarity-probe) | отделяет ли дешёвый лексический сигнал (fastText/TF-IDF) позитивы от негативов внутри категории Аптека, без всякой модели | CPU | **готово за 76.8с** — TF-IDF (AP 0.166) обыграл fastText (AP 0.150) и по качеству, и по цене; оба слабые (лифт ×2 над базой) — Аптека сложна не только низким pos_rate, но и лексической похожестью негативов на позитивы |
+| [berta-lora-pair-cache](berta-lora-pair-cache) | кэш pooled-представлений (768-мерных) по всем 365,654 парам, train/val отдельно | 2×T4 | **отменено пользователем на v4** (после OOM-фикса токенизации, до завершения) |
+| [fasttext-category-similarity-probe](fasttext-category-similarity-probe) | отделяет ли дешёвый лексический сигнал (fastText/TF-IDF) позитивы от негативов внутри категории Аптека, без всякой модели | CPU | **готово за 76.8с** — TF-IDF (AP 0.166) обыграл fastText (AP 0.150) и по качеству, и по цене; оба слабые (лифт ×2 над базой) |
+| [retrieval-recall-hard-negative-mining](retrieval-recall-hard-negative-mining) | recall@k TF-IDF-ретривала против размеченных пар, все 20 категорий | CPU | **готово** — recall@10 от 0.015 (Ювелирные изделия) до 0.35 (Хобби и творчество) — далеко от цели ~0.9 |
+| [rubert-mini-frida-tokenize](rubert-mini-frida-tokenize) | токенизация 711,304 товаров под `rubert-mini-frida`, TPU (ради RAM) | TPU v5e-8 | **готово**, датасет `maxamsecret/rubert-mini-frida-item-tokenized` |
+| [rubert-mini-frida-item-embeddings](rubert-mini-frida-item-embeddings) | per-item bi-encoder эмбеддинги (711,304×312) на generic `sergeyzh/rubert-mini-frida` | 2×T4 | **готово**, датасет `maxamsecret/rubert-mini-frida-item-embeddings` |
+| [rubert-mini-frida-recall-mining](rubert-mini-frida-recall-mining) | тот же recall@k, но на реальных эмбеддингах вместо TF-IDF | CPU | **готово за 573.7с** — macro recall@1=0.089, recall@10=**0.276** (лучше TF-IDF в 1.5-3× по большинству категорий, но всё ещё далеко от ~0.9); Ювелирные изделия/Обувь/Одежда стабильно самые сложные |
+| [berta-lora-item-embeddings](berta-lora-item-embeddings) | то же, но task-tuned `sergeyzh/BERTA`+LoRA (`berta-lora-sft-5epoch`, val 0.7111) вместо generic модели — переиспользует уже готовый item-token-кэш из того же датасета | 2×T4 | **подготовлено, не запущено** |
 
 ### Bi-encoder ветка (отдельная git-ветка `bi-encoder`, не здесь)
 Параллельная работа тиммейта (`grigoriyyy`) над bi-encoder архитектурой
