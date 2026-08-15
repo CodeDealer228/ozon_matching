@@ -66,7 +66,14 @@ a guess that it'll avoid the same issue.
 Sequential model loading across ranks (rank 0 first, then rank 1, with a
 barrier between) -- same lesson already applied in this project's other
 multi-GPU kernels (avoids two workers materializing the same checkpoint
-simultaneously).
+simultaneously). The SAME principle now also applies to item tokenization
+(see ITEM_TOKEN_CACHE_DIR below): v3 OOM'd (SIGKILL, both ranks, after
+~1.8h) tokenizing all 711,304 items via one un-chunked in-RAM
+tokenizer() call, done REDUNDANTLY on both ranks at once -- v4 tokenizes
+once, on rank 0 only, chunked and RAM-adaptive straight to a memmap file
+(mirrors berta-lora-sft-human-only-20-epochs's own proven
+tokenize_items_to_memmap, which this script's v1-v3 had ad-hoc-simplified
+away instead of reusing); rank 1 just memmaps the result after a barrier.
 
 Data split (contiguous halves per rank, not interleaved): each pair's
 global row index is deterministic, so writing per-rank shards to
@@ -79,11 +86,13 @@ shard file).
 import os
 import sys
 import gc
+import ctypes
 import json
 import math
 import shutil
 import hashlib
 import subprocess
+import time
 
 import numpy as np
 import pandas as pd
@@ -164,11 +173,36 @@ PROBE_ROUND_TO = 8
 WORKING_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 SHARD_DIR = os.path.join(WORKING_DIR, "shards")
 CACHE_DIR = os.path.join(WORKING_DIR, "berta_lora_pair_cache")
+ITEM_TOKEN_CACHE_DIR = os.path.join(WORKING_DIR, "berta_item_tokens")
+
+# v3 OOM'd (SIGKILL, both ranks, after ~1.8h) tokenizing all 711,304 items
+# via ONE tokenizer() call held fully in RAM -- AND doing that redundantly
+# on both ranks at once. berta-lora-sft-human-only-20-epochs's own training
+# script already solved exactly this problem (its own module docstring:
+# "a real Linux OOM-kill isn't a catchable MemoryError") with chunked,
+# RAM-adaptive tokenization straight to a memmap file -- reused verbatim
+# here instead of the ad-hoc single-call version that just OOM'd. Also:
+# only rank 0 tokenizes now (see worker()), not both ranks redundantly --
+# rank 1 just memmaps rank 0's output after a barrier.
+TOKENIZE_CHUNK_SIZE_START = 20_000
+TOKENIZE_CHUNK_SIZE_MIN = 2_000
+TOKENIZE_CHUNK_SIZE_MAX = 200_000
+RAM_TARGET_GB = 16.0
+RAM_HARD_GB = 24.0
+RAM_GROWTH_FACTOR = 1.3
+RAM_SHRINK_FACTOR = 0.5
 
 
 # =====================================================================
 # SMALL UTILITIES
 # =====================================================================
+
+def _malloc_trim():
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
 
 def _current_rss_gb():
     try:
@@ -249,34 +283,94 @@ def _find_token_pattern_starts(arr, pattern):
     return starts
 
 
-def build_item_cache(tokenizer, rank):
+def tokenize_items_to_memmap(tokenizer, out_dir, rank):
+    """Rank-0-ONLY, chunked, RAM-adaptive tokenization straight to memmap
+    files -- see the ITEM_TOKEN_CACHE_DIR module-level comment for why
+    (v3 OOM'd doing this as one giant in-RAM tokenizer() call, redundantly
+    on both ranks at once). Mirrors berta-lora-sft-human-only-20-epochs's
+    own tokenize_items_to_memmap exactly, adapted to write ids.bin too
+    (that script kept ids as a separate in-memory array since it never
+    needed a second process to independently rediscover the same mapping;
+    here rank 1 needs to reconstruct id_to_row from disk, so ids.bin makes
+    that a plain memmap read instead of re-deriving anything)."""
     items_path = _find_dataset_file(ITEMS_HUMAN_PATH_HINT, "items_human.parquet")
     _log(rank, "CACHE", f"tokenizing items from {items_path} ...")
     items = build_item_texts(pl.scan_parquet(items_path))
-    n_items = items.height
-    all_ids = items.get_column("id").to_numpy().copy()
-    all_texts = [PREFIX + t for t in items.get_column("text").to_list()]
+    n = items.height
+    all_ids = items.get_column("id").to_numpy().astype(np.int64)
+    all_texts = items.get_column("text").to_list()
     del items
     gc.collect()
 
-    enc = tokenizer(
-        all_texts, add_special_tokens=False, padding="max_length",
-        truncation=True, max_length=ITEM_MAX_LENGTH, return_tensors="np",
-    )
-    item_input_ids = enc["input_ids"].astype(np.int32)
-    item_attention_mask = enc["attention_mask"].astype(np.int8)
-    del all_texts, enc
+    os.makedirs(out_dir, exist_ok=True)
+    ids_mm = np.memmap(os.path.join(out_dir, "ids.bin"), dtype=np.int64, mode="w+", shape=(n,))
+    input_ids_mm = np.memmap(os.path.join(out_dir, "input_ids.bin"), dtype=np.int32, mode="w+",
+                              shape=(n, ITEM_MAX_LENGTH))
+    attn_mm = np.memmap(os.path.join(out_dir, "attention_mask.bin"), dtype=np.int8, mode="w+",
+                         shape=(n, ITEM_MAX_LENGTH))
+    ids_mm[:] = all_ids
+
+    chunk_size = TOKENIZE_CHUNK_SIZE_START
+    written = 0
+    t0 = time.perf_counter()
+    while written < n:
+        cur = min(chunk_size, n - written)
+        chunk_texts = [PREFIX + t for t in all_texts[written:written + cur]]
+
+        enc = tokenizer(
+            chunk_texts, add_special_tokens=False, padding="max_length",
+            truncation=True, max_length=ITEM_MAX_LENGTH, return_tensors="np",
+        )
+        input_ids_mm[written:written + cur] = enc["input_ids"].astype(np.int32)
+        attn_mm[written:written + cur] = enc["attention_mask"].astype(np.int8)
+
+        written += cur
+        gc.collect()
+        _malloc_trim()
+        rss_gb = _current_rss_gb()
+        if rss_gb is not None:
+            if rss_gb < RAM_TARGET_GB:
+                chunk_size = min(TOKENIZE_CHUNK_SIZE_MAX, int(chunk_size * RAM_GROWTH_FACTOR))
+            elif rss_gb > RAM_HARD_GB:
+                chunk_size = max(TOKENIZE_CHUNK_SIZE_MIN, int(chunk_size * RAM_SHRINK_FACTOR))
+        if written % (TOKENIZE_CHUNK_SIZE_START * 5) < chunk_size:
+            rss_part = f"rss={rss_gb:.2f}GB, " if rss_gb is not None else ""
+            elapsed = time.perf_counter() - t0
+            _log(rank, "CACHE", f"tokenized {written:,}/{n:,} "
+                                 f"({rss_part}next_chunk={chunk_size}, {elapsed:.0f}s elapsed)")
+
+    for mm in (ids_mm, input_ids_mm, attn_mm):
+        mm.flush()
+    del ids_mm, input_ids_mm, attn_mm
     gc.collect()
+    _malloc_trim()
+    with open(os.path.join(out_dir, "cache_meta.json"), "w") as f:
+        json.dump({"n_items": n, "max_length": ITEM_MAX_LENGTH}, f)
+    _log(rank, "CACHE", f"tokenization done, {n:,} items, {time.perf_counter() - t0:.0f}s total")
+
+
+def load_item_cache_from_memmap(cache_dir, rank):
+    """Cheap: just opens the memmap files rank 0 already wrote (read-only)
+    -- no retokenization. Called by BOTH ranks after the tokenize barrier."""
+    with open(os.path.join(cache_dir, "cache_meta.json")) as f:
+        meta = json.load(f)
+    n_items, max_length = meta["n_items"], meta["max_length"]
+    assert max_length == ITEM_MAX_LENGTH
+
+    all_ids = np.memmap(os.path.join(cache_dir, "ids.bin"), dtype=np.int64, mode="r", shape=(n_items,))
+    item_input_ids = np.memmap(os.path.join(cache_dir, "input_ids.bin"), dtype=np.int32, mode="r",
+                                shape=(n_items, max_length))
+    item_attention_mask = np.memmap(os.path.join(cache_dir, "attention_mask.bin"), dtype=np.int8, mode="r",
+                                     shape=(n_items, max_length))
 
     id_to_row = {int(item_id): i for i, item_id in enumerate(all_ids)}
     assert len(id_to_row) == n_items, f"duplicate item ids: {n_items} rows but {len(id_to_row)} unique ids"
 
-    item_lengths = item_attention_mask.sum(axis=1).astype(np.int32)
+    item_lengths = np.asarray(item_attention_mask).sum(axis=1).astype(np.int32)
+    category_label_start = _find_token_pattern_starts(np.asarray(item_input_ids), CATEGORY_LABEL_PATTERN)
+    attr_label_start = _find_token_pattern_starts(np.asarray(item_input_ids), ATTRIBUTES_LABEL_PATTERN)
 
-    category_label_start = _find_token_pattern_starts(item_input_ids, CATEGORY_LABEL_PATTERN)
-    attr_label_start = _find_token_pattern_starts(item_input_ids, ATTRIBUTES_LABEL_PATTERN)
-
-    _log(rank, "CACHE", f"{n_items:,} items tokenized, mean length={item_lengths.mean():.1f}")
+    _log(rank, "CACHE", f"{n_items:,} items loaded from memmap, mean length={item_lengths.mean():.1f}")
     return item_input_ids, item_lengths, category_label_start, attr_label_start, id_to_row
 
 
@@ -633,12 +727,17 @@ def worker():
     del matches_pd, labels_all, indices, train_idx, val_idx
     gc.collect()
 
-    # Item cache -- every rank tokenizes the FULL human-scope item set (not
-    # just its own shard's items) so category_vocab below is identical and
-    # deterministic across ranks regardless of which pairs end up in which
-    # shard.
+    # Item cache -- tokenized ONCE by rank 0 (chunked, RAM-adaptive, straight
+    # to memmap -- see tokenize_items_to_memmap's docstring for why: v3
+    # OOM'd doing this as one giant in-RAM call, redundantly on both ranks
+    # simultaneously). Rank 1 waits at the barrier, then both ranks just
+    # memmap rank 0's output -- cheap, no retokenization, and every rank
+    # sees an identical category_vocab later since it's the same file.
+    if rank == 0:
+        tokenize_items_to_memmap(tokenizer, ITEM_TOKEN_CACHE_DIR, rank)
+    dist.barrier()
     (item_input_ids, item_lengths, category_label_start, attr_label_start,
-     id_to_row) = build_item_cache(tokenizer, rank)
+     id_to_row) = load_item_cache_from_memmap(ITEM_TOKEN_CACHE_DIR, rank)
     _log_memory(rank, "after item cache build")
 
     needed_ids = pd.unique(pd.concat([train_pd["id1"], train_pd["id2"], val_pd["id1"], val_pd["id2"]]))
