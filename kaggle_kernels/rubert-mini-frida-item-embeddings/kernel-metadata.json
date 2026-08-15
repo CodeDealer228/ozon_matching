@@ -1,0 +1,20 @@
+{
+  "id": "maxamsecret/rubert-mini-frida-item-embeddings",
+  "title": "rubert-mini-frida item embeddings (2xT4)",
+  "code_file": "rubert_mini_frida_item_embeddings.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/rubert-mini-frida-tokenize"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "NvidiaTeslaT4"
+}

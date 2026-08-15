@@ -1,0 +1,21 @@
+{
+  "id": "maxamsecret/rubert-mini-frida-item-tokenize-tpu-big-ram",
+  "id_no": 130833057,
+  "title": "rubert-mini-frida item tokenize (TPU, big RAM)",
+  "code_file": "rubert_mini_frida_tokenize.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "TpuV5E8"
+}
