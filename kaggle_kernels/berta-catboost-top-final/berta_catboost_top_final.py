@@ -31,18 +31,27 @@ regularization sized to match, not just cranking iterations alone.
 CHECKPOINTING -- 6 saved models, not 1
 ===========================================================================
 Per direct instruction: save several checkpoints, not only the val-best
-one. Training runs in 5 sequential STAGES of 1000 iterations each (20% of
-the 5000 total per stage), each stage continuing from the previous one via
-CatBoost's own `init_model` continuation -- so this produces 5 checkpoints
-at 20/40/60/80/100% of training, evaluated (real macro PR-AUC, grouped by
-category, matching this project's actual scoring metric -- not just
-CatBoost's own Logloss/AUC) after EACH stage. Whichever of those 5 has the
-best val macro PR-AUC is ALSO saved separately as "best" (a 6th file, a
-copy -- not a distinct training run). Every checkpoint's own
-train_state.json records exactly which stage/iteration it is and its own
-real val_macro_pr_auc -- explicit, never a stale or inherited number (the
-same checkpoint-hygiene lesson this session's berta_tpu_lora provenance
-trace surfaced, see reports/berta_tpu_lora_provenance/ and
+one. FIRST ATTEMPT trained in 5 sequential stages continued via CatBoost's
+`init_model` -- that crashed for real: "catboost/cuda/train_lib/
+train.cpp:323: Training continuation for GPU is not yet supported". GPU
+task_type simply does not support resumed/continued training the way CPU
+does (confirmed by the crash, not assumed). FIXED design: train ONCE, in a
+single `.fit()` call, to the full TOTAL_ITERATIONS=5000 -- then produce the
+5 checkpoints POST-HOC via `model.copy()` + `.shrink(ntree_end=N)`, which
+truncates an already-fully-trained model to its first N trees. Five
+independent truncated copies (at 1000/2000/3000/4000/5000 trees) stand in
+for what would have been five sequential training stages -- same
+observable outcome (5 real checkpoints, each with its own real val score
+evaluated at that exact tree count), zero dependency on GPU-continuation
+support. Each is evaluated with this project's actual scoring metric (real
+macro PR-AUC, grouped by category -- not just CatBoost's own Logloss/AUC).
+Whichever of those 5 has the best val macro PR-AUC is ALSO saved separately
+as "best" (a 6th file, a copy -- not a distinct training run). Every
+checkpoint's own train_state.json records exactly which stage/tree-count it
+is and its own real val_macro_pr_auc -- explicit, never a stale or
+inherited number (the same checkpoint-hygiene lesson this session's
+berta_tpu_lora provenance trace surfaced, see
+reports/berta_tpu_lora_provenance/ and
 kaggle_kernels/berta-tpu-human-continue-384's own module docstring).
 """
 import os
@@ -196,34 +205,45 @@ def main():
     cat_val = categories[val_idx]
     cat_features = ["category"]
 
-    model = None
+    # Train ONCE, to the FULL iteration count, in a single .fit() call.
+    # The original design trained in 5 sequential stages continued via
+    # `init_model` -- CatBoost does not support that on GPU
+    # ("catboost/cuda/train_lib/train.cpp:323: Training continuation for
+    # GPU is not yet supported", a real crash hit mid-run). The 20%-interval
+    # checkpoints are produced POST-HOC instead: CatBoost's own
+    # `model.shrink(ntree_end=N)` truncates an already-fully-trained model
+    # to its first N trees in place, so five independent truncated copies
+    # of the ONE trained model stand in for what would have been five
+    # sequential training stages -- same observable result (5 real
+    # checkpoints, each with its own real val score at that tree count),
+    # no GPU-continuation dependency at all.
+    t0 = time.perf_counter()
+    params = dict(CATBOOST_PARAMS)
+    params["iterations"] = TOTAL_ITERATIONS
+    model = CatBoostClassifier(**params)
+    model.fit(X_train, y_train, cat_features=cat_features, verbose=100)
+    _log("TRAIN", f"full {TOTAL_ITERATIONS}-iteration training done in {time.perf_counter() - t0:.1f}s")
+
     best_stage, best_val_macro_pr_auc, best_label = None, -1.0, None
 
     for stage in range(1, N_STAGES + 1):
-        t0 = time.perf_counter()
-        params = dict(CATBOOST_PARAMS)
-        params["iterations"] = STAGE_ITERATIONS
-        new_model = CatBoostClassifier(**params)
-        fit_kwargs = dict(cat_features=cat_features, verbose=100)
-        if model is not None:
-            fit_kwargs["init_model"] = model
-        new_model.fit(X_train, y_train, **fit_kwargs)
-        model = new_model
         iterations_done = stage * STAGE_ITERATIONS
-        _log("TRAIN", f"stage {stage}/{N_STAGES} ({iterations_done} iterations total) "
-                    f"done in {time.perf_counter() - t0:.1f}s")
+        stage_model = model.copy()
+        stage_model.shrink(ntree_end=iterations_done)
 
-        val_prob = model.predict_proba(X_val)[:, 1]
+        val_prob = stage_model.predict_proba(X_val)[:, 1]
         val_macro_pr_auc = compute_macro_pr_auc(y_val, val_prob, cat_val)
-        _log("METRICS", f"stage {stage}: val_macro_pr_auc={val_macro_pr_auc:.4f}")
+        _log("METRICS", f"stage {stage} ({iterations_done} trees): val_macro_pr_auc={val_macro_pr_auc:.4f}")
 
         label = f"checkpoint_stage{stage}_{iterations_done}it"
-        save_checkpoint(model, stage, iterations_done, val_macro_pr_auc, label, OUTPUT_DIR)
+        save_checkpoint(stage_model, stage, iterations_done, val_macro_pr_auc, label, OUTPUT_DIR)
 
         if val_macro_pr_auc > best_val_macro_pr_auc:
             best_val_macro_pr_auc = val_macro_pr_auc
             best_stage = stage
             best_label = label
+        del stage_model
+        gc.collect()
 
     # "best" is a labeled COPY of whichever of the 5 real checkpoints had
     # the top val_macro_pr_auc -- not a 6th independent training run (see
