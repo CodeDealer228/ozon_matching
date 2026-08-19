@@ -15,8 +15,30 @@ data/*.parquet
 *.onnx
 *.msgpack
 *.bin
+*.pt
+*.pth
 submits/lora/models/
 submits/lora/classifier.pt
+
+# Every submits/*/ build directory (not just lora/*_probe below) -- local
+# copies of base model weights, tokenizer vocab/merge files, offline-install
+# pip wheels, and packaged submission zips are all heavy and 100%
+# regenerable from this project's own Kaggle datasets/kernels + each
+# submission's build script (see CLAUDE.md, submits/*/src/utils.py).
+submits/*/models/
+submits/*/wheels/
+submits/*/*.zip
+submits/*.zip
+
+# Cross-encoder-size probe submissions (submits/*_probe/) -- downloaded HF/
+# Kaggle weights + fitted classifier + offline-install wheels + zip, all
+# regenerable via scripts/download_probe_models.py + scripts/fit_probe_classifier.py
+# + scripts/build_submission_zip.py, or (giga3b_probe) `kaggle datasets download
+# maxamsecret/giga3b-quantize` + pip-downloading the pinned wheels (see CLAUDE.md
+# and submits/giga3b_probe/src/model.py).
+submits/*_probe/models/
+submits/*_probe/*.joblib
+submits/*_probe/wheels/
 
 # Submission archives -- regenerate via scripts/build_submission_zip.py.
 # The tiny organizer-provided lightweight baseline zip IS tracked as
@@ -25,6 +47,7 @@ submits/lora/classifier.pt
 submits/lora/matching-lora-submit.zip
 submits/lora.zip
 submits/baseline/matching-baseline-submit.zip
+submits/*_probe/matching-*-submit.zip
 
 # Kaggle kernel run artifacts -- downloaded outputs/pulled sources,
 # regenerate by re-running the kernel (see kaggle_kernels/*/kernel-metadata.json).

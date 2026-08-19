@@ -24,7 +24,7 @@ copies in `data/` (gitignored — see README.md for download commands).
 | `items.parquet` | 13M+ rows, 4.1GB | `id`, `name`, `category`, `attributes` (JSON string) |
 | `items_human.parquet` | 214MB — subset covering every id in `matches.parquet` | same schema; use for local dev/testing |
 | `matches.parquet` | 365,654 rows, 4MB | `id1`, `id2`, `target` (0/1, human-labeled) |
-| `matches_llm.parquet` | 11,187,780 rows, 104MB | `id1`, `id2`, `target` (float 0..1, LLM soft labels). Fully disjoint item universe from `matches.parquet` (0 shared ids of 12.4M vs 711K) — used for a second-stage continued SFT, see below |
+| `matches_llm.parquet` | 11,187,780 rows, 104MB | `id1`, `id2`, `target` (float 0..1, LLM soft labels). Fully disjoint item universe from `matches.parquet` (0 shared ids of 12.4M vs 711K, 0 shared pairs — re-verified via `scripts/analyze_llm_label_overlap.py`, see `reports/llm_label_overlap_summary.json`) — so LLM-label quality can't be scored directly against human ground truth, no overlapping pairs exist. Used for a second-stage continued SFT, see below |
 
 `category` has **20 distinct values** — the grouping key for the metric.
 
@@ -82,7 +82,8 @@ can be proven to share the same val set.
   **merged** weights (`merge_and_unload()`) — no `peft` at inference.
 - Kaggle datasets: `maxamsecret/ozon-lora-merged-minilm` (merged, ready for
   inference) and `maxamsecret/ozon-lora-minilm-finetuned` (PEFT adapter,
-  pre-merge — needed to resume/continue training).
+  pre-merge — needed to resume/continue training; currently holds the
+  0.53229 checkpoint from the LLM continue-SFT run, see below).
 
 ### Results
 
@@ -95,57 +96,84 @@ Leaderboard score < val score for both (hidden-test items differ from
 `matches.parquet`'s), but LoRA's relative edge over baseline held up: ~2x on
 leaderboard vs. ~1.4x on val.
 
-## In progress: continued LoRA SFT on `matches_llm.parquet`
+**Per-category, 4 categories hold 77% of the remaining headroom**: Ювелирные
+изделия (prevalence-corrected skill 0.150), Одежда (0.189), Обувь (0.206),
+Мебель (0.213) — vs. a 0.384 median across all 20. Root cause: the 128-token
+window truncates 100% of val pairs, and English WordPiece shreds Russian to
+1.33 chars/token, so the median item gets 0–14 attribute tokens after the
+`Name:/Category:/Attributes:` prefix eats ~56 tokens — the deciding
+variant-level signal (size/colour/article) lives in attributes that never
+make it into the window. A naive lexical (name-Jaccard) blend was tried and
+ruled out (monotonically hurts). Full derivation and raw numbers:
+`reports/experiment_log.md`, `reports/val_per_category_lora.md`/`.csv`.
 
-Second SFT stage on top of the epoch-7 checkpoint, one epoch over the 11.19M
-soft-labeled pairs (fed to `BCEWithLogitsLoss` as continuous targets, no
-threshold), `LR=4e-4` cosine (vs. original `2e-4` linear — original run's own
-`train_log.csv` hadn't clearly plateaued, just decayed LR). Goal: close the
-val→leaderboard generalization gap via wider catalog coverage.
+## LoRA SFT continued on `matches_llm.parquet` — paused for FRIDA pivot
 
-Code: `kaggle_kernels/lora-llm-continue-train/` (script kernel, run via
-`kaggle kernels push -p kaggle_kernels/lora-llm-continue-train --accelerator
-NvidiaTeslaT4`, monitor via `kaggle kernels status/logs
-maxamsecret/lora-llm-continue-train`).
+Second-stage SFT on the epoch-7 checkpoint, mixing the human 80% train split
+with `matches_llm.parquet` (11.19M LLM soft-labeled pairs, continuous
+targets via `BCEWithLogitsLoss`, no threshold). Code:
+`kaggle_kernels/lora-llm-continue-train/`.
 
-Key gotchas:
-- Resuming a saved PEFT adapter needs `PeftModel.from_pretrained(base, dir,
-  is_trainable=True)` — adapters default to `inference_mode: true` on disk;
-  omit the flag and every LoRA matrix silently loads `requires_grad=False`
-  (no error, just wastes GPU quota training only the classifier head).
-- `items.parquet` at full 13M-row scale OOMs a naive `.select().with_columns()`
-  polars scan even with `engine="streaming"` — the truncation happens *after*
-  the full `attributes` column is decoded. Fix: semi-join down to the actual
-  needed ids *before* the string/truncation ops. Keep tokenizer chunk size
-  small (~8K, not 50K+) — a real Linux OOM-kill isn't a catchable
-  `MemoryError`, unlike CUDA OOM.
+- `LR=4e-4` LLM-only regressed val_macro_pr_auc below the 0.5282 starting
+  point and never recovered. Fix: `LR=2e-4` (the original run's own peak),
+  `WARMUP_RATIO=0.10`, human data mixed into every batch — validated at 2M
+  rows (→0.52447), then at the full 11.48M-row scale.
+- The full run climbed cleanly to **0.53229** (new best) before hitting
+  Kaggle's **hard 12h GPU session cap** at ~69% of one epoch. Recovered via
+  `kaggle kernels output` (persists `/kaggle/working` even on a hard-cap
+  cancellation) and **published** as the current `ozon-lora-minilm-finetuned`
+  best.
+- Root cause of not finishing: tokenization alone took **9.54h** (~80% of
+  the session) — `tokenize_to_memmap` rejoins the full items table on
+  *every chunk* instead of once. Not yet fixed; blocks resuming this path.
+- Paused in favor of the FRIDA bi-encoder pivot (below): the freed-up time
+  budget made a bigger/different encoder affordable, and per-item
+  pre-tokenization caching (the idea that motivated the pivot) can't work
+  cleanly for a cross-encoder anyway — HF's joint `longest_first`
+  pair-truncation would need exact replication outside the tokenizer, and
+  `truncate_sequences` isn't reachable as an instance method to do that.
 
-Status as of this writing: 4 Kaggle smoke iterations on 2xT4, real mount
-paths, real adapter (logs in `kaggle_kernels/lora-llm-continue-train/output/`).
-Memory is resolved: v1/v2 got Linux-OOM-killed (full 13M-row `items.parquet`
-load, then 50K-row tokenizer batches); fixed via a semi-join to actually-
-needed ids + `ctypes.CDLL("libc.so.6").malloc_trim(0)` after each tokenize
-chunk (glibc wasn't releasing freed pages back to the OS). v4
-(`MAX_TRAIN_ROWS=500_000`, a real full train pass, not just a mechanics
-check) stayed flat at RSS≈6.5GB/32GB for the entire run — confirmed safe to
-scale up.
+Full gotcha list (PEFT `is_trainable` trap, items.parquet OOM, `maintain_order`
+join cost, non-catchable Linux OOM-kills) and exact phase timings:
+`reports/experiment_log.md`.
 
-**v4's training result is a concern, not a green light.** Over that 500K-row
-subsample — a full, self-contained cosine cycle (warmup → peak `4e-4` →
-anneal to ~0 within its own 198 steps; NOT a preview of "the first 500K rows
-of the real 11.19M-row run," where LR would still be near-peak at that
-point, not annealed) — `val_macro_pr_auc` dropped from the starting 0.5282
-to ~0.503 by the first checkpoint (10%) and stayed in the 0.503–0.509 range
-for the rest of the run (best 0.50857 at 20%, final 0.50642 at 100%),
-**never recovering toward 0.5282**. Still well above the 0.371 baseline, but
-a real regression vs. the checkpoint this continues from, on real data with
-a real (if compressed) schedule. Before spending hours of GPU quota on the
-real full run: worth lowering `LR` (`4e-4` may be too high for this data) or
-otherwise re-examining the setup — don't launch the real run on the current
-config without addressing this signal first.
+## Bi-encoder probes
 
-`MAX_TRAIN_ROWS` and `ENABLE_DATASET_PUSH=False` are still set for
-smoke-testing in the shipped script.
+**Giga-Embeddings-instruct (3.45B, parked)**: raw zero-shot cosine similarity
+already beats the *trained* baseline (0.4004 vs 0.3710 val macro PR-AUC), and
+int8 quantization is nearly free (0.3973, 3.47GB on disk). But the candidate
+pairs have almost no item reuse (1.94 items/pair), so a bi-encoder pays ~2x
+the cross-encoder's token compute per pair instead of the usual "encode
+once, compare many" win — FLOPs projection misses even the H100's time
+limits (Public ~7min vs 6min limit, Private 17-22min vs 13min limit), before
+counting IO/tokenization/weight loading. Full table, FLOPs math, and
+T4-specific gotchas: `reports/experiment_log.md`.
+
+**FRIDA (`ai-forever/FRIDA`, 0.8B)**: chosen over continuing MiniLM
+continue-SFT because it's a bi-encoder — no joint pair-truncation to
+replicate, so item text can be pre-tokenized and cached per-item instead of
+re-tokenized per-pair. Confirmed directly against the loaded model (the card
+is partly wrong): FRED-T5-encoder + CLS pooling + L2 norm, tokenizer is
+actually `RobertaTokenizer` (byte-level BPE, vocab 93,651). Prefix
+**`paraphrase: `** (card names "deduplication" explicitly under this
+prefix). `max_length=256` (not the 512 cap) — empirically covers ~99.99% of
+items (20K-item sample: mean=126.6, p99=202.0, true max=272).
+
+Tokenization ran as two Kaggle kernels — `frida-tokenize-items-human`
+(CPU) and `frida-tokenize-items-llm` (TPU, for RAM headroom + a separate
+20h/week quota pool). **Done as of 2026-08-13**: both
+`maxamsecret/frida-tokenized-items-human` (711,304 items) and
+`maxamsecret/frida-tokenized-items-llm` (12,384,610 items) are published —
+each an `ids.bin`/`input_ids.bin`/`attention_mask.bin` memmap dataset, so
+training does a pure id lookup with no tokenizer call and no per-chunk
+rejoin against the items table. Getting there took 5 rounds of environment
+gotchas on the TPU image specifically (missing `polars`, a `transformers`/
+`tokenizers` version mismatch, an over-conservative disk-space margin, a
+missing `kaggle` CLI binary, and a dataset-naming mix-up with a manual
+recovery the user did in parallel) — full detail in
+`reports/experiment_log.md`. Training architecture on top of the cache
+(classifier head over `[emb1, emb2, |emb1-emb2|]` vs. cosine similarity) not
+yet decided.
 
 ## Repo layout
 
@@ -155,11 +183,19 @@ kaggle_kernels/validate-baseline-vs-lora/         baseline vs LoRA val compariso
 kaggle_kernels/merge-lora/                        LoRA adapter -> merged weights
 kaggle_kernels/lora-timing-dryrun/                full-scale offline GPU timing dry-run
 kaggle_kernels/lora-llm-continue-train/           continued SFT on matches_llm.parquet
+kaggle_kernels/item-length-analysis/              untruncated field-length deciles over the 13M catalog
+kaggle_kernels/val-per-category-metrics/          per-category val PR-AUC of the merged LoRA (CPU)
+kaggle_kernels/giga3b-quantize-benchmark/         Giga-3B bi-encoder probe: raw quality + int8 save + throughput
+kaggle_kernels/frida-tokenize-items-human/        FRIDA per-item tokenization cache, human scope (~711K items, CPU)
+kaggle_kernels/frida-tokenize-items-llm/          FRIDA per-item tokenization cache, LLM scope (~12.38M items, TPU)
 scripts/make_canonical_split.py                   regenerates data/splits/*.parquet
+scripts/analyze_per_category.py                   offline post-analysis of saved val scores
 scripts/merge_lora.py, build_submission_zip.py, test_submission.py   submission build/test pipeline
 data/, data/splits/                               local data + canonical split
+reports/                                          written findings (tracked; kernel outputs are not) — experiment_log.md has full narrative detail
 submits/baseline/                                 organizer-provided reference (structural template)
 submits/lora/                                     our submission
+submits/giga3b_probe/                             bi-encoder pipeline (dependency-injected encoder); parked, see above
 ```
 
 ## Submission constraints
@@ -202,22 +238,59 @@ Always also extract the actual built zip to a clean dir and test *that*
 - `.venv/` has only `kaggle`/`jupyter` tooling by default — install
   `polars pandas pyarrow scikit-learn mlflow torch transformers peft
   safetensors` on demand.
-- Kaggle creds: `~/.kaggle/kaggle.json` (not in repo).
+- **Two separate Kaggle accounts, two separate GPU/TPU quotas** — do not mix
+  up which kernel/dataset was pushed under which:
+  - `maxamsecret` — default account, creds at `~/.kaggle/kaggle.json` (not in
+    repo). Owns `ozon-ecup-2026-matching` (the private source dataset) and
+    all FRIDA-related kernels/datasets (`frida-*`).
+  - `rays0n` — second account, added 2026-08-13 specifically to run BERTA
+    (`kaggle_kernels/berta-lora-sft`) on its own separate quota rather than
+    competing with FRIDA's runs. Creds at `~/.kaggle/kaggle_rays0n.json` (not
+    in repo, not the default file — never overwrite `kaggle.json` with
+    this). Has been granted read access to `maxamsecret/ozon-ecup-2026-matching`
+    (confirmed via `kaggle datasets files`). All BERTA kernels/datasets are
+    namespaced `rays0n/berta-*`, not `maxamsecret/...`.
+  - To run a CLI command as the non-default account, override via env vars
+    rather than touching the default file: `KAGGLE_USERNAME=rays0n
+    KAGGLE_KEY=$(python -c "import json;print(json.load(open('$HOME/.kaggle/kaggle_rays0n.json'))['key'])")
+    kaggle ...`. Any kernel pushed under `rays0n/...` must also use that
+    account's creds as kernel secrets (Kaggle website → kernel → Settings →
+    Secrets) if it needs `KAGGLE_USERNAME`/`KAGGLE_KEY` at runtime (e.g.
+    berta-lora-sft's checkpoint-dataset auto-publish) — this is a per-kernel
+    web UI setting, not something `kernel-metadata.json` or the CLI push can
+    configure.
 - mlflow≥3 needs `os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"` before
   `set_tracking_uri("file:...")` or it raises (file store is in "maintenance
   mode"). Local tracking, no server: `mlflow ui --backend-store-uri
   experiments/mlruns`.
-- Kaggle GPU quota: 30h/week.
+- Kaggle GPU quota: 30h/week, **12h max per session** (hard cap, confirmed
+  the hard way — see `reports/experiment_log.md`). TPU quota: separate
+  20h/week pool, 9h max per session.
 
 ## Open TODOs
 
-1. Continued SFT on `matches_llm.parquet` — v4's 500K-row test showed
-   val_macro_pr_auc regressing to ~0.503-0.509 (from the 0.5282 starting
-   point) and not recovering even after full LR anneal. Investigate before
-   the real run: try a lower `LR` (current `4e-4` is a guess, not validated),
-   or re-check whether the soft-label signal itself is helping. Only then
-   reset `MAX_TRAIN_ROWS=None`, enable dataset push, and launch the real full
-   run.
+1. **Paused for the FRIDA pivot** — resume `matches_llm.parquet` continue-SFT
+   only after fixing `tokenize_to_memmap`'s per-chunk items rejoin (~9.5h of
+   the last 12h run); the 0.53229 checkpoint is already published as current
+   best regardless.
 2. First real training run since the batch-size auto-probe (VRAM-target
    search before training starts) and mlflow logging were added to
    `notebooks/cross-encoder-sft-pipline (3).ipynb` — watch it once end-to-end.
+3. Per-category fixes, cost/benefit order, all targeting the fashion/jewellery
+   77%-of-headroom categories: (a) drop the category value + English
+   `Name:/Category:/Attributes:` literals (frees ~29% of the token budget,
+   zero signal loss); (b) raise `max_length` 128 → 256; (c) swap in a
+   Russian-capable encoder (`rubert-tiny2`, multilingual MiniLM) — ~3x more
+   content in the same window given the current 1.33 chars/token. Any
+   text-formula/`max_length` change must land in both training code and
+   `submits/lora/src/utils.py` (byte-match requirement).
+4. Consider per-category loss weighting: the metric is a plain mean over 20
+   categories, but the training loss is proportional to the pooled row counts.
+5. **Next up**: FRIDA bi-encoder (see above) — per-item tokenization caches
+   are done and published (2026-08-13). At ~1.94 items/pair a bi-encoder
+   costs ~2x the cross-encoder's token compute at equal size, so it has to
+   *win on quality*, not speed, to be worth the switch — not yet measured
+   for FRIDA. Next: decide the training architecture (classifier head over
+   `[emb1, emb2, |emb1-emb2|]` vs. cosine similarity), then train and get a
+   real val macro PR-AUC to compare
+   against 0.5282/0.53229.
