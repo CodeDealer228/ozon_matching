@@ -4,7 +4,7 @@
   "code_file": "item_length_analysis.py",
   "language": "python",
   "kernel_type": "script",
-  "is_private": true,
+  "is_private": false,
   "enable_gpu": false,
   "enable_internet": false,
   "dataset_sources": [

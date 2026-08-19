@@ -4,12 +4,13 @@
   "code_file": "lora_llm_continue_train.py",
   "language": "python",
   "kernel_type": "script",
-  "is_private": true,
+  "is_private": false,
   "enable_gpu": true,
   "enable_internet": true,
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
-    "maxamsecret/ozon-lora-minilm-finetuned"
+    "maxamsecret/ozon-lora-minilm-finetuned",
+    "maxamsecret/ozon-lora-llm-token-cache"
   ],
   "competition_sources": [],
   "kernel_sources": [],

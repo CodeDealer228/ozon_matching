@@ -38,6 +38,13 @@ this script extends, not replaces):
     RSS, see CHUNK_SIZE_START/RAM_TARGET_GB/RAM_HARD_GB in CONFIG) instead of
     a fixed constant, to actually use the ~32GB container instead of the
     ~6.5GB a static conservative chunk size left on the table.
+  - PRETOKENIZED_CACHE_DIR, when set, skips matches_llm/items loading and
+    tokenization entirely and reads memmaps straight off a mounted
+    read-only cache dataset. Added after the first full 11.48M-row run hit
+    Kaggle's 12h session cap having spent ~9.5h of it on tokenization alone
+    (vs ~2.1h of actual training) -- that run's cache was recovered via
+    `kaggle kernels output` and republished as its own dataset so later runs
+    (like this one, EPOCHS=2) don't pay that cost again. See CLAUDE.md.
 
 Structured as importable functions + a main() guarded by
 `if __name__ == "__main__"` so the mechanics (tokenize_to_memmap, the
@@ -102,7 +109,14 @@ MAX_CATEGORY_CHARS = 64
 MAX_ATTR_CHARS = 384
 MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 640
 
-EPOCHS = 1
+EPOCHS = 2                       # was 1 -- the 11.48M-row run showed
+                                  # val_macro_pr_auc still climbing when
+                                  # Kaggle's 12h session cap cut it off at
+                                  # ~69% of epoch 1 (0.53229, already above
+                                  # the 0.5282 starting checkpoint); 2 epochs
+                                  # over the cached (pre-tokenized) data, no
+                                  # LR/warmup restart per epoch -- the cosine
+                                  # schedule spans both epochs as one cycle.
 LR = 2e-4                        # peak LR -- was 4e-4; a 500K-row real (not
                                   # just mechanics-smoke) test at 4e-4 showed
                                   # val_macro_pr_auc dropping from the 0.5282
@@ -124,14 +138,29 @@ PUSH_MILESTONES = [0.25, 0.50, 0.75, 1.00]
 # now grows the chunk size while measured RSS stays under RAM_TARGET_GB, and
 # shrinks it if RSS crosses RAM_HARD_GB -- using more of the ~32GB container
 # without needing to guess a single safe constant up front.
-CHUNK_SIZE_START = 20_000
-CHUNK_SIZE_MIN = 4_000
+CHUNK_SIZE_START = 5_000           # was 20_000 -- a real 2M-row-scale run
+                                    # (3.45M-row items table) got OOM-killed
+                                    # on its FIRST chunk at that size (RSS
+                                    # 9.67GB -> 31.1GB/32.21GB in one chunk,
+                                    # before the adaptive loop could react --
+                                    # it only adjusts the NEXT chunk, so the
+                                    # starting size has to be safe on its own
+                                    # even at the largest items table this
+                                    # run will build). Root cause was mostly
+                                    # maintain_order="left" (removed above),
+                                    # but starting smaller is cheap insurance
+                                    # regardless -- the loop still grows from
+                                    # here if it's safe to.
+CHUNK_SIZE_MIN = 2_000
 CHUNK_SIZE_MAX = 300_000
 TOKENIZE_BATCH_MIN = 1_000
-RAM_TARGET_GB = 20.0              # grow chunk size while RSS stays under this
-RAM_HARD_GB = 26.0                 # shrink if RSS exceeds this (confirmed
-                                    # cgroup limit is 32.21GB -- 6GB margin)
-RAM_GROWTH_FACTOR = 1.5
+RAM_TARGET_GB = 16.0               # was 20.0 -- more margin before the next
+                                    # chunk's growth decision, given a single
+                                    # chunk's cost isn't perfectly predictable
+RAM_HARD_GB = 24.0                  # was 26.0, same reasoning -- more room
+                                     # to absorb a bigger-than-expected chunk
+                                     # before hitting the 32.21GB cgroup limit
+RAM_GROWTH_FACTOR = 1.3            # was 1.5 -- grow more cautiously
 RAM_SHRINK_FACTOR = 0.5
 
 TOTAL_BATCH_SIZE = 2048
@@ -150,16 +179,45 @@ PROBE_ROUND_TO = 8
 # the signal it was originally tuned on while it also sees the wider-
 # coverage weak-label data.
 INCLUDE_HUMAN_TRAIN = True
-TARGET_TOTAL_TRAIN_ROWS = 2_000_000   # None = use ALL of matches_llm (full
-                                       # run); a number caps the COMBINED
-                                       # pool -- all human train rows are
-                                       # always kept, matches_llm is sampled
-                                       # to fill the remainder up to this
-                                       # total.
+TARGET_TOTAL_TRAIN_ROWS = None        # REAL FULL RUN -- None = use ALL of
+                                       # matches_llm (11,187,780 rows) +
+                                       # all 292,523 human train rows
+                                       # (~11.48M combined). A number instead
+                                       # caps the combined pool for a cheaper
+                                       # test -- 2_000_000 was validated first
+                                       # (see CLAUDE.md), val_macro_pr_auc
+                                       # climbed to 0.52447, close to the
+                                       # 0.5282 starting point.
 
 ENABLE_DATASET_PUSH = False      # flip to True only after Kaggle Secrets are set (see plan)
 LORA_DATASET_ID = "maxamsecret/ozon-lora-minilm-finetuned"
 LORA_DATASET_NESTED_PATH = "lora_mini_self_attention_memmap/best"
+
+# Reuse a previously-tokenized memmap cache instead of rebuilding it. The
+# first full 11.48M-row run spent ~9.5h of its ~12h Kaggle session on
+# tokenization alone (vs ~2.1h of actual training for 60% of one epoch) --
+# recovered that cache via `kaggle kernels output` after the session hit
+# Kaggle's 12h cap, and republished it as its own dataset so it can be
+# mounted read-only and used directly (np.memmap opens fine in "r" mode
+# straight off a read-only mount, no local copy needed). Sidesteps the
+# retokenize cost entirely rather than fixing the underlying per-chunk
+# rejoin inefficiency (see CLAUDE.md) -- that fix is still worth doing
+# eventually, just not blocking this run.
+# None = tokenize from scratch as before (the ITEMS_PATH/MATCHES_LLM_PATH/
+# INCLUDE_HUMAN_TRAIN/TARGET_TOTAL_TRAIN_ROWS knobs above only take effect
+# in that path -- a mounted cache already has its data composition fixed).
+PRETOKENIZED_CACHE_DIR = "/kaggle/input/datasets/maxamsecret/ozon-lora-llm-token-cache/token_cache_llm_continue"
+# Row counts are hardcoded (not read from a cache_meta.json sidecar inside
+# the dataset) because `kaggle datasets version` replaces a dataset's
+# entire file set per version -- adding one small JSON file the normal way
+# would have required re-uploading the whole ~8.7GB cache again. These are
+# verified against the actual published dataset's file sizes (each .bin
+# file's size / bytes-per-row matches exactly): human 80% train split
+# (292,523 rows) + full matches_llm.parquet (11,187,780 rows, 0 dropped by
+# the val anti-join) = 11,480,303 combined train rows; 73,131 val rows.
+PRETOKENIZED_TRAIN_LEN = 11_480_303
+PRETOKENIZED_VAL_LEN = 73_131
+PRETOKENIZED_N_HUMAN = 292_523
 
 WORKING_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 OUTPUT_DIR = os.path.join(WORKING_DIR, "lora_llm_continue_train")
@@ -295,6 +353,29 @@ class IndexDataset(Dataset):
         return idx
 
 
+def _find_pretokenized_cache_dir(hint):
+    # Kaggle's dataset mount path is not reliably predictable: a real run
+    # mounted this exact dataset at /kaggle/input/<slug>/... (no
+    # datasets/<owner>/ prefix) while every OTHER dataset_sources entry in
+    # the same kernel mounted at /kaggle/input/datasets/<owner>/<slug>/...
+    # as documented elsewhere in this project -- likely because this one was
+    # created via the web "New Dataset from kernel output" flow rather than
+    # `kaggle datasets create`, but the exact cause doesn't matter: search
+    # /kaggle/input for the actual location instead of trusting one hardcoded
+    # guess. Falls back to `hint` unchanged (e.g. for local testing, where
+    # PRETOKENIZED_CACHE_DIR is monkeypatched to a real local directory that
+    # os.walk("/kaggle/input") won't find because it isn't under there).
+    if os.path.isdir(hint) and os.path.exists(os.path.join(hint, "train_input_ids.bin")):
+        return hint
+    if os.path.isdir("/kaggle/input"):
+        for root, _dirs, files in os.walk("/kaggle/input"):
+            if "train_input_ids.bin" in files:
+                print(f"[CACHE] hint path {hint} didn't have the cache directly -- "
+                      f"found it via search at {root} instead")
+                return root
+    return hint
+
+
 def _memmap_paths(cache_dir, prefix):
     return {
         "input_ids": os.path.join(cache_dir, f"{prefix}_input_ids.bin"),
@@ -358,13 +439,25 @@ def tokenize_to_memmap(
                                       # silently truncates soft labels to 0/1
                                       # on memmap write (numpy does not raise).
     cache_dir: str,
-    chunk_size_start: int = CHUNK_SIZE_START,
-    chunk_size_min: int = CHUNK_SIZE_MIN,
-    chunk_size_max: int = CHUNK_SIZE_MAX,
-    tokenize_batch_min: int = TOKENIZE_BATCH_MIN,
-    ram_target_gb: float = RAM_TARGET_GB,
-    ram_hard_gb: float = RAM_HARD_GB,
+    chunk_size_start=None,
+    chunk_size_min=None,
+    chunk_size_max=None,
+    tokenize_batch_min=None,
+    ram_target_gb=None,
+    ram_hard_gb=None,
 ):
+    # None-sentinel defaults resolved here (not bound at def-time) so that
+    # monkeypatching the module-level constants -- e.g. local test harnesses
+    # doing `import lora_llm_continue_train as m; m.RAM_TARGET_GB = ...`
+    # before calling m.main() -- actually takes effect. Plain `= CONSTANT`
+    # defaults are evaluated once at function-definition time and would
+    # silently ignore any later reassignment of the module attribute.
+    chunk_size_start = CHUNK_SIZE_START if chunk_size_start is None else chunk_size_start
+    chunk_size_min = CHUNK_SIZE_MIN if chunk_size_min is None else chunk_size_min
+    chunk_size_max = CHUNK_SIZE_MAX if chunk_size_max is None else chunk_size_max
+    tokenize_batch_min = TOKENIZE_BATCH_MIN if tokenize_batch_min is None else tokenize_batch_min
+    ram_target_gb = RAM_TARGET_GB if ram_target_gb is None else ram_target_gb
+    ram_hard_gb = RAM_HARD_GB if ram_hard_gb is None else ram_hard_gb
     n_max = len(pairs_pd)
     paths = _memmap_paths(cache_dir, prefix)
 
@@ -419,18 +512,23 @@ def tokenize_to_memmap(
         chunk_pd = pairs_pd.iloc[start:start + cur_chunk_size]
         chunk_pl = pl.from_pandas(chunk_pd).with_row_index("_row_idx")
 
-        # maintain_order + the row-index sort are belt-and-suspenders: polars
-        # currently happens to preserve left-row order on plain inner joins,
-        # but that isn't a documented guarantee, and every column pulled
-        # below (text1/text2/label/category) comes from this SAME `joined`
-        # frame so they stay internally consistent with each other even if
-        # it weren't -- this just also keeps them aligned with the original
-        # pairs_pd row order, which downstream code doesn't currently rely
-        # on but costs nothing to keep true.
+        # Explicit sort-by-row-index instead of maintain_order="left": a real
+        # 2M-row-scale run got OOM-killed here -- RSS jumped from 9.67GB to
+        # 31.1GB/32.21GB processing a SINGLE 20K-row chunk against a
+        # 3.45M-row items table (vs. a flat ~6.5GB for the entire run at
+        # 500K-row/1.05M-item scale). maintain_order forces a much more
+        # expensive order-preserving join algorithm than a plain hash join,
+        # and that cost apparently scales badly with the right-hand table
+        # size -- exactly the items table, which grows with training-pool
+        # size. Sorting by the explicit `_row_idx` column afterward is
+        # actually a STRONGER correctness guarantee than maintain_order ever
+        # was (unambiguous regardless of the join's internal algorithm/order,
+        # not just an observed-but-undocumented behavior) and lets the join
+        # itself use whichever strategy the query planner finds cheapest.
         joined = (
             chunk_pl
-            .join(item_texts_id1, on="id1", how="inner", maintain_order="left")
-            .join(item_texts_id2, on="id2", how="inner", maintain_order="left")
+            .join(item_texts_id1, on="id1", how="inner")
+            .join(item_texts_id2, on="id2", how="inner")
             .sort("_row_idx")
         )
 
@@ -804,6 +902,7 @@ def main():
     print(f"micro_batch_size: {MICRO_BATCH_SIZE}")
     print(f"include_human_train: {INCLUDE_HUMAN_TRAIN}")
     print(f"target_total_train_rows: {TARGET_TOTAL_TRAIN_ROWS}")
+    print(f"pretokenized_cache_dir: {PRETOKENIZED_CACHE_DIR}")
     print(f"enable_dataset_push: {ENABLE_DATASET_PUSH}")
     print(f"cache_dir:        {CACHE_DIR}")
     print(f"output_dir:       {OUTPUT_DIR}")
@@ -823,195 +922,254 @@ def main():
     _log_cgroup_limit()
     _log_memory("start")
 
-    # -----------------------------------------------------------------
-    # Canonical val split -- byte-identical to the original LoRA training
-    # code (filter nulls -> cast label -> select -> train_test_split).
-    # Only val_pd is used downstream; matches.parquet's train split is not
-    # used for training in this script (matches_llm is used instead).
-    # -----------------------------------------------------------------
-    print("[DATA] Loading matches.parquet for canonical val split ...")
-    matches_pl = pl.read_parquet(MATCHES_PATH)
-    matches_pl = (
-        matches_pl
-        .filter(pl.col("id1").is_not_null() & pl.col("id2").is_not_null())
-        .with_columns([
-            pl.col("target").fill_null(0).cast(pl.Float32),
-            (pl.col("target") >= 0.5).cast(pl.Int8).alias("label"),
-        ])
-        .select(["id1", "id2", "label"])
-    )
-    matches_pd = matches_pl.to_pandas()
-    del matches_pl
-    gc.collect()
-
-    labels_all = matches_pd["label"].to_numpy().astype(np.int64)
-    indices = np.arange(len(labels_all), dtype=np.int64)
-    train_idx, val_idx = train_test_split(indices, test_size=0.20, random_state=SEED, stratify=labels_all)
-    val_pd = matches_pd.iloc[val_idx].reset_index(drop=True)
-    print(f"[DATA] matches.parquet rows: {len(matches_pd):,} | recomputed val rows: {len(val_pd):,} "
-          f"(expected 73,131 -- cross-check against CLAUDE.md)")
-
-    val_fingerprint = hashlib.sha256(
-        ",".join(f"{a}-{b}" for a, b in sorted(zip(val_pd["id1"], val_pd["id2"]))).encode("utf-8")
-    ).hexdigest()[:16]
-    print(f"[DATA] val_fingerprint={val_fingerprint}")
-
-    # Human train split (the 80% side of the canonical split) -- extracted
-    # BEFORE matches_pd is freed below. Mixed into the training pool
-    # alongside matches_llm (see INCLUDE_HUMAN_TRAIN comment in CONFIG): an
-    # earlier LLM-only run regressed val_macro_pr_auc, so this keeps the
-    # model anchored to the human signal it was originally tuned on while it
-    # also sees matches_llm's wider catalog coverage. label is human binary
-    # (0/1) here but stored as float32 to share dtype/memmap with the LLM
-    # pool's continuous soft labels -- BCEWithLogitsLoss treats a hard 0.0/1.0
-    # target as just a special case of a soft one, no special-casing needed.
-    if INCLUDE_HUMAN_TRAIN:
-        human_train_pd = matches_pd.iloc[train_idx][["id1", "id2", "label"]].reset_index(drop=True).copy()
-        human_train_pd["label"] = human_train_pd["label"].astype(np.float32)
-        print(f"[DATA] human train rows (mixed into training pool): {len(human_train_pd):,}")
-    else:
-        human_train_pd = None
-
-    del matches_pd, labels_all, indices, train_idx, val_idx
-    gc.collect()
-
-    # -----------------------------------------------------------------
-    # matches_llm.parquet -- soft labels, defensive anti-join vs val
-    # -----------------------------------------------------------------
-    print("[DATA] Loading matches_llm.parquet ...")
-    llm_pl = pl.read_parquet(MATCHES_LLM_PATH)
-    llm_pl = (
-        llm_pl
-        .filter(pl.col("id1").is_not_null() & pl.col("id2").is_not_null() & pl.col("id1").ne(pl.col("id2")))
-        .with_columns(pl.col("target").fill_null(0.0).cast(pl.Float32).alias("label"))
-        .select(["id1", "id2", "label"])
-    )
-
-    val_pairs_norm = pl.DataFrame({
-        "pmin": np.minimum(val_pd["id1"].to_numpy(), val_pd["id2"].to_numpy()),
-        "pmax": np.maximum(val_pd["id1"].to_numpy(), val_pd["id2"].to_numpy()),
-    }).unique()
-    llm_pl = llm_pl.with_columns([
-        pl.min_horizontal("id1", "id2").alias("pmin"),
-        pl.max_horizontal("id1", "id2").alias("pmax"),
-    ])
-    n_before = llm_pl.height
-    llm_pl = llm_pl.join(val_pairs_norm, on=["pmin", "pmax"], how="anti").drop(["pmin", "pmax"])
-    n_dropped = n_before - llm_pl.height
-    print(f"[LEAK-GUARD] matches_llm rows before={n_before:,} after anti-join vs val={llm_pl.height:,} "
-          f"(dropped {n_dropped:,})")
-    if n_dropped > 0:
-        print(f"[WARN] {n_dropped:,} matches_llm pairs overlapped the val split and were dropped -- "
-              f"Kaggle's hosted matches_llm.parquet may differ from the local copy checked during planning.")
-
-    n_human = len(human_train_pd) if human_train_pd is not None else 0
-    if TARGET_TOTAL_TRAIN_ROWS is not None:
-        llm_cap = max(0, TARGET_TOTAL_TRAIN_ROWS - n_human)
-        llm_pl = llm_pl.sample(n=min(llm_cap, llm_pl.height), seed=SEED)
-        print(f"[DATA] TARGET_TOTAL_TRAIN_ROWS={TARGET_TOTAL_TRAIN_ROWS:,} -> matches_llm sampled to "
-              f"{llm_pl.height:,} rows (+ {n_human:,} human train rows = "
-              f"{llm_pl.height + n_human:,} total)")
-
-    llm_train_pd = llm_pl.to_pandas()
-    del llm_pl, val_pairs_norm
-    gc.collect()
-
-    if human_train_pd is not None:
-        train_pd = pd.concat([human_train_pd, llm_train_pd], ignore_index=True)
-        del human_train_pd, llm_train_pd
-    else:
-        train_pd = llm_train_pd
-    gc.collect()
-    print(f"[DATA] combined train rows: {len(train_pd):,} (human={n_human:,} + llm={len(train_pd) - n_human:,})")
-
-    # -----------------------------------------------------------------
-    # items.parquet -- semi-join to needed ids + streaming collect.
-    #
-    # Earlier design assumed skipping an id-filter was fine since matches_llm
-    # needs most of the ~13.4M-row catalog anyway for the real full run --
-    # true for final row count, but WRONG about peak memory: a smoke-test
-    # run on Kaggle with this unfiltered chain got OOM-killed (Linux SIGKILL,
-    # "Killed" in the log) at RSS=21.7GB/32GB right after this collect(),
-    # before tokenization even started. Root cause: `.str.slice()` truncates
-    # AFTER polars has already decoded the full-length `attributes` column
-    # from parquet (per CLAUDE.md, raw attributes are large enough that even
-    # json.loads-ing them at 13M-row scale OOM'd during training) -- a lazy
-    # chain alone doesn't prevent that intermediate from being fully
-    # materialized. Two fixes, both applied: (1) a semi-join against the ids
-    # actually referenced by this run's train+val pairs, which the query
-    # optimizer can push down before the expensive string work -- this
-    # collapses a capped smoke run (e.g. MAX_TRAIN_ROWS=20_000) from ~13.4M
-    # rows to a few hundred thousand, and even for the real full run trims
-    # some (matches_llm + human ids together are a few % short of the full
-    # catalog); (2) engine="streaming" so the collect pipelines in chunks
-    # instead of building the full-length intermediate columns for all rows
-    # at once, which is what actually matters for the real full run where
-    # the semi-join alone wouldn't remove much.
-    # -----------------------------------------------------------------
-    needed_ids = pd.unique(
-        pd.concat([train_pd["id1"], train_pd["id2"], val_pd["id1"], val_pd["id2"]])
-    )
-    needed_ids_lazy = pl.DataFrame({"id": pd.Series(needed_ids, dtype="int64")}).lazy()
-    print(f"[DATA] unique item ids needed: {len(needed_ids):,}")
-
-    print("[DATA] Loading items.parquet (semi-join to needed ids, streaming, column-pruned) ...")
-    items = (
-        pl.scan_parquet(ITEMS_PATH)
-        .join(needed_ids_lazy, on="id", how="semi")
-        .select(["id", "name", "category", "attributes"])
-        .with_columns([
-            pl.col("name").fill_null("").cast(pl.Utf8).str.slice(0, MAX_NAME_CHARS),
-            pl.col("category").fill_null("").cast(pl.Utf8).str.slice(0, MAX_CATEGORY_CHARS),
-            pl.col("attributes").fill_null("").cast(pl.Utf8, strict=False).str.slice(0, MAX_ATTR_CHARS),
-        ])
-        .with_columns(
-            (pl.lit("Name: ") + pl.col("name") + pl.lit(" Category: ") + pl.col("category") +
-             pl.lit(" Attributes: ") + pl.col("attributes")).str.slice(0, MAX_ITEM_CHARS).alias("text")
-        )
-        .select(["id", "category", "text"])
-        .collect(engine="streaming")
-    )
-    print(f"[DATA] items loaded: {items.height:,}")
-    del needed_ids, needed_ids_lazy
-    gc.collect()
-    _malloc_trim()
-    _log_memory("after items load")
-
-    category_vocab = sorted(items.get_column("category").unique().to_list()) + ["UNKNOWN"]
-    category_to_id = {c: i for i, c in enumerate(category_vocab)}
-    print(f"[DATA] category vocab size: {len(category_vocab)}")
-
-    # -----------------------------------------------------------------
-    # Tokenize -> memmap cache (train: soft float32 labels; val: binary
-    # int8 labels -- label_dtype is a required arg specifically so this
-    # can't be silently gotten wrong at a call site).
-    # -----------------------------------------------------------------
     print("[TOKENIZER] Loading tokenizer ...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print("[TOKENIZE] Building val memmap (int8 binary labels) ...")
-    val_paths, val_len = tokenize_to_memmap(
-        pairs_pd=val_pd, item_texts=items, category_to_id=category_to_id, tokenizer=tokenizer,
-        prefix="val", max_length=MAX_LENGTH, label_dtype=np.int8, cache_dir=CACHE_DIR,
-    )
-    print(f"[TOKENIZE] val effective rows: {val_len:,}")
+    if PRETOKENIZED_CACHE_DIR is not None:
+        # -------------------------------------------------------------
+        # Fast path: reuse a previously-tokenized memmap cache, skipping
+        # matches_llm/items loading and the ~9.5h tokenization pass entirely.
+        # np.memmap opens fine in "r" mode directly off a read-only Kaggle
+        # input mount -- no local copy needed. Data composition (which rows,
+        # human+llm mix, TARGET_TOTAL_TRAIN_ROWS) was already fixed when the
+        # cache was built; those CONFIG knobs are ignored on this path.
+        # -------------------------------------------------------------
+        resolved_cache_dir = _find_pretokenized_cache_dir(PRETOKENIZED_CACHE_DIR)
+        print(f"[CACHE] PRETOKENIZED_CACHE_DIR set (hint={PRETOKENIZED_CACHE_DIR}) -> "
+              f"resolved to {resolved_cache_dir}, skipping matches_llm/items loading and tokenization")
+        train_len = PRETOKENIZED_TRAIN_LEN
+        val_len = PRETOKENIZED_VAL_LEN
+        n_human = PRETOKENIZED_N_HUMAN
+        val_paths = _memmap_paths(resolved_cache_dir, "val")
+        train_paths = _memmap_paths(resolved_cache_dir, "train")
+        if not _memmap_cache_valid(val_paths, val_len, MAX_LENGTH, np.int8):
+            raise RuntimeError(f"pretokenized val cache at {resolved_cache_dir} failed size validation "
+                                f"against hardcoded PRETOKENIZED_VAL_LEN={val_len:,}")
+        if not _memmap_cache_valid(train_paths, train_len, MAX_LENGTH, np.float32):
+            raise RuntimeError(f"pretokenized train cache at {resolved_cache_dir} failed size validation "
+                                f"against hardcoded PRETOKENIZED_TRAIN_LEN={train_len:,}")
+        print(f"[CACHE] train_len={train_len:,} val_len={val_len:,} n_human={n_human:,} "
+              f"(hardcoded, verified against dataset file sizes)")
 
-    print("[TOKENIZE] Building train memmap (float32 soft labels) ...")
-    train_paths, train_len = tokenize_to_memmap(
-        pairs_pd=train_pd, item_texts=items, category_to_id=category_to_id, tokenizer=tokenizer,
-        prefix="train", max_length=MAX_LENGTH, label_dtype=np.float32, cache_dir=CACHE_DIR,
-    )
-    print(f"[TOKENIZE] train effective rows: {train_len:,}")
+        # Still recompute the val split from matches.parquet -- cheap (~1s)
+        # and proves this run's val set matches the one the cache was built
+        # against, via the same val_fingerprint every other run logs.
+        print("[DATA] Recomputing val split from matches.parquet for val_fingerprint cross-check ...")
+        matches_pl = pl.read_parquet(MATCHES_PATH)
+        matches_pl = (
+            matches_pl
+            .filter(pl.col("id1").is_not_null() & pl.col("id2").is_not_null())
+            .with_columns([
+                pl.col("target").fill_null(0).cast(pl.Float32),
+                (pl.col("target") >= 0.5).cast(pl.Int8).alias("label"),
+            ])
+            .select(["id1", "id2", "label"])
+        )
+        matches_pd = matches_pl.to_pandas()
+        del matches_pl
+        labels_all = matches_pd["label"].to_numpy().astype(np.int64)
+        indices = np.arange(len(labels_all), dtype=np.int64)
+        _, val_idx = train_test_split(indices, test_size=0.20, random_state=SEED, stratify=labels_all)
+        val_pd_check = matches_pd.iloc[val_idx].reset_index(drop=True)
+        val_fingerprint = hashlib.sha256(
+            ",".join(f"{a}-{b}" for a, b in sorted(zip(val_pd_check["id1"], val_pd_check["id2"]))).encode("utf-8")
+        ).hexdigest()[:16]
+        print(f"[DATA] val_fingerprint={val_fingerprint} (expect efddb3def997f87b for the canonical split)")
+        if len(val_pd_check) != val_len:
+            print(f"[WARN] recomputed val split row count ({len(val_pd_check):,}) != cache's val_len ({val_len:,})")
+        del matches_pd, labels_all, indices, val_idx, val_pd_check
+        gc.collect()
+    else:
+        # -------------------------------------------------------------
+        # Canonical val split -- byte-identical to the original LoRA training
+        # code (filter nulls -> cast label -> select -> train_test_split).
+        # -------------------------------------------------------------
+        print("[DATA] Loading matches.parquet for canonical val split ...")
+        matches_pl = pl.read_parquet(MATCHES_PATH)
+        matches_pl = (
+            matches_pl
+            .filter(pl.col("id1").is_not_null() & pl.col("id2").is_not_null())
+            .with_columns([
+                pl.col("target").fill_null(0).cast(pl.Float32),
+                (pl.col("target") >= 0.5).cast(pl.Int8).alias("label"),
+            ])
+            .select(["id1", "id2", "label"])
+        )
+        matches_pd = matches_pl.to_pandas()
+        del matches_pl
+        gc.collect()
+
+        labels_all = matches_pd["label"].to_numpy().astype(np.int64)
+        indices = np.arange(len(labels_all), dtype=np.int64)
+        train_idx, val_idx = train_test_split(indices, test_size=0.20, random_state=SEED, stratify=labels_all)
+        val_pd = matches_pd.iloc[val_idx].reset_index(drop=True)
+        print(f"[DATA] matches.parquet rows: {len(matches_pd):,} | recomputed val rows: {len(val_pd):,} "
+              f"(expected 73,131 -- cross-check against CLAUDE.md)")
+
+        val_fingerprint = hashlib.sha256(
+            ",".join(f"{a}-{b}" for a, b in sorted(zip(val_pd["id1"], val_pd["id2"]))).encode("utf-8")
+        ).hexdigest()[:16]
+        print(f"[DATA] val_fingerprint={val_fingerprint}")
+
+        # Human train split (the 80% side of the canonical split) -- extracted
+        # BEFORE matches_pd is freed below. Mixed into the training pool
+        # alongside matches_llm (see INCLUDE_HUMAN_TRAIN comment in CONFIG): an
+        # earlier LLM-only run regressed val_macro_pr_auc, so this keeps the
+        # model anchored to the human signal it was originally tuned on while it
+        # also sees matches_llm's wider catalog coverage. label is human binary
+        # (0/1) here but stored as float32 to share dtype/memmap with the LLM
+        # pool's continuous soft labels -- BCEWithLogitsLoss treats a hard 0.0/1.0
+        # target as just a special case of a soft one, no special-casing needed.
+        if INCLUDE_HUMAN_TRAIN:
+            human_train_pd = matches_pd.iloc[train_idx][["id1", "id2", "label"]].reset_index(drop=True).copy()
+            human_train_pd["label"] = human_train_pd["label"].astype(np.float32)
+            print(f"[DATA] human train rows (mixed into training pool): {len(human_train_pd):,}")
+        else:
+            human_train_pd = None
+
+        del matches_pd, labels_all, indices, train_idx, val_idx
+        gc.collect()
+
+        # -------------------------------------------------------------
+        # matches_llm.parquet -- soft labels, defensive anti-join vs val
+        # -------------------------------------------------------------
+        print("[DATA] Loading matches_llm.parquet ...")
+        llm_pl = pl.read_parquet(MATCHES_LLM_PATH)
+        llm_pl = (
+            llm_pl
+            .filter(pl.col("id1").is_not_null() & pl.col("id2").is_not_null() & pl.col("id1").ne(pl.col("id2")))
+            .with_columns(pl.col("target").fill_null(0.0).cast(pl.Float32).alias("label"))
+            .select(["id1", "id2", "label"])
+        )
+
+        val_pairs_norm = pl.DataFrame({
+            "pmin": np.minimum(val_pd["id1"].to_numpy(), val_pd["id2"].to_numpy()),
+            "pmax": np.maximum(val_pd["id1"].to_numpy(), val_pd["id2"].to_numpy()),
+        }).unique()
+        llm_pl = llm_pl.with_columns([
+            pl.min_horizontal("id1", "id2").alias("pmin"),
+            pl.max_horizontal("id1", "id2").alias("pmax"),
+        ])
+        n_before = llm_pl.height
+        llm_pl = llm_pl.join(val_pairs_norm, on=["pmin", "pmax"], how="anti").drop(["pmin", "pmax"])
+        n_dropped = n_before - llm_pl.height
+        print(f"[LEAK-GUARD] matches_llm rows before={n_before:,} after anti-join vs val={llm_pl.height:,} "
+              f"(dropped {n_dropped:,})")
+        if n_dropped > 0:
+            print(f"[WARN] {n_dropped:,} matches_llm pairs overlapped the val split and were dropped -- "
+                  f"Kaggle's hosted matches_llm.parquet may differ from the local copy checked during planning.")
+
+        n_human = len(human_train_pd) if human_train_pd is not None else 0
+        if TARGET_TOTAL_TRAIN_ROWS is not None:
+            llm_cap = max(0, TARGET_TOTAL_TRAIN_ROWS - n_human)
+            llm_pl = llm_pl.sample(n=min(llm_cap, llm_pl.height), seed=SEED)
+            print(f"[DATA] TARGET_TOTAL_TRAIN_ROWS={TARGET_TOTAL_TRAIN_ROWS:,} -> matches_llm sampled to "
+                  f"{llm_pl.height:,} rows (+ {n_human:,} human train rows = "
+                  f"{llm_pl.height + n_human:,} total)")
+
+        llm_train_pd = llm_pl.to_pandas()
+        del llm_pl, val_pairs_norm
+        gc.collect()
+
+        if human_train_pd is not None:
+            train_pd = pd.concat([human_train_pd, llm_train_pd], ignore_index=True)
+            del human_train_pd, llm_train_pd
+        else:
+            train_pd = llm_train_pd
+        gc.collect()
+        print(f"[DATA] combined train rows: {len(train_pd):,} (human={n_human:,} + llm={len(train_pd) - n_human:,})")
+
+        # -------------------------------------------------------------
+        # items.parquet -- semi-join to needed ids + streaming collect.
+        #
+        # Earlier design assumed skipping an id-filter was fine since matches_llm
+        # needs most of the ~13.4M-row catalog anyway for the real full run --
+        # true for final row count, but WRONG about peak memory: a smoke-test
+        # run on Kaggle with this unfiltered chain got OOM-killed (Linux SIGKILL,
+        # "Killed" in the log) at RSS=21.7GB/32GB right after this collect(),
+        # before tokenization even started. Root cause: `.str.slice()` truncates
+        # AFTER polars has already decoded the full-length `attributes` column
+        # from parquet (per CLAUDE.md, raw attributes are large enough that even
+        # json.loads-ing them at 13M-row scale OOM'd during training) -- a lazy
+        # chain alone doesn't prevent that intermediate from being fully
+        # materialized. Two fixes, both applied: (1) a semi-join against the ids
+        # actually referenced by this run's train+val pairs, which the query
+        # optimizer can push down before the expensive string work; (2)
+        # engine="streaming" so the collect pipelines in chunks instead of
+        # building the full-length intermediate columns for all rows at once.
+        #
+        # NOTE: even with both fixes, tokenizing the full 11.48M-row combined
+        # pool took ~9.5h on Kaggle (vs ~2.1h for 60% of a training epoch) --
+        # the per-chunk join against this items table is rebuilt from scratch
+        # every chunk, likely the dominant remaining cost. Not yet fixed; see
+        # CLAUDE.md "Continued LoRA SFT on matches_llm.parquet". Prefer
+        # PRETOKENIZED_CACHE_DIR over re-tokenizing from scratch when a valid
+        # cache already exists for the composition you need.
+        # -------------------------------------------------------------
+        needed_ids = pd.unique(
+            pd.concat([train_pd["id1"], train_pd["id2"], val_pd["id1"], val_pd["id2"]])
+        )
+        needed_ids_lazy = pl.DataFrame({"id": pd.Series(needed_ids, dtype="int64")}).lazy()
+        print(f"[DATA] unique item ids needed: {len(needed_ids):,}")
+
+        print("[DATA] Loading items.parquet (semi-join to needed ids, streaming, column-pruned) ...")
+        items = (
+            pl.scan_parquet(ITEMS_PATH)
+            .join(needed_ids_lazy, on="id", how="semi")
+            .select(["id", "name", "category", "attributes"])
+            .with_columns([
+                pl.col("name").fill_null("").cast(pl.Utf8).str.slice(0, MAX_NAME_CHARS),
+                pl.col("category").fill_null("").cast(pl.Utf8).str.slice(0, MAX_CATEGORY_CHARS),
+                pl.col("attributes").fill_null("").cast(pl.Utf8, strict=False).str.slice(0, MAX_ATTR_CHARS),
+            ])
+            .with_columns(
+                (pl.lit("Name: ") + pl.col("name") + pl.lit(" Category: ") + pl.col("category") +
+                 pl.lit(" Attributes: ") + pl.col("attributes")).str.slice(0, MAX_ITEM_CHARS).alias("text")
+            )
+            .select(["id", "category", "text"])
+            .collect(engine="streaming")
+        )
+        print(f"[DATA] items loaded: {items.height:,}")
+        del needed_ids, needed_ids_lazy
+        gc.collect()
+        _malloc_trim()
+        _log_memory("after items load")
+
+        category_vocab = sorted(items.get_column("category").unique().to_list()) + ["UNKNOWN"]
+        category_to_id = {c: i for i, c in enumerate(category_vocab)}
+        print(f"[DATA] category vocab size: {len(category_vocab)}")
+
+        # -------------------------------------------------------------
+        # Tokenize -> memmap cache (train: soft float32 labels; val: binary
+        # int8 labels -- label_dtype is a required arg specifically so this
+        # can't be silently gotten wrong at a call site).
+        # -------------------------------------------------------------
+        print("[TOKENIZE] Building val memmap (int8 binary labels) ...")
+        val_paths, val_len = tokenize_to_memmap(
+            pairs_pd=val_pd, item_texts=items, category_to_id=category_to_id, tokenizer=tokenizer,
+            prefix="val", max_length=MAX_LENGTH, label_dtype=np.int8, cache_dir=CACHE_DIR,
+        )
+        print(f"[TOKENIZE] val effective rows: {val_len:,}")
+
+        print("[TOKENIZE] Building train memmap (float32 soft labels) ...")
+        train_paths, train_len = tokenize_to_memmap(
+            pairs_pd=train_pd, item_texts=items, category_to_id=category_to_id, tokenizer=tokenizer,
+            prefix="train", max_length=MAX_LENGTH, label_dtype=np.float32, cache_dir=CACHE_DIR,
+        )
+        print(f"[TOKENIZE] train effective rows: {train_len:,}")
 
     if train_len == 0 or val_len == 0:
         raise RuntimeError("Train or val dataset is empty after filtering.")
 
-    del items, val_pd, train_pd
-    gc.collect()
-    _malloc_trim()
-    _log_memory("after tokenize (items/val_pd/train_pd freed)")
+    if PRETOKENIZED_CACHE_DIR is None:
+        del items, val_pd, train_pd
+        gc.collect()
+        _malloc_trim()
+        _log_memory("after tokenize (items/val_pd/train_pd freed)")
+    else:
+        _log_memory("after cache validation")
 
     # Local, per-run copies of the batch-size config -- the VRAM probe below
     # may discover a different micro-batch size than the static default, and
@@ -1134,6 +1292,7 @@ def main():
         "include_human_train": INCLUDE_HUMAN_TRAIN,
         "human_train_rows": n_human,
         "target_total_train_rows": TARGET_TOTAL_TRAIN_ROWS,
+        "pretokenized_cache_dir": PRETOKENIZED_CACHE_DIR or "",
         "n_checkpoints_per_epoch": N_CHECKPOINTS,
         "enable_dataset_push": ENABLE_DATASET_PUSH and has_kaggle_creds,
     })
