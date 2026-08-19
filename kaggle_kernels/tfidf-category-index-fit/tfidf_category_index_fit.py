@@ -104,8 +104,17 @@ def _find_dataset_file(hint, filename):
     return hint
 
 
-def _safe_filename(category):
-    return "".join(c if c.isalnum() else "_" for c in category)
+def _safe_filename(index):
+    """ASCII-only by construction (a plain zero-padded index, not a
+    transliteration of the category name) -- a real run hit silent filename
+    corruption ('tfidf_Автотовары.joblib' -> garbage bytes) going through a
+    zip/unzip round-trip on Windows, because Cyrillic characters pass
+    str.isalnum() unchanged (it's Unicode-aware), so the OLD version of this
+    function produced Cyrillic filenames that are fragile across platforms/
+    zip implementations. The real category name lives in manifest.json
+    (UTF-8 JSON content has none of a filename's encoding fragility) --
+    filenames never need to carry it."""
+    return f"tfidf_cat{index:02d}.joblib"
 
 
 def build_text_expr():
@@ -166,8 +175,11 @@ def fit_category_vectorizers(items_path):
 def save_vectorizers(vectorizers, stats, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     manifest = {}
-    for cat, vec in vectorizers.items():
-        fname = f"tfidf_{_safe_filename(cat)}.joblib"
+    # Insertion order == the sorted `categories` order from
+    # fit_category_vectorizers (Python dicts preserve insertion order),
+    # so this enumeration is stable/deterministic run to run.
+    for index, (cat, vec) in enumerate(vectorizers.items()):
+        fname = _safe_filename(index)
         joblib.dump(vec, os.path.join(out_dir, fname), compress=3)
         manifest[cat] = fname
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
