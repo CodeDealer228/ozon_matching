@@ -1,0 +1,18 @@
+{
+  "id": "maximmarkovbb/frida-tokenize-items-v2",
+  "title": "Frida Tokenize Items V2",
+  "code_file": "frida_tokenize_items_v2.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

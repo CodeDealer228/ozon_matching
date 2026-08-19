@@ -1,0 +1,21 @@
+{
+  "id": "maxamsecret/frida-lora-continue-2ep",
+  "title": "Frida Lora Continue 2ep",
+  "code_file": "frida_lora_continue_2ep.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenized-items-human",
+    "maxamsecret/frida-lora-sft-epoch2-40"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}

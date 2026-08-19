@@ -1,0 +1,18 @@
+{
+  "id": "rays0n/frida-lora-sft-epoch2",
+  "title": "Frida Lora Sft Epoch2",
+  "code_file": "frida_lora_sft.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenized-items-human",
+    "maxamsecret/frida-lora"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

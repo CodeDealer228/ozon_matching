@@ -1,0 +1,17 @@
+{
+  "id": "maxamsecret/frida-tokenize-items",
+  "title": "Frida Tokenize Items",
+  "code_file": "frida_tokenize_items.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

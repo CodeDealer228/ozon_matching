@@ -1,0 +1,17 @@
+{
+  "id": "maxamsecret/frida-nan-diagnose",
+  "title": "FRIDA NaN Diagnose",
+  "code_file": "frida_nan_diagnose.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-item-tokens-human"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
