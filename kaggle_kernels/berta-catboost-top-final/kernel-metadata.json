@@ -1,0 +1,19 @@
+{
+  "id": "maximmarkovbb/berta-catboost-top-final",
+  "title": "Berta Catboost Top Final",
+  "code_file": "berta_catboost_top_final.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [],
+  "kernel_sources": [
+    "maximmarkovbb/berta-top-embed-extract",
+    "maximmarkovbb/tfidf-category-index-fit"
+  ],
+  "competition_sources": [],
+  "model_sources": []
+}

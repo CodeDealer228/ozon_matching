@@ -1,0 +1,22 @@
+{
+  "id": "maximmarkovbb/berta-top-embed-extract",
+  "title": "Berta Top Embed Extract",
+  "code_file": "berta_top_embed_extract.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/berta-tpu-lora-top-checkpoint"
+  ],
+  "kernel_sources": [
+    "maxamsecret/berta-merge-lora",
+    "maxamsecret/berta-tokenize-llm-256"
+  ],
+  "competition_sources": [],
+  "model_sources": []
+}

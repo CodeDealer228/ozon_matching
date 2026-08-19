@@ -1,0 +1,22 @@
+{
+  "id": "maxamsecret/berta-tpu-human-continue-384",
+  "title": "Berta Tpu Human Continue 384",
+  "code_file": "berta_tpu_human_continue_384.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/berta-tpu-lora-top-checkpoint"
+  ],
+  "kernel_sources": [
+    "maxamsecret/berta-merge-lora",
+    "maxamsecret/berta-tokenize-llm-256"
+  ],
+  "competition_sources": [],
+  "model_sources": []
+}
