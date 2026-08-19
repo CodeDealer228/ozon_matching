@@ -175,6 +175,128 @@ recovery the user did in parallel) — full detail in
 (classifier head over `[emb1, emb2, |emb1-emb2|]` vs. cosine similarity) not
 yet decided.
 
+**Update:** the real full run happened. Best checkpoint **0.53229** at 60%
+of the single epoch over all 11.48M rows — a new project best, above the
+0.5282 starting point — before hitting the hard 12h Kaggle session limit
+(`CANCEL_ACKNOWLEDGED` at ~69%). Not yet published as a Kaggle dataset; see
+Open TODOs.
+
+## In progress: FRIDA / BERTA encoder exploration
+
+Replacing the MiniLM (33M) cross-encoder with something bigger. Two
+parallel LoRA SFT tracks, human-only (`matches.parquet`) so far, both still
+mid-training (neither has finished a full pass, let alone converged) — see
+`kaggle_kernels/README.md` "Разведка новых энкодеров" for the full
+per-checkpoint numbers.
+
+- **FRIDA** (`ai-forever/FRIDA`, T5EncoderModel, 823M) — LoRA
+  `target_modules=["q","k","v","o","wi_0","wi_1","wo"]` (T5's real module
+  names, not BERT's), CLS pooling, item-level pre-tokenized cache
+  (`maxamsecret/frida-item-tokens-human`, sidesteps the per-chunk
+  pair↔items rejoin that cost continue-train ~9.5h/12h). `PAIR_MAX_LENGTH=128`
+  (cost/quota choice, not the 384 near-lossless budget). Two sessions so
+  far, each hit the 12h Kaggle wall before finishing one epoch: epoch 1
+  (`kaggle_kernels/frida-lora-sft-human-only-10-epochs`, account
+  `maxamsecret`) reached val macro PR-AUC **0.652** @ 60% of 1 epoch;
+  epoch 2 (`kaggle_kernels/frida-lora-sft-epoch2`, account `rays0n`,
+  resumes epoch 1's checkpoint) reached **0.674** @ 40% of its epoch. Both
+  already beat the shipped MiniLM checkpoint (0.5282).
+- **BERTA** (`sergeyzh/BERTA`, BertModel, 128.3M, a FRIDA distillation) —
+  real BERT pair format (`[CLS] item1 [SEP] item2 [SEP]` +
+  `token_type_ids`), **mean pooling** (not CLS — BERTA's own model card
+  calls this out as the one deliberate change from FRIDA),
+  `target_modules=["query","key","value","dense"]`.
+  `kaggle_kernels/berta-lora-sft-human-only-20-epochs` (account `rays0n`)
+  planned 20 epochs; hit the 12h wall at just 22% of that (global_step
+  5016/22840), already at val macro PR-AUC **0.7111** — the best number in
+  this project to date, still trending up, nowhere near converged.
+
+Debugging note carried by both: fp16 (and bf16 under `nn.DataParallel`)
+produced NaN from a specific layer onward — root-caused in
+`kaggle_kernels/frida-nan-diagnose` to `torch.autocast` opened in the
+calling thread not propagating into `DataParallel`'s per-replica `forward()`
+threads (documented PyTorch behavior, not a bug in this code). Fix: open
+autocast **inside** the model's own `forward()`, not around the outer call.
+Both scripts also apply the already-known "PEFT `is_trainable=True`" and
+"`del logits, loss` before `continue` on a skipped NaN microbatch" lessons
+from the MiniLM continue-train history instead of rediscovering them.
+
+Both checkpoints are now published as Kaggle datasets (by the team, not
+from a kernel's own auto-publish step): `maxamsecret/frida-lora-sft-epoch2-40`
+(FRIDA epoch 2, 0.674) and `maxamsecret/berta-lora-sft-5epoch` (BERTA,
+0.7111, with full optimizer/scheduler state). Neither ended up as a new
+*version* of the older canonical dataset it continues (`maxamsecret/frida-lora`
+for FRIDA, `rays0n/berta-lora-sft-checkpoint` for BERTA, which was never
+actually created) -- `kaggle datasets version` returned `Incompatible
+Dataset Type` for every `-r` mode tried (skip/zip/tar) against
+`frida-lora`, uploading real bandwidth each time without ever committing;
+the older datasets are unchanged. `kaggle_kernels/frida-lora-sft-epoch3`
+and `kaggle_kernels/berta-lora-sft-human-only-20-epochs`'s
+`kernel-metadata.json` both point `dataset_sources` at the actual new
+dataset names now (not the old ones) -- if a checkpoint ever needs to move
+again, only `dataset_sources` needs updating, since the resume code
+searches `/kaggle/input` by file content (`adapter_config.json` /
+`train_state.json`), not by dataset name. The bi-encoder checkpoint is
+also published, as `maxamsecret/qwen-0-6-lora-sft-1epoch` (no prior
+dataset existed for it -- nothing to version).
+
+**A working FRIDA submission already passed the contest's external test
+bench**: `matching-frida_lora_adapter-submit.zip` (downloaded locally to
+`submits/matching-frida_lora_adapter-submit/`, gitignored — 1.3GB zip + a
+1.65GB bf16 base model). Verified byte-for-byte (sha256) against the
+adapter/classifier of `frida-lora-sft-human-only-10-epochs`'s **epoch-1**
+checkpoint (val 0.652) — *not* epoch 2's 0.674, which hasn't been submitted
+anywhere yet. Its `src/utils.py` is a real, battle-tested reference for
+FRIDA inference specifically:
+- Does **not** merge the LoRA adapter (unlike `submits/lora`, which merges
+  precisely to drop the `peft` runtime dependency) — ships `frida-base/`
+  (bf16, to fit the 5GB zip budget) and `frida-lora-adapter/` separately,
+  plus a `wheels/` dir of ~26 offline pip wheels for `peft` + its transitive
+  deps (confirmed absent from `odsai/ecup26-matching-baseline:1.0` on the
+  real test stand). Installs via `pip install --no-index --target
+  {tempfile.gettempdir()}` at runtime, appended to `sys.path` — a real
+  stand run hit `OSError: Read-only file system` on both system
+  site-packages and the `/root/.local` pip fallback; only `/tmp` was
+  writable in the judging container.
+- **Its pairwise text-preprocessing contract is FRIDA-specific, not the
+  formula in this file's "Text preprocessing" section above** (that one is
+  `submits/lora`/MiniLM's contract only). FRIDA's is: item-level
+  tokenization with special tokens, `Category:` span excision (zero
+  discriminative signal, proven), fair-share truncation to 128 — byte-match
+  to what `frida-lora-sft-*` kernels train against, detailed in
+  `kaggle_kernels/frida-lora-sft-human-only-10-epochs/README.md`.
+
+No tracked `submits/frida_lora_adapter/` exists yet (the working code above
+is only in the local, gitignored zip) — worth promoting `run.py`/
+`src/utils.py`/`metadata.json` into git, mirroring `submits/lora`'s
+pattern, once it's decided which checkpoint (epoch 1, epoch 2, or a
+resumed/finished FRIDA run) should be the one tracked.
+
+### Known val ↔ leaderboard pairs
+
+macro PR-AUC on our val split vs. the contest leaderboard's Mean PR-AUC:
+
+| Variant | val macro PR-AUC | leaderboard |
+|---|---|---|
+| MiniLM baseline | 0.3710 | 0.1333 |
+| MiniLM LoRA (shipped) | 0.5282 | 0.265 |
+| FRIDA epoch 1 (submitted, passed test bench) | 0.652 | **0.3459** |
+| FRIDA epoch 2 (not submitted) | 0.675 | ? |
+| BERTA (not submitted) | 0.711 | ? |
+| Qwen3 bi-encoder + LoRA + MLP head (teammate `grigoriyyy`, `bi-encoder` branch, not submitted, **different val split** — see caveat below) | 0.726 | ? |
+
+A least-squares fit on the three *confirmed* points (all cross-encoders on
+the same seed-42 val split) — `leaderboard ≈ 0.763 × val − 0.146` (R²≈0.996
+on just those 3 points) — would put BERTA around **~0.40** and FRIDA epoch 2
+around **~0.37** leaderboard. Treat as a rough sanity check, not a
+prediction: it's a 3-point fit extrapolated past its own range, and it says
+nothing about a *bi-encoder*'s val→test generalization (different
+architecture family than every point used to fit it; its 0.726 is also on
+a private item-disjoint 5-fold split, not the seed-42 one the other rows
+share — see `kaggle_kernels/qwen3-bi-encoder-lora-sft/README.md` on the
+`bi-encoder` branch). A real second data point from a non-cross-encoder
+submission would be worth far more than refining this fit further.
+
 ## Repo layout
 
 ```
@@ -238,8 +360,10 @@ Always also extract the actual built zip to a clean dir and test *that*
 - `.venv/` has only `kaggle`/`jupyter` tooling by default — install
   `polars pandas pyarrow scikit-learn mlflow torch transformers peft
   safetensors` on demand.
-- **Two separate Kaggle accounts, two separate GPU/TPU quotas** — do not mix
-  up which kernel/dataset was pushed under which:
+- **Three separate Kaggle accounts, three separate GPU/TPU quotas** — do not
+  mix up which kernel/dataset was pushed under which, and **ask which
+  account before launching a new GPU session** if it isn't obvious from
+  context:
   - `maxamsecret` — default account, creds at `~/.kaggle/kaggle.json` (not in
     repo). Owns `ozon-ecup-2026-matching` (the private source dataset) and
     all FRIDA-related kernels/datasets (`frida-*`).
@@ -250,15 +374,22 @@ Always also extract the actual built zip to a clean dir and test *that*
     this). Has been granted read access to `maxamsecret/ozon-ecup-2026-matching`
     (confirmed via `kaggle datasets files`). All BERTA kernels/datasets are
     namespaced `rays0n/berta-*`, not `maxamsecret/...`.
-  - To run a CLI command as the non-default account, override via env vars
+  - `maximmarkovbb` — third account, added for the FRIDA v2 continue-train
+    (`kaggle_kernels/frida-lora-v2-epoch`) with a clean, unused GPU quota.
+    Creds at `~/.kaggle/kaggle_maxim_markov.json`. Also has read access to
+    `maxamsecret/ozon-ecup-2026-matching`. Kernels/datasets under this
+    account are namespaced `maximmarkovbb/...` and, per its own convention,
+    always public.
+  - To run a CLI command as a non-default account, override via env vars
     rather than touching the default file: `KAGGLE_USERNAME=rays0n
     KAGGLE_KEY=$(python -c "import json;print(json.load(open('$HOME/.kaggle/kaggle_rays0n.json'))['key'])")
-    kaggle ...`. Any kernel pushed under `rays0n/...` must also use that
-    account's creds as kernel secrets (Kaggle website → kernel → Settings →
-    Secrets) if it needs `KAGGLE_USERNAME`/`KAGGLE_KEY` at runtime (e.g.
-    berta-lora-sft's checkpoint-dataset auto-publish) — this is a per-kernel
-    web UI setting, not something `kernel-metadata.json` or the CLI push can
-    configure.
+    kaggle ...` (swap in `kaggle_maxim_markov.json`/`maximmarkovbb` as
+    needed). Any kernel pushed under a non-default account must also use
+    that account's creds as kernel secrets (Kaggle website → kernel →
+    Settings → Secrets) if it needs `KAGGLE_USERNAME`/`KAGGLE_KEY` at
+    runtime (e.g. berta-lora-sft's checkpoint-dataset auto-publish) — this
+    is a per-kernel web UI setting, not something `kernel-metadata.json` or
+    the CLI push can configure.
 - mlflow≥3 needs `os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"` before
   `set_tracking_uri("file:...")` or it raises (file store is in "maintenance
   mode"). Local tracking, no server: `mlflow ui --backend-store-uri
@@ -294,3 +425,14 @@ Always also extract the actual built zip to a clean dir and test *that*
    `[emb1, emb2, |emb1-emb2|]` vs. cosine similarity), then train and get a
    real val macro PR-AUC to compare
    against 0.5282/0.53229.
+6. Teammate `grigoriyyy`'s parallel **bi-encoder** track (Qwen3-Embedding-
+   0.6B + LoRA + MLP head) already produced real scored submissions, tracked
+   under `submits/ecup_qwen_stage2_submit` (test 0.41, current best of any
+   submission in the repo — a checkpoint that *regressed* ~1% on val but
+   *gained* on the real test stand, see `[[submission-test-scores]]`-style
+   note in project memory) and `submits/ecup_qwen_biencoder_submit_128_length`
+   (0.35/0.37 variants). Worth understanding *why* the train-overfit
+   checkpoint generalizes better here before assuming it's a fluke — it's
+   already informed how FRIDA/BERTA checkpoint selection for submission is
+   being approached (building both "last" and "best" val-checkpoint
+   submissions rather than assuming "best" always wins).

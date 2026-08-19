@@ -1,0 +1,21 @@
+{
+  "id": "maxamsecret/rubert-mini-frida-recall-hard-negative-mining",
+  "id_no": 130837723,
+  "title": "rubert-mini-frida recall hard-negative mining",
+  "code_file": "rubert_mini_frida_recall_mining.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/rubert-mini-frida-item-embeddings"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461"
+}
