@@ -436,3 +436,35 @@ Always also extract the actual built zip to a clean dir and test *that*
    already informed how FRIDA/BERTA checkpoint selection for submission is
    being approached (building both "last" and "best" val-checkpoint
    submissions rather than assuming "best" always wins).
+7. **Error analysis on the current best checkpoints**: look at *which*
+   validation mistakes actually move macro PR-AUC the most (not just the
+   aggregate number) and look for real patterns — category clusters,
+   attribute-length effects, near-duplicate-vs-true-duplicate confusion,
+   etc. Nothing systematic done yet beyond the per-category breakdown in
+   `reports/val_per_category_lora.md` (MiniLM-only, stale relative to
+   BERTA/FRIDA/Qwen3).
+8. **Synthetic data generation** — design how to generate synthetic
+   pairs/items for this task. Not started; `negative_patterns/` (rule-based
+   hard-negative pairs per category, see `kaggle_kernels/negative-pattern-
+   sampling`) is adjacent but is pattern-mined from real data, not
+   synthetic generation.
+9. **Synthetic data usage** — once (8) exists, decide how it actually feeds
+   training (mixed into SFT like `matches_llm.parquet` already is, a
+   separate pretraining/augmentation stage, targeted at the weak categories
+   from (7), etc.) — depends on what (7)'s error patterns actually show.
+10. **`submits/matching-qwen-berta-catboost-submit` fits the timing budget
+    but scores badly** — root cause: the CatBoost head was trained on
+    LLM-labeled data (`matches_llm.parquet`), but BERTA's own eval
+    distribution and Qwen3's own eval distribution differ from each other
+    and (presumably) from the LLM-label distribution the CatBoost head
+    actually learned on — a mismatch, not a bug in the pipeline itself
+    (the qwen+berta+catboost combination genuinely runs in time). Need a
+    fix that does **not** require re-running the underlying qwen/BERTA
+    training (~50 GPU-hours already sunk into those checkpoints) — only
+    re-fit/re-derive the CatBoost head on non-leaking features. The
+    project already has one relevant precedent to build on:
+    `kaggle_kernels/berta-catboost-leak` vs. `berta-catboost-noleak`
+    (explicit train/val leakage A/B for a BERTA-only CatBoost head, see
+    `kaggle_kernels/README.md`) — extend that same leak-vs-noleak
+    methodology to the combined qwen+berta feature set rather than
+    inventing a new one.
