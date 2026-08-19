@@ -18,5 +18,6 @@
     "maxamsecret/berta-tokenize-llm-256"
   ],
   "competition_sources": [],
-  "model_sources": []
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
 }

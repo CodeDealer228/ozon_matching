@@ -15,5 +15,6 @@
     "maximmarkovbb/tfidf-category-index-fit"
   ],
   "competition_sources": [],
-  "model_sources": []
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
 }
