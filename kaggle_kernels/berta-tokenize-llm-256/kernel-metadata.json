@@ -1,0 +1,17 @@
+{
+  "id": "maxamsecret/berta-tokenize-llm-256",
+  "title": "BERTA Tokenize Llm 256",
+  "code_file": "berta_tokenize_llm_256.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

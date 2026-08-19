@@ -1,0 +1,16 @@
+{
+  "id": "maxamsecret/berta-llm-cache-probe",
+  "title": "BERTA LLM Cache Probe",
+  "code_file": "berta_llm_cache_probe.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/berta-tokenized-items-llm"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

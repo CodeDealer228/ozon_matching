@@ -1,0 +1,16 @@
+{
+  "id": "rays0n/berta-lora-sft-human-only-20-epochs",
+  "title": "BERTA LoRA SFT (human-only, 20 epochs)",
+  "code_file": "berta_lora_sft.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

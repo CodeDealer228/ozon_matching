@@ -1,0 +1,22 @@
+{
+  "id": "rays0n/berta-hardneg-balanced",
+  "title": "BERTA Hardneg Balanced",
+  "code_file": "berta_hardneg_balanced.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/rubert-mini-frida-recall-hard-negative-mined"
+  ],
+  "kernel_sources": [
+    "maxamsecret/berta-lora-sft-continue-5-epochs"
+  ],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}

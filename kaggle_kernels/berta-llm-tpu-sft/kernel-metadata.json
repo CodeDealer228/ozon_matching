@@ -1,0 +1,21 @@
+{
+  "id": "maxamsecret/berta-llm-tpu-sft",
+  "title": "BERTA LLM TPU SFT",
+  "code_file": "berta_llm_tpu_sft.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "kernel_sources": [
+    "maxamsecret/berta-merge-lora",
+    "maxamsecret/berta-tokenize-llm-256"
+  ],
+  "competition_sources": [],
+  "model_sources": []
+}

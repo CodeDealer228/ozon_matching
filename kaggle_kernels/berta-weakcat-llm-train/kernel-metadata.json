@@ -1,0 +1,22 @@
+{
+  "id": "rays0n/berta-weakcat-llm-train",
+  "title": "BERTA Weakcat LLM Train",
+  "code_file": "berta_weakcat_llm_train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "kernel_sources": [
+    "maxamsecret/berta-lora-sft-continue-5-epochs",
+    "maxamsecret/berta-weakcat-llm-prep"
+  ],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}

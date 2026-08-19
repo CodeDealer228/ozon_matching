@@ -1,0 +1,19 @@
+{
+  "id": "maxamsecret/berta-merge-lora",
+  "title": "BERTA Merge Lora",
+  "code_file": "berta_merge_lora.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [],
+  "kernel_sources": [
+    "rays0n/berta-llm-continue-train"
+  ],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}

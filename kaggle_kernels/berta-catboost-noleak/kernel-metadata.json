@@ -1,0 +1,19 @@
+{
+  "id": "maxamsecret/berta-catboost-noleak",
+  "title": "BERTA Catboost Noleak",
+  "code_file": "berta_catboost_noleak.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [],
+  "kernel_sources": [
+    "maxamsecret/berta-embed-extract"
+  ],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}

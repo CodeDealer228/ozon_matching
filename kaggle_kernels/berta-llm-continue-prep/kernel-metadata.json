@@ -1,0 +1,17 @@
+{
+  "id": "maxamsecret/berta-llm-continue-train-prep",
+  "title": "BERTA LLM Continue Train Prep",
+  "code_file": "berta_llm_continue_prep.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

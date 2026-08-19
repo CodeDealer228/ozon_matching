@@ -1,0 +1,19 @@
+{
+  "id": "maxamsecret/berta-catboost-leak",
+  "title": "BERTA Catboost Leak",
+  "code_file": "berta_catboost_leak.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [],
+  "kernel_sources": [
+    "maxamsecret/berta-embed-extract"
+  ],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}
