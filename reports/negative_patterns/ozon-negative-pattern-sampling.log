@@ -1,0 +1,16 @@
+[{"stream_name":"stdout","time":3.3990172149999998,"data":"[DATA] loading matches.parquet ...\n"}
+,{"stream_name":"stdout","time":3.847566472,"data":"[DATA] matches: 365,654 pairs (positive rate: 0.2568)\n"}
+,{"stream_name":"stdout","time":3.912715609,"data":"[DATA] unique item ids needed: 711,304\n"}
+,{"stream_name":"stdout","time":3.912753629,"data":"[DATA] loading items.parquet (semi-join, streaming) for name/category/attributes ...\n"}
+,{"stream_name":"stdout","time":27.353409633,"data":"[DATA] items loaded: 711,304\n"}
+,{"stream_name":"stdout","time":28.520995381,"data":"[FILTER] pairs with both items \u003c= 1000 chars: 317,666 / 365,654 (86.9%)\n"}
+,{"stream_name":"stdout","time":28.537730261,"data":"[DATA] categories found: 20\n"}
+,{"stream_name":"stdout","time":28.947441236,"data":"[SAMPLE] total records: 400 (expected 20 x 20 = 400)\n"}
+,{"stream_name":"stdout","time":28.954169649,"data":"[DONE] wrote 400 records to /kaggle/working/negative_pattern_samples.json\n"}
+,{"stream_name":"stderr","time":32.663130234,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":32.663181544,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":33.01358087,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":33.0136255,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":34.837591077,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":36.258947131,"data":"[NbConvertApp] Writing 304704 bytes to __results__.html\n"}
+]

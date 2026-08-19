@@ -1,0 +1,9 @@
+{
+  "human_rows": 365654,
+  "llm_rows": 11187780,
+  "exact_order_pair_overlap": 0,
+  "unordered_pair_overlap": 0,
+  "human_unique_item_ids": 711304,
+  "llm_unique_item_ids": 12384610,
+  "shared_item_ids": 0
+}

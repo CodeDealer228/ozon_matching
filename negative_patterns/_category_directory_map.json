@@ -1,0 +1,22 @@
+{
+  "Автотовары": "negative_patterns/Автотовары",
+  "Аптека": "negative_patterns/Аптека",
+  "Бытовая техника": "negative_patterns/Бытовая техника",
+  "Бытовая химия": "negative_patterns/Бытовая химия",
+  "Галантерея и аксессуары": "negative_patterns/Галантерея и аксессуары",
+  "Детские товары": "negative_patterns/Детские товары",
+  "Дом и сад": "negative_patterns/Дом и сад",
+  "Канцелярские товары": "negative_patterns/Канцелярские товары",
+  "Красота и гигиена": "negative_patterns/Красота и гигиена",
+  "Мебель": "negative_patterns/Мебель",
+  "Музыкальные инструменты": "negative_patterns/Музыкальные инструменты",
+  "Обувь": "negative_patterns/Обувь",
+  "Одежда": "negative_patterns/Одежда",
+  "Продукты питания": "negative_patterns/Продукты питания",
+  "Спорт и отдых": "negative_patterns/Спорт и отдых",
+  "Строительство и ремонт": "negative_patterns/Строительство и ремонт",
+  "Товары для животных": "negative_patterns/Товары для животных",
+  "Хобби и творчество": "negative_patterns/Хобби и творчество",
+  "Электроника": "negative_patterns/Электроника",
+  "Ювелирные изделия": "negative_patterns/Ювелирные изделия"
+}

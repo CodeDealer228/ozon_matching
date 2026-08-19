@@ -1,0 +1,7 @@
+{
+  "n_items": 711304,
+  "max_length": 256,
+  "prefix": "paraphrase: ",
+  "model": "ai-forever/FRIDA",
+  "source": "items_human.parquet (== matches.parquet item scope)"
+}
