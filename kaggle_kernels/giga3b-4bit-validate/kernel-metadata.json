@@ -1,0 +1,19 @@
+{
+  "id": "maxamsecret/giga3b-4bit-validate",
+  "title": "Giga3B 4bit Validate",
+  "code_file": "giga3b_4bit_validate.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/ozon-giga3b-crossencoder-code",
+    "maxamsecret/giga3b-4bit-nf4-weights"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

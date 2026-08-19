@@ -1,0 +1,18 @@
+{
+  "id": "maxamsecret/giga3b-cross-encoder-classifier-fit",
+  "title": "Giga3B cross-encoder classifier fit",
+  "code_file": "giga3b_crossencoder_classifier_fit.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/giga3b-quantize",
+    "maxamsecret/ozon-giga3b-crossencoder-code"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
