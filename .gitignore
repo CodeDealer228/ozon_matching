@@ -26,6 +26,14 @@ submits/lora/matching-lora-submit.zip
 submits/lora.zip
 submits/baseline/matching-baseline-submit.zip
 
+# Ad-hoc downloaded/extracted submission archives (manually pulled from an
+# external test-bench link, not produced by this repo's own build scripts)
+# -- e.g. matching-frida_lora_adapter-submit/: 1.3GB zip + a 1.65GB bf16 base
+# model. If one of these becomes the shipped variant, promote just the small
+# code (run.py/src/utils.py/metadata.json) into a proper tracked submits/
+# dir by hand -- don't unignore the whole folder.
+submits/matching-*-submit/
+
 # Kaggle kernel run artifacts -- downloaded outputs/pulled sources,
 # regenerate by re-running the kernel (see kaggle_kernels/*/kernel-metadata.json).
 kaggle_kernels/*/output/
@@ -34,6 +42,12 @@ kaggle_kernels/*/pulled/
 # Scratch / local test artifacts (downloaded adapters, extracted zips for
 # testing, sampled parquet files, prediction CSVs from smoke tests).
 artifacts/
+
+# Kaggle API credentials -- real API keys, never commit. Root-anchored so
+# this doesn't touch kaggle_kernels/*/kernel-metadata.json or the tracked
+# .claude/skills/kaggle/ skill.
+/kaggle.json
+/kaggle*.json
 
 # OS / editor cruft
 .DS_Store

@@ -1,0 +1,22 @@
+{
+  "id": "rays0n/berta-lora-sft-human-only-20-epochs",
+  "id_no": 130675557,
+  "title": "BERTA LoRA SFT (human-only, 20 epochs)",
+  "code_file": "berta-lora-sft-human-only-20-epochs.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/berta-lora-sft-5epoch"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-private-byod/python@sha256:37c64f7dd9c54116ecd1bcc88817c5469b88387388fade02bfa8bf3fc647d461",
+  "machine_shape": "NvidiaTeslaT4"
+}
