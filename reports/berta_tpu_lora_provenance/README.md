@@ -1,98 +1,101 @@
-# Provenance: `matching-berta_tpu_lora-submit.zip` (test score 0.47)
+# Происхождение `matching-berta_tpu_lora-submit.zip` (тест-скор 0.47)
 
-Reconstructed and **hash-verified**, not recalled from memory. The zip at
-`submits/matching-berta_tpu_lora-submit.zip` was extracted and its adapter/
-classifier sha256'd against a locally-preserved copy of the training run's
-recovered checkpoint (`tpu_e9/` — downloaded via `kaggle kernels output`
-during this project's original BERTA-TPU work, before the crash-fix
-described below existed):
+Восстановлено и **проверено по хешам**, а не по памяти. Из
+`submits/matching-berta_tpu_lora-submit.zip` извлечены адаптер и
+классификатор, их sha256 сверен с локально сохранённой копией
+восстановленного чекпоинта тренировочного рана (`tpu_e9/` — скачан через
+`kaggle kernels output` ещё во время исходной работы над BERTA-TPU, до
+того как появился описанный ниже фикс краша):
 
-| File (inside the zip) | sha256 | Matches |
+| Файл (внутри zip) | sha256 | Совпадение |
 |---|---|---|
-| `models/berta-lora-adapter/adapter_model.safetensors` | `26b294123b2445fa7bb46e0c36c2ee5ad259c218ea80e357661f49729800cd34` | ✅ byte-identical to `tpu_e9/lora_berta_tpu_sft/checkpoint/adapter/adapter_model.safetensors` |
-| `classifier.pt` | `70ac231c64ad2f70ac73592afbce76c3ee9f0cb804ecb16e8b0f4258325d43fa` | ✅ byte-identical to `tpu_e9/lora_berta_tpu_sft/checkpoint/classifier.pt` |
+| `models/berta-lora-adapter/adapter_model.safetensors` | `26b294123b2445fa7bb46e0c36c2ee5ad259c218ea80e357661f49729800cd34` | ✅ побайтово совпадает с `tpu_e9/lora_berta_tpu_sft/checkpoint/adapter/adapter_model.safetensors` |
+| `classifier.pt` | `70ac231c64ad2f70ac73592afbce76c3ee9f0cb804ecb16e8b0f4258325d43fa` | ✅ побайтово совпадает с `tpu_e9/lora_berta_tpu_sft/checkpoint/classifier.pt` |
 
-This confirms with certainty which training run produced the shipped
-weights — not just "probably this one."
+Это подтверждает с полной уверенностью, какой именно тренировочный ран
+дал сданные веса — не "скорее всего этот", а точно.
 
-## Exact kernel sequence
+## Точная последовательность кернелов
 
-1. **`rays0n/berta-llm-continue-train`** (pre-existing checkpoint, part of
-   the earlier BERTA lineage — see `kaggle_kernels/README.md`) → PEFT
-   adapter, `global_step=2002`, `val_macro_pr_auc=0.7254629058736792`.
+1. **`rays0n/berta-llm-continue-train`** (уже существовавший чекпоинт, часть
+   более ранней линии BERTA — см. `kaggle_kernels/README.md`) → PEFT-адаптер,
+   `global_step=2002`, `val_macro_pr_auc=0.7254629058736792`.
 2. **`kaggle_kernels/berta-merge-lora`** (`maxamsecret/berta-merge-lora`) —
-   loads base `sergeyzh/BERTA` + the adapter from (1), `merge_and_unload()`.
-   Output: `merged_encoder/` (plain `BertModel`, no `peft` needed) +
-   `classifier.pt` (the OLD classifier head from (1), carried through
-   unchanged at this step — not retrained here) + `merge_meta.json`.
-   Confirmed directly from the training run's own printed log:
+   загружает базу `sergeyzh/BERTA` + адаптер из (1), `merge_and_unload()`.
+   На выходе: `merged_encoder/` (обычный `BertModel`, `peft` не нужен) +
+   `classifier.pt` (СТАРАЯ голова классификатора из (1), на этом шаге
+   переносится без изменений — не переобучается здесь) + `merge_meta.json`.
+   Подтверждено напрямую из собственного лога тренировочного рана:
    `{'base_model': 'sergeyzh/BERTA', 'hidden_dim': 768, 'source_checkpoint':
    'rays0n/berta-llm-continue-train', 'source_global_step': 2002,
    'source_val_macro_pr_auc': 0.7254629058736792}`.
 3. **`kaggle_kernels/berta-tokenize-llm-256`**
-   (`maxamsecret/berta-tokenize-llm-256`) — TPU item-token cache,
-   `human_scope` (711,304 items) + `llm_scope` (12,384,610 items),
-   `ITEM_MAX_LENGTH=256`, `PREFIX="paraphrase: "`. (This kernel was
-   restarted once earlier in the project to fix a prefix bug — the run
-   consumed here is confirmed to be the corrected one via the mounted path
-   in the training log.)
+   (`maxamsecret/berta-tokenize-llm-256`) — TPU-кэш токенов по товарам,
+   `human_scope` (711,304 товаров) + `llm_scope` (12,384,610 товаров),
+   `ITEM_MAX_LENGTH=256`, `PREFIX="paraphrase: "`. (Этот кернел раньше в
+   проекте перезапускался один раз из-за бага с prefix — здесь
+   использован именно исправленный ран, что подтверждается путём монтирования
+   в логе тренировки.)
 4. **`kaggle_kernels/berta-llm-tpu-sft`** (`maxamsecret/berta-llm-tpu-sft`)
-   — TPU v5e-8, `torch_xla`. Builds a **fresh** LoRA (`get_peft_model`, not
-   a resume) on top of (2)'s merged base; classifier **warm-started** from
-   (2)'s `classifier.pt` (then further trained, not frozen). Trained on the
-   **full** `matches_llm.parquet` (11,187,780 pairs, no sampling) mixed
-   with the full human train split (292,523) = 11,480,303 combined rows.
+   — TPU v5e-8, `torch_xla`. Строит **свежую** LoRA (`get_peft_model`, не
+   резюм) поверх мёрженной базы из (2); классификатор **warm-started** от
+   `classifier.pt` из (2) (дальше дообучается, не заморожен). Обучен на
+   **полном** `matches_llm.parquet` (11,187,780 пар, без сэмплирования) в
+   смеси с полным человеческим train-сплитом (292,523) = 11,480,303
+   объединённых строк.
    - `PAIR_MAX_LENGTH=256`, LoRA `r=16, lora_alpha=32, lora_dropout=0.15`,
-     `target_modules=["key","query","dense","value"]` (from the shipped
-     `adapter_config.json` directly).
-   - `per_core_train_batch=64 × world_size=8 = 512` effective batch,
+     `target_modules=["key","query","dense","value"]` (взято напрямую из
+     сданного `adapter_config.json`).
+   - `per_core_train_batch=64 × world_size=8 = 512` эффективный батч,
      `steps_per_epoch_global=22422`, `warmup=2242` (10%),
-     `max_train_seconds=28800` (8h cap).
-   - **This run crashed** (`concurrent.futures.process.BrokenProcessPool`).
-     Root-caused and fixed in a later session (see
-     `kaggle_kernels/README.md` → BERTA section): all 8 forked TPU replicas
-     were independently reloading/concatenating the full item cache and
-     `matches_llm.parquet`, exhausting host RAM right at an unnecessary,
-     schedule-mismatched second-epoch boundary. Not relevant to *this*
-     checkpoint's validity — see the note below.
+     `max_train_seconds=28800` (потолок 8ч).
+   - **Этот ран упал** (`concurrent.futures.process.BrokenProcessPool`).
+     Причина найдена и исправлена в более поздней сессии (см.
+     `kaggle_kernels/README.md` → раздел BERTA): все 8 форкнутых TPU-реплик
+     независимо перезагружали и конкатенировали полный кэш товаров и
+     `matches_llm.parquet`, что эксгаустило RAM хоста прямо на границе
+     лишней, не согласованной с расписанием второй эпохи. На валидность
+     ИМЕННО ЭТОГО чекпоинта это не влияет — см. примечание ниже.
 
-## The shipped checkpoint is a 50%-of-one-epoch checkpoint
+## Сданный чекпоинт — это чекпоинт на 50% одной эпохи
 
-The crashed run had exactly **one** successful checkpoint/eval before
-dying: at **`global_step=11211`** — exactly 50% of the 22,422-step epoch
+У упавшего рана был ровно один успешный чекпоинт/eval перед смертью: на
+шаге **`global_step=11211`** — ровно 50% от 22,422-шаговой эпохи
 (`VAL_EVERY_FRACTION=0.5` → `checkpoint_interval=11211`) —
-**`val_macro_pr_auc=0.7087279672868713`**. Per-step training logs continue
-past this point to ~step 22400 (LR fully decayed, i.e. training *did* reach
-~100% of the epoch), but the epoch-end (100%) checkpoint never finished
-saving before the crash. So the 50%-mark checkpoint is the *only* one that
-ever reached disk, hence the only one recoverable via `kaggle kernels
-output` on a cancelled session — and it is exactly what's shipped.
+**`val_macro_pr_auc=0.7087279672868713`**. Логи обучения по шагам
+продолжаются и после этой точки примерно до шага 22400 (LR полностью
+затух, то есть обучение реально дошло до ~100% эпохи), но чекпоинт на
+границе эпохи (100%) не успел сохраниться до краша. Так что чекпоинт на
+отметке 50% — единственный, который вообще попал на диск, и, соответственно,
+единственный, который можно было восстановить через `kaggle kernels
+output` после отмены сессии — и это именно то, что было сдано.
 
-## Build steps (this repo, not Kaggle)
+## Шаги сборки (в этом репозитории, не на Kaggle)
 
-5. Recovered checkpoint copied into `submits/berta_tpu_lora/`:
-   `models/berta-lora-adapter/` (from (4)'s `adapter/`, unchanged),
-   `classifier.pt` (from (4), unchanged, kept fp32 — the training script
-   never casts the classifier to bf16, only the frozen base), `models/
-   berta-base/` (bf16 conversion of (2)'s `merged_encoder/`), plus
-   `wheels/` (offline `peft` + transitive deps, borrowed from
-   `submits/berta_catboost/wheels/`), `src/utils.py` / `run.py` /
-   `metadata.json` (BERTA cross-encoder inference contract,
-   `PAIR_MAX_LENGTH=256` matching training).
+5. Восстановленный чекпоинт скопирован в `submits/berta_tpu_lora/`:
+   `models/berta-lora-adapter/` (из `adapter/` в (4), без изменений),
+   `classifier.pt` (из (4), без изменений, остаётся fp32 — тренировочный
+   скрипт никогда не приводит классификатор к bf16, только замороженную
+   базу), `models/berta-base/` (bf16-конвертация `merged_encoder/` из
+   (2)), плюс `wheels/` (офлайн `peft` + транзитивные зависимости,
+   позаимствованы из `submits/berta_catboost/wheels/`), `src/utils.py` /
+   `run.py` / `metadata.json` (контракт инференса BERTA cross-encoder,
+   `PAIR_MAX_LENGTH=256`, совпадает с тренировкой).
 6. `python scripts/build_submission_zip.py --submission-dir
    submits/berta_tpu_lora` → `submits/matching-berta_tpu_lora-submit.zip`
-   — **the exact file that scored 0.47.**
+   — **именно этот файл получил скор 0.47.**
 
-## One finding worth flagging before the val/test discussion
+## Одна находка, которую стоит обозначить перед разговором про val/тест
 
-`train_state.json`'s `best_val_macro_pr_auc` is a **running-best metric**,
-not a guarantee that the *saved weights* achieved it: `save_checkpoint()`
-in `berta_llm_tpu_sft.py` is called unconditionally at every checkpoint
-interval with whatever the *current* live weights are, alongside the
-*historical* best metric value — it does not re-save the weights from the
-step that actually earned that best score. For **this** specific shipped
-checkpoint that's not an issue (it's the run's only checkpoint event, so
-weights and metric genuinely correspond to the same step) — but it's a
-real trap for any *other* checkpoint pulled from a run with more than one
-checkpoint event (e.g. a completed run that checkpoints at both 50% and
-100%), and directly relevant to reasoning about `berta_tpu_lora_after_llm`.
+`best_val_macro_pr_auc` в `train_state.json` — это **бегущий максимум
+метрики**, а не гарантия, что именно СОХРАНЁННЫЕ веса его достигли:
+`save_checkpoint()` в `berta_llm_tpu_sft.py` вызывается безусловно на
+каждом интервале чекпоинта с теми весами, что есть ПРЯМО СЕЙЧАС, вместе с
+ИСТОРИЧЕСКИ лучшим значением метрики — веса с того шага, который реально
+дал этот лучший скор, заново не сохраняются. Для ЭТОГО конкретного
+сданного чекпоинта проблемы нет (это единственное событие чекпоинта за
+весь ран, так что веса и метрика реально относятся к одному и тому же
+шагу) — но это настоящая ловушка для любого ДРУГОГО чекпоинта, взятого из
+рана с более чем одним интервалом чекпоинта (например, из завершённого
+рана с чекпоинтами и на 50%, и на 100%), и напрямую касается
+`berta_tpu_lora_after_llm`.
