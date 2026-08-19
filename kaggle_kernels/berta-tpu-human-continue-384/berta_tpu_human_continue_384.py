@@ -135,16 +135,25 @@ CATEGORY_LABEL_PATTERN = [14948, 30]
 ATTRIBUTES_LABEL_PATTERN = [4816, 37519, 521, 30]
 
 # FIXED per-core batch sizes -- NO auto-probing (see module docstring
-# lesson 2). batch=64 @ PAIR_MAX_LENGTH=256 was proven safe by the run this
-# resumes; 384 is 1.5x longer, kept at the same batch as a conservative
-# starting point (BERT-scale attention over 384 tokens is still cheap in
-# absolute HBM terms for a 128M model) -- a real OOM here is a fast, loud
-# signal to lower this constant, not a silently-corrupted probe result.
-PER_CORE_TRAIN_BATCH = 64
-PER_CORE_EVAL_BATCH = 96   # slightly lower than the 128 used at 256 -- eval
-                             # is forward-only (no gradients/optimizer state)
-                             # but the longer sequence still costs more
-                             # activation memory per example.
+# lesson 2). REAL MEASURED DATA POINT (not a guess): batch=64 @
+# PAIR_MAX_LENGTH=384 does NOT fit -- a real run hit "XLA:TPU compile
+# permanent error. Ran out of memory in memory space hbm. Used 19.11G of
+# 15.75G hbm. Exceeded hbm capacity by 3.36G." partway into epoch 2 (epoch
+# 1 itself completed fine, val_macro_pr_auc=0.7566 -- so the failure mode
+# is a recompile under accumulated memory pressure after real training
+# state has built up, not a day-0 shape mismatch). 384^2/256^2 = 2.25x the
+# attention-score memory of the proven-safe 256-length run, so batch=64
+# (proven at 256) was never going to be free at 384 -- halved to 32, well
+# under the 15.75G budget with real margin left for the same kind of
+# cross-epoch memory creep that caused the original failure, not just the
+# initial compile.
+PER_CORE_TRAIN_BATCH = 32
+PER_CORE_EVAL_BATCH = 64   # halved alongside train batch for the same reason;
+                             # eval is forward-only (no gradients/optimizer
+                             # state) but the longer sequence still costs
+                             # more activation memory per example, and the
+                             # actual failure was a recompile-time OOM, which
+                             # eval's own graph is not exempt from.
 
 EPOCHS = 10
 MAX_TRAIN_SECONDS = 30600   # 8.5h safety cap -- TPU session hard limit is 9h
