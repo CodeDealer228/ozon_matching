@@ -24,11 +24,13 @@ submits/lora/classifier.pt
 # copies of base model weights, tokenizer vocab/merge files, offline-install
 # pip wheels, and packaged submission zips are all heavy and 100%
 # regenerable from this project's own Kaggle datasets/kernels + each
-# submission's build script (see CLAUDE.md, submits/*/src/utils.py).
-submits/*/models/
-submits/*/wheels/
-submits/*/*.zip
-submits/*.zip
+# submission's build script (see CLAUDE.md, submits/*/src/utils.py). `**`
+# (not `*`) because at least one submission dir (berta_catboost_256_len)
+# nests a full second build dir inside itself, one level deeper than every
+# other submits/*/ layout.
+submits/**/models/
+submits/**/wheels/
+submits/**/*.zip
 
 # Cross-encoder-size probe submissions (submits/*_probe/) -- downloaded HF/
 # Kaggle weights + fitted classifier + offline-install wheels + zip, all
