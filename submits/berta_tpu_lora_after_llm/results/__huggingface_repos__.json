@@ -1,0 +1,1 @@
+{"repos": [{"repoId": "sergeyzh/BERTA", "repoType": "model", "commitHash": "914c8c8aed14042ed890fc2c662d5e9e66b2faa7", "filePaths": ["special_tokens_map.json", "tokenizer_config.json", "config.json", "tokenizer.json", "vocab.txt"]}]}
