@@ -1,0 +1,19 @@
+{
+  "id": "maxamsecret/frida-tpu-human-sft",
+  "title": "Frida Tpu Human Sft",
+  "code_file": "frida_tpu_human_sft.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maximmarkovbb/frida-lora-checkpoint-v1-best"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

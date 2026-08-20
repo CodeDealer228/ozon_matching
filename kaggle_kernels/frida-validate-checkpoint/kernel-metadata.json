@@ -1,0 +1,21 @@
+{
+  "id": "maximmarkovbb/frida-validate-checkpoint",
+  "title": "Frida Validate Checkpoint",
+  "code_file": "frida_validate_checkpoint.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenized-items-human",
+    "maximmarkovbb/frida-lora-checkpoint-v1-best"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}
