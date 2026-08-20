@@ -5,7 +5,6 @@
 ## Conventions
 - Think in English, but respond to me in Russian.
 - Write README.md in Russian.
-- Commit all important experiment.
 
 ## Task
 
