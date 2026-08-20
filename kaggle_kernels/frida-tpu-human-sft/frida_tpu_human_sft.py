@@ -3,25 +3,48 @@ FRIDA (ai-forever/FRIDA, T5EncoderModel, 823M) LoRA SFT on TPU v5e-8, on the
 canonical HUMAN-ONLY split (matches.parquet, 292,523 train / 73,131 val --
 no matches_llm.parquet this time), PAIR_MAX_LENGTH=256, target 4 epochs.
 Resumes maximmarkovbb/frida-lora-checkpoint-v1-best (val_macro_pr_auc=
-0.69377, WITH optimizer state) -- the best FRIDA checkpoint confirmed
-available at write time (frida-lora-v2-epoch was still RUNNING with no
-accessible output when this was written; swap dataset_sources to its
-checkpoint once that finishes, per direct instruction this run doesn't wait
-on it).
+0.69377, WITH optimizer state). frida-lora-v2-epoch has since finished
+(cancel-acknowledged at 10.5h, 98.6% of its epoch) but its only checkpoint
+is a wall-clock QUIET save with no eval, its kernel log came back empty
+(0 bytes, lost on cancellation), and its train_state.json carries the
+INHERITED 0.69377 running-best rather than a metric for its own weights --
+so its real quality is unknown. Published as
+maximmarkovbb/frida-lora-v2-epoch-last and queued for
+maximmarkovbb/frida-validate-checkpoint; swap dataset_sources to it only
+once that measurement comes back better than 0.69377. Resuming a validated
+checkpoint is the deliberate choice here: a 9h TPU session is too expensive
+to spend on weights of unknown quality.
 
-Item cache is TOKENIZED IN-SCRIPT (no pre-built Kaggle dataset for this
-length) at ITEM_MAX_LENGTH=320 -- raised from the 256 every prior FRIDA
-cache in this project used, specifically so this cache stays a durable
-asset if PAIR_MAX_LENGTH gets raised further later (matches this project's
-own stated plan for frida-lora-v2-epoch's own follow-up). 320 covers the
-one real measurement this project has for FRIDA item lengths (20K-item
-sample: mean=126.6, p99=202.0, true max=272, see CLAUDE.md) with real
-margin, without being large enough to meaningfully hurt tokenization time
-or memory. FRIDA's own tokenizer (byte-level BPE) tokenizing 711,304 items
-is fast (minutes, not hours -- unlike WordPiece-at-13M-scale problems this
-project hit elsewhere; this is item-level, once, at human scope, the same
-order of magnitude kaggle_kernels/berta-lora-sft already proved cheap
-enough to do in-script for a similarly-sized item population).
+THE ONE THING THAT ACTUALLY CHANGES vs. frida-lora-v2-epoch: PAIR_MAX_LENGTH
+128 -> 256. That is the real bottleneck for FRIDA (per direct instruction),
+not the per-item budget: frida-tokenize-items-v2's own docstring measured
+that a 128-token PAIR budget truncates ~94% of real pairs, so the encoder
+never sees most of the attribute signal the pair actually carries.
+ITEM_MAX_LENGTH stays at 256 -- raising it would be pointless here, since
+fair-share pair truncation caps each item at ~128 tokens of a 256-token
+pair anyway (and at most ~250 in the asymmetric case where the partner item
+is tiny, which 256 already covers).
+
+Because ITEM_MAX_LENGTH stays 256, this kernel does NOT tokenize items
+in-script: it reuses the already-published item cache
+maximmarkovbb/frida-tokenize-items-v2-cache (256 tokens, human scope,
+711,304 items, both variant_base and variant_shuffled) -- the exact same
+cache frida-lora-v2-epoch trains against. Three concrete wins over
+tokenizing here: (a) zero tokenization time inside a hard-capped TPU
+session, (b) no AutoTokenizer call at all, which sidesteps the TPU image's
+transformers/tokenizers mismatch that killed this kernel's own first run
+(TypeError: RobertaProcessing.__new__() got an unexpected keyword argument
+'cls' -- the same failure kaggle_kernels/frida-tokenize-items-llm hit and
+had to pin exact versions to work around), and (c) the item text this run
+trains on byte-matches what the resumed checkpoint already saw, so the only
+moving part is the pair budget. pad_id is derived FROM the cache itself
+(the token sitting past each row's eos), which needs no tokenizer and
+self-verifies across rows.
+
+The cache's v2 attribute-ordering policy (long/https/oem values demoted to
+the end) comes along for free, including its 5%-probability shuffled
+variant on the train loader only -- a pointer choice between two
+already-tokenized arrays, zero extra compute.
 
 ===========================================================================
 TPU LESSONS CARRIED FORWARD (all real, previously-hit failures in this
@@ -60,13 +83,11 @@ own module docstring for the original incidents)
      fp32 (Adam's own moment estimates and small low-rank updates need
      fp32's wider mantissa; the frozen backbone doing forward-only matmuls
      does not).
-  7. ALL CPU-only setup (parquet loading, item TOKENIZATION, category join)
-     happens ONCE in main(), BEFORE torch_xla.launch() forks the 8
-     replicas -- kaggle_kernels/berta-llm-tpu-sft's real, root-caused
-     BrokenProcessPool crash was 8x redundant per-replica RAM usage from
-     doing this AFTER the fork, not a training bug. Doubly important here
-     since this script does real tokenization work (not just loading a
-     pre-built cache) that must not be repeated 8 times.
+  7. ALL CPU-only setup (parquet loading, item-cache mmap + label-position
+     scan, category join) happens ONCE in main(), BEFORE torch_xla.launch()
+     forks the 8 replicas -- kaggle_kernels/berta-llm-tpu-sft's real,
+     root-caused BrokenProcessPool crash was 8x redundant per-replica RAM
+     usage from doing this AFTER the fork, not a training bug.
   8. Validation eval wrapped in try/except that CANNOT kill the run --
      "аккуратно считать метрики чтобы не уронить обучение" (careful metric
      computation that can't bring training down), per direct instruction.
@@ -127,7 +148,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
-from transformers import AutoTokenizer, T5EncoderModel, get_scheduler, set_seed
+from transformers import T5EncoderModel, get_scheduler, set_seed
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score
 
@@ -159,26 +180,24 @@ MATCHES_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/
 ITEMS_HUMAN_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/items_human.parquet"
 
 PREFIX = "paraphrase: "
-ITEM_MAX_LENGTH = 320   # raised from 256, see module docstring
-PAIR_MAX_LENGTH = 256   # per direct instruction
 
-# CHARACTER-level pre-tokenization slice, NOT just the token-level
-# ITEM_MAX_LENGTH above -- both must move together. Raising ITEM_MAX_LENGTH
-# alone (256->320 tokens) while leaving the old char slice at its
-# established 128/64/384/640 values would have been a no-op for real
-# content: that formula was originally sized against a 256-token budget
-# (measured true max 272 tokens from a 640-char slice, see CLAUDE.md's own
-# 20K-item FRIDA sample), so the tokenizer would simply never have SEEN
-# enough raw text to need the extra 64 tokens of room -- the larger budget
-# would just have padded, not captured more real content. Scaled here by
-# the same ratio as the token budget itself (320/256 = 1.25x) so the two
-# stay proportionate; MAX_NAME_CHARS/MAX_CATEGORY_CHARS left alone
-# (names are rarely long enough to be the truncation bottleneck, and
-# category gets excised from compact_ids downstream regardless of how much
-# of it gets tokenized -- CLAUDE.md's own established finding is that
-# ATTRIBUTES specifically carries the decisive truncated signal).
-MAX_NAME_CHARS, MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 128, 64, 480
-MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 736
+# Must equal the cache's own max_length (asserted against cache_meta.json at
+# load time, not just assumed). 256 is deliberate, NOT a leftover: fair-share
+# pair truncation gives each item ~PAIR_MAX_LENGTH/2 tokens, so a bigger item
+# budget buys nothing here -- the pair budget below is the real constraint.
+ITEM_MAX_LENGTH = 256
+PAIR_MAX_LENGTH = 256   # per direct instruction: 128 -> 256 is THE change
+
+# Only used for the category join below (bounding the category string), NOT
+# for item text -- item text comes pre-tokenized from the v2 cache, whose own
+# character budget (128/64/384 -> 640) is baked in there.
+MAX_CATEGORY_CHARS = 64
+
+# Train loader only: probability of drawing the shuffled attribute-order
+# variant per item slot. Matches frida-lora-v2-epoch.
+ATTRIBUTE_SHUFFLE_PROB = 0.05
+
+ITEM_CACHE_HINT = "/kaggle/input/datasets/maximmarkovbb/frida-tokenize-items-v2-cache"
 
 CATEGORY_LABEL_TOKEN = 55917
 ATTRIBUTES_LABEL_TOKEN = 91837
@@ -201,11 +220,6 @@ EPOCHS = 4
 MAX_TRAIN_SECONDS = 30600      # 8.5h safety cutoff, TPU session hard cap is 9h
 CHECKPOINT_EVERY_SECONDS = 3600  # hourly, per direct instruction
 LOG_EVERY_STEPS = 50
-
-TOKENIZE_CHUNK_SIZE = 20_000   # in-script item tokenization, chunked to
-                                  # bound peak RAM during the tokenizer call
-                                  # itself (mirrors kaggle_kernels/berta-
-                                  # embed-extract's own chunking rationale).
 
 WORKING_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 OUTPUT_DIR = os.path.join(WORKING_DIR, "lora_frida_tpu_human_sft")
@@ -241,64 +255,9 @@ def _find_resume_adapter_dir():
 
 
 # =====================================================================
-# IN-SCRIPT ITEM TOKENIZATION (once, pre-fork -- see module docstring
-# lesson 7). No pre-built cache exists at ITEM_MAX_LENGTH=320.
+# PRE-BUILT ITEM CACHE (frida-tokenize-items-v2-cache, 256 tokens, both
+# variants). Loaded ONCE, pre-fork -- see module docstring lesson 7.
 # =====================================================================
-
-def build_item_texts(items_lazy):
-    return (
-        items_lazy.select(["id", "name", "category", "attributes"])
-        .with_columns([
-            pl.col("name").fill_null("").cast(pl.Utf8, strict=False).str.slice(0, MAX_NAME_CHARS),
-            pl.col("category").fill_null("").cast(pl.Utf8, strict=False).str.slice(0, MAX_CATEGORY_CHARS),
-            pl.col("attributes").fill_null("").cast(pl.Utf8, strict=False).str.slice(0, MAX_ATTR_CHARS),
-        ])
-        .with_columns(
-            (pl.lit("Name: ") + pl.col("name") + pl.lit(" Category: ") + pl.col("category") +
-             pl.lit(" Attributes: ") + pl.col("attributes")).str.slice(0, MAX_ITEM_CHARS).alias("text")
-        )
-        .select(["id", "text"])
-        .collect()
-    )
-
-
-def tokenize_items(tokenizer, items_pl):
-    """Tokenizes every human-scope item ONCE, chunked to bound peak RAM,
-    WITH special tokens (FRIDA convention: bos/eos baked in per item,
-    UNLIKE BERTA's add_special_tokens=False -- T5 has no [CLS]/[SEP]/
-    token_type concept to assemble at pair-build time instead)."""
-    n = items_pl.height
-    all_ids = items_pl.get_column("id").to_numpy()
-    all_texts = items_pl.get_column("text").to_list()
-
-    input_ids = np.zeros((n, ITEM_MAX_LENGTH), dtype=np.int32)
-    attention_mask = np.zeros((n, ITEM_MAX_LENGTH), dtype=np.int8)
-
-    written = 0
-    while written < n:
-        cur = min(TOKENIZE_CHUNK_SIZE, n - written)
-        chunk_texts = [PREFIX + t for t in all_texts[written:written + cur]]
-        enc = tokenizer(chunk_texts, add_special_tokens=True, padding="max_length",
-                         truncation=True, max_length=ITEM_MAX_LENGTH, return_tensors="np")
-        input_ids[written:written + cur] = enc["input_ids"].astype(np.int32)
-        attention_mask[written:written + cur] = enc["attention_mask"].astype(np.int8)
-        written += cur
-        print(f"[{_elapsed():8.1f}s][SETUP] tokenized {written:,}/{n:,} items", flush=True)
-        gc.collect()
-
-    lengths = attention_mask.sum(axis=1).astype(np.int32)
-
-    # bos/eos sanity check on a random sample -- cheap, catches a real
-    # add_special_tokens/tokenizer misconfiguration immediately instead of
-    # hours into training.
-    sample_rows = np.random.RandomState(SEED).choice(n, size=min(50, n), replace=False)
-    for r in sample_rows:
-        L = int(lengths[r])
-        assert input_ids[r, 0] == 1, f"row {r}: expected bos=1, got {input_ids[r, 0]}"
-        assert input_ids[r, L - 1] == 2, f"row {r}: expected eos=2 at {L - 1}, got {input_ids[r, L - 1]}"
-
-    return all_ids, input_ids, lengths
-
 
 def _find_token_pattern_starts(arr, tok_a, tok_b):
     mask = (arr[:, :-1] == tok_a) & (arr[:, 1:] == tok_b)
@@ -309,19 +268,92 @@ def _find_token_pattern_starts(arr, tok_a, tok_b):
     return starts
 
 
-def build_item_cache(tokenizer):
-    items_path = _find_dataset_file(ITEMS_HUMAN_PATH_HINT, "items_human.parquet")
-    items_pl = build_item_texts(pl.scan_parquet(items_path))
-    print(f"[SETUP] human scope items: {items_pl.height:,}", flush=True)
+def _find_item_cache_root(hint):
+    if os.path.isdir(hint) and os.path.exists(os.path.join(hint, "cache_meta.json")):
+        return hint
+    if os.path.isdir("/kaggle/input"):
+        for root, _dirs, files in os.walk("/kaggle/input"):
+            if "cache_meta.json" in files and "variant_base" in _dirs:
+                print(f"[CACHE] hint {hint} missed -- found the v2 cache at {root}", flush=True)
+                return root
+    raise RuntimeError(f"[CACHE] no v2 item cache found (hint was {hint})")
 
-    all_ids, item_input_ids, item_lengths = tokenize_items(tokenizer, items_pl)
-    del items_pl
-    gc.collect()
 
-    category_label_start = _find_token_pattern_starts(item_input_ids, CATEGORY_LABEL_TOKEN, LABEL_COLON_TOKEN)
-    attr_label_start = _find_token_pattern_starts(item_input_ids, ATTRIBUTES_LABEL_TOKEN, LABEL_COLON_TOKEN)
-    id_to_row = {int(item_id): i for i, item_id in enumerate(all_ids)}
-    return item_input_ids, item_lengths, category_label_start, attr_label_start, id_to_row
+def _load_one_variant(variant_dir, n_items, max_length):
+    ids_path = os.path.join(variant_dir, "ids.bin")
+    input_ids_path = os.path.join(variant_dir, "input_ids.bin")
+    attn_path = os.path.join(variant_dir, "attention_mask.bin")
+
+    expected = {
+        ids_path: (os.path.getsize(ids_path), n_items * 8),
+        input_ids_path: (os.path.getsize(input_ids_path), n_items * max_length * 4),
+        attn_path: (os.path.getsize(attn_path), n_items * max_length),
+    }
+    for fname, (got, want) in expected.items():
+        if got != want:
+            raise RuntimeError(f"[CACHE] {fname} size mismatch: got {got:,}, expected {want:,}")
+
+    ids = np.memmap(ids_path, dtype=np.int64, mode="r", shape=(n_items,))
+    input_ids = np.memmap(input_ids_path, dtype=np.int32, mode="r", shape=(n_items, max_length))
+    attn = np.memmap(attn_path, dtype=np.int8, mode="r", shape=(n_items, max_length))
+
+    lengths = np.asarray(attn).sum(axis=1).astype(np.int32)
+
+    sample_rows = np.random.RandomState(SEED).choice(n_items, size=min(50, n_items), replace=False)
+    for r in sample_rows:
+        L = int(lengths[r])
+        assert input_ids[r, 0] == 1, f"{variant_dir} row {r}: expected bos=1, got {input_ids[r, 0]}"
+        assert input_ids[r, L - 1] == 2, f"{variant_dir} row {r}: expected eos=2 at {L - 1}, got {input_ids[r, L - 1]}"
+
+    arr = np.asarray(input_ids)
+    category_label_start = _find_token_pattern_starts(arr, CATEGORY_LABEL_TOKEN, LABEL_COLON_TOKEN)
+    attr_label_start = _find_token_pattern_starts(arr, ATTRIBUTES_LABEL_TOKEN, LABEL_COLON_TOKEN)
+    return ids, input_ids, lengths, category_label_start, attr_label_start
+
+
+def derive_pad_id(input_ids, lengths, max_length):
+    """The pad token is whatever sits immediately past each row's eos -- read
+    it straight off the cache instead of loading a tokenizer just for this
+    one integer (the tokenizer load is exactly what the TPU image can't do,
+    see module docstring). Cross-checked over many rows so a wrong guess
+    can't slip through silently."""
+    candidates = np.where(lengths < max_length)[0]
+    if len(candidates) == 0:
+        raise RuntimeError("[CACHE] every row is at max_length -- cannot derive pad_id from padding")
+    sample = candidates[:: max(1, len(candidates) // 500)][:500]
+    pads = {int(input_ids[r, int(lengths[r])]) for r in sample}
+    if len(pads) != 1:
+        raise RuntimeError(f"[CACHE] inconsistent pad token across rows: {sorted(pads)}")
+    return pads.pop()
+
+
+def load_item_cache_v2():
+    cache_root = _find_item_cache_root(ITEM_CACHE_HINT)
+    with open(os.path.join(cache_root, "cache_meta.json")) as f:
+        meta = json.load(f)
+    n_items = meta["n_items"]
+    max_length = meta["max_length"]
+    print(f"[CACHE] n_items={n_items:,} max_length={max_length} prefix={meta.get('prefix')!r}", flush=True)
+    if max_length != ITEM_MAX_LENGTH:
+        raise RuntimeError(f"cache max_length={max_length} != ITEM_MAX_LENGTH={ITEM_MAX_LENGTH}")
+
+    variants = {}
+    for name in ("variant_base", "variant_shuffled"):
+        t0 = time.perf_counter()
+        variants[name] = _load_one_variant(os.path.join(cache_root, name), n_items, max_length)
+        print(f"[CACHE] {name} loaded + bos/eos checked ({time.perf_counter() - t0:.1f}s)", flush=True)
+
+    ids_base = np.asarray(variants["variant_base"][0])
+    if not np.array_equal(ids_base, np.asarray(variants["variant_shuffled"][0])):
+        raise RuntimeError("[CACHE] the two variants have different id orderings -- the per-slot "
+                            "coin-flip between them would silently mix up items.")
+
+    pad_id = derive_pad_id(variants["variant_base"][1], variants["variant_base"][2], max_length)
+    print(f"[CACHE] pad_id={pad_id} (derived from the cache's own padding, no tokenizer)", flush=True)
+
+    id_to_row = {int(item_id): i for i, item_id in enumerate(ids_base)}
+    assert len(id_to_row) == n_items, f"duplicate item ids: {n_items} rows, {len(id_to_row)} unique"
+    return variants, id_to_row, pad_id
 
 
 # =====================================================================
@@ -361,8 +393,19 @@ class PairIndexDataset(Dataset):
         return self.row1[idx], self.row2[idx], self.labels[idx], self.categories[idx]
 
 
-def make_pair_collate_fn(item_input_ids, item_lengths, category_label_start, attr_label_start,
-                          pad_id, pair_max_length):
+def make_pair_collate_fn(variants, pad_id, pair_max_length, augment):
+    """augment=False (val loader) always draws variant_base -- val must stay
+    stable and comparable across checkpoints. augment=True (train loader)
+    draws variant_shuffled with ATTRIBUTE_SHUFFLE_PROB per item slot: a
+    pointer choice into an already-tokenized array, zero extra compute."""
+    base = variants["variant_base"]
+    shuf = variants["variant_shuffled"]
+    rng = np.random.RandomState(SEED + 1)
+
+    def pick(row):
+        a = shuf if (augment and rng.random_sample() < ATTRIBUTE_SHUFFLE_PROB) else base
+        return build_compact_ids(a[1], row, int(a[2][row]), int(a[3][row]), int(a[4][row]))
+
     def collate_fn(batch):
         row1, row2, labels, categories = zip(*batch)
         bsz = len(batch)
@@ -370,11 +413,8 @@ def make_pair_collate_fn(item_input_ids, item_lengths, category_label_start, att
         attention_mask = np.zeros((bsz, pair_max_length), dtype=np.int64)
 
         for i in range(bsz):
-            r1, r2 = row1[i], row2[i]
-            compact1 = build_compact_ids(item_input_ids, r1, int(item_lengths[r1]),
-                                          int(category_label_start[r1]), int(attr_label_start[r1]))
-            compact2 = build_compact_ids(item_input_ids, r2, int(item_lengths[r2]),
-                                          int(category_label_start[r2]), int(attr_label_start[r2]))
+            compact1 = pick(row1[i])
+            compact2 = pick(row2[i])
             cl1, cl2 = len(compact1), len(compact2)
             if cl1 + cl2 <= pair_max_length:
                 keep1, keep2 = cl1, cl2
@@ -392,8 +432,7 @@ def make_pair_collate_fn(item_input_ids, item_lengths, category_label_start, att
     return collate_fn
 
 
-def make_train_loader(pairs_pd, id_to_row, category_to_id, item_input_ids, item_lengths,
-                       category_label_start, attr_label_start, pad_id, pair_max_length,
+def make_train_loader(pairs_pd, id_to_row, category_to_id, variants, pad_id, pair_max_length,
                        per_core_batch, num_replicas, rank, seed, epoch):
     row1 = pairs_pd["id1"].map(id_to_row).to_numpy().astype(np.int64)
     row2 = pairs_pd["id2"].map(id_to_row).to_numpy().astype(np.int64)
@@ -404,8 +443,7 @@ def make_train_loader(pairs_pd, id_to_row, category_to_id, item_input_ids, item_
     sampler = DistributedSampler(dataset, num_replicas=num_replicas, rank=rank, shuffle=True, seed=seed,
                                   drop_last=True)
     sampler.set_epoch(epoch)
-    collate_fn = make_pair_collate_fn(item_input_ids, item_lengths, category_label_start, attr_label_start,
-                                       pad_id, pair_max_length)
+    collate_fn = make_pair_collate_fn(variants, pad_id, pair_max_length, augment=True)
     # persistent_workers=False -- this loader is rebuilt fresh every epoch
     # (new DistributedSampler each time); see kaggle_kernels/berta-llm-tpu-sft's
     # own fix for why True here only risks a transient double-worker overlap.
@@ -414,16 +452,14 @@ def make_train_loader(pairs_pd, id_to_row, category_to_id, item_input_ids, item_
     return loader, sampler
 
 
-def make_eval_loader(pairs_pd, id_to_row, category_to_id, item_input_ids, item_lengths,
-                      category_label_start, attr_label_start, pad_id, pair_max_length, eval_batch):
+def make_eval_loader(pairs_pd, id_to_row, category_to_id, variants, pad_id, pair_max_length, eval_batch):
     row1 = pairs_pd["id1"].map(id_to_row).to_numpy().astype(np.int64)
     row2 = pairs_pd["id2"].map(id_to_row).to_numpy().astype(np.int64)
     labels = pairs_pd["label"].to_numpy().astype(np.float32)
     categories = pairs_pd["category1"].map(category_to_id).fillna(category_to_id.get("UNKNOWN", -1)).to_numpy().astype(np.int64)
 
     dataset = PairIndexDataset(row1, row2, labels, categories)
-    collate_fn = make_pair_collate_fn(item_input_ids, item_lengths, category_label_start, attr_label_start,
-                                       pad_id, pair_max_length)
+    collate_fn = make_pair_collate_fn(variants, pad_id, pair_max_length, augment=False)
     n = len(dataset)
     n_full = (n // eval_batch) * eval_batch
     full_loader = DataLoader(torch.utils.data.Subset(dataset, list(range(n_full))), batch_size=eval_batch,
@@ -558,11 +594,7 @@ _SHARED = {}
 
 
 def _load_shared_data():
-    print(f"[{_elapsed():8.1f}s][SETUP] loading all CPU-only data + tokenizing items once, pre-fork ...",
-          flush=True)
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    pad_id = tokenizer.pad_token_id
+    print(f"[{_elapsed():8.1f}s][SETUP] loading all CPU-only data once, pre-fork ...", flush=True)
 
     matches_path = _find_dataset_file(MATCHES_PATH_HINT, "matches.parquet")
     matches_pl = pl.read_parquet(matches_path)
@@ -589,8 +621,7 @@ def _load_shared_data():
     del matches_pd, labels_all, indices, train_idx, val_idx
     gc.collect()
 
-    item_input_ids, item_lengths, category_label_start, attr_label_start, id_to_row = build_item_cache(tokenizer)
-    id_to_row_np = id_to_row  # already a plain dict
+    variants, id_to_row, pad_id = load_item_cache_v2()
 
     items_human_path = _find_dataset_file(ITEMS_HUMAN_PATH_HINT, "items_human.parquet")
     needed_ids = pd.unique(pd.concat([train_pd["id1"], val_pd["id1"]]))
@@ -611,9 +642,8 @@ def _load_shared_data():
 
     _SHARED.update(dict(
         pad_id=pad_id, train_pd=train_pd, val_pd=val_pd, val_fingerprint=val_fingerprint,
-        item_input_ids=item_input_ids, item_lengths=item_lengths,
-        category_label_start=category_label_start, attr_label_start=attr_label_start,
-        id_to_row=id_to_row_np, category_vocab=category_vocab, category_to_id=category_to_id,
+        variants=variants, id_to_row=id_to_row,
+        category_vocab=category_vocab, category_to_id=category_to_id,
     ))
     print(f"[{_elapsed():8.1f}s][SETUP] done -- {len(_SHARED)} shared objects ready for fork", flush=True)
 
@@ -639,8 +669,7 @@ def _mp_fn(index):
 
     pad_id = _SHARED["pad_id"]
     train_pd, val_pd, val_fingerprint = _SHARED["train_pd"], _SHARED["val_pd"], _SHARED["val_fingerprint"]
-    item_input_ids, item_lengths = _SHARED["item_input_ids"], _SHARED["item_lengths"]
-    category_label_start, attr_label_start = _SHARED["category_label_start"], _SHARED["attr_label_start"]
+    variants = _SHARED["variants"]
     id_to_row = _SHARED["id_to_row"]
     category_vocab, category_to_id = _SHARED["category_vocab"], _SHARED["category_to_id"]
     _log(rank, "DATA", f"inherited from parent (fork/COW): train={len(train_pd):,} val={len(val_pd):,} "
@@ -687,8 +716,7 @@ def _mp_fn(index):
                         f"checkpoint_every_seconds={CHECKPOINT_EVERY_SECONDS}", force=True)
 
     val_full_loader, val_remainder_loader = make_eval_loader(
-        val_pd, id_to_row, category_to_id, item_input_ids, item_lengths,
-        category_label_start, attr_label_start, pad_id, PAIR_MAX_LENGTH, per_core_eval_batch,
+        val_pd, id_to_row, category_to_id, variants, pad_id, PAIR_MAX_LENGTH, per_core_eval_batch,
     )
 
     global_step = 0
@@ -737,8 +765,7 @@ def _mp_fn(index):
         if stopped:
             break
         train_loader, sampler = make_train_loader(
-            train_pd, id_to_row, category_to_id, item_input_ids, item_lengths,
-            category_label_start, attr_label_start, pad_id, PAIR_MAX_LENGTH,
+            train_pd, id_to_row, category_to_id, variants, pad_id, PAIR_MAX_LENGTH,
             per_core_train_batch, world_size, rank, SEED, epoch=epoch,
         )
         mp_loader = pl_xla.MpDeviceLoader(train_loader, device)

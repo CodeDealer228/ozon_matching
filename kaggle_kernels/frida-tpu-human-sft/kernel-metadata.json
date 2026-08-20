@@ -11,6 +11,7 @@
   "keywords": [],
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
+    "maximmarkovbb/frida-tokenize-items-v2-cache",
     "maximmarkovbb/frida-lora-checkpoint-v1-best"
   ],
   "kernel_sources": [],
