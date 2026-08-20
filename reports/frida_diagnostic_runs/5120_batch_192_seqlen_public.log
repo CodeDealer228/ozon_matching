@@ -1,0 +1,43 @@
+CUDA Version 12.8.0
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+=== Starting FRIDA LoRA (adapter, no merge) prediction pipeline ===
+[SETUP] peft already importable via /workspace_6693bc82-7011-44ae-90fa-d3f80475bd82_cbae2/frida_lora_adapter_offline_pkgs -- skipping offline install (container/workspace reused from an earlier judging stage)
+[1/7] Loading tokenizer (fast) + starting model-weight load in the background ...
+[PRECISION] NVIDIA H100 80GB HBM3: compute capability 9.x -- native bf16 tensor cores, bf16 path is the fast path here
+[1/7] tokenizer ready, model loading in background (0.6s)
+[2/7] Loading matches ...
+[2/7] pairs=114,235 unique ids needed=223,536 (0.7s)
+[3/7] Loading needed item texts (single-threaded reorder -- see _reorder_and_slice's comment for why) ...
+Loading weights:   0%|          | 0/219 [00:00<?, ?it/s]Loading weights: 100%|██████████| 219/219 [00:00<00:00, 5493.60it/s]
+[3/7] items loaded=223,536 (6.4s)
+[4/7] Tokenizing items (once each, in chunks of 14,000) + locating Category:/Attributes: labels ...
+[4/7] done (68.0s)
+[5/7] Building pairs (excise Category, fair-share truncate to PAIR_MAX_LENGTH=192) ...
+[5/7] done (68.6s)
+[6/7] Waiting for background model-weight load (if not already done) ...
+[6/7] model ready (68.6s)
+[7/7] Running inference (batch_size=5120) ...
+[7/7]   progress: 25,600/114,235 (22%) in 117.5s (217.9 pairs/s, ETA 407s)
+[DIAGNOSTIC] peak VRAM at 186s since pipeline start: 77.00 GiB allocated, 78.44 GiB reserved (done=25,600/114,235)
+[7/7]   progress: 46,080/114,235 (40%) in 212.1s (217.2 pairs/s, ETA 314s)
+Traceback (most recent call last):
+  File "/workspace_6693bc82-7011-44ae-90fa-d3f80475bd82_cbae2/run.py", line 43, in <module>
+    main()
+  File "/workspace_6693bc82-7011-44ae-90fa-d3f80475bd82_cbae2/run.py", line 28, in main
+    predict_pipeline(
+  File "/workspace_6693bc82-7011-44ae-90fa-d3f80475bd82_cbae2/src/utils.py", line 881, in predict_pipeline
+    probs = _run_inference(model, input_ids_all, attention_mask_all, device, batch_size=batch_size,
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace_6693bc82-7011-44ae-90fa-d3f80475bd82_cbae2/src/utils.py", line 791, in _run_inference
+    check_diagnostic_clock(done)
+  File "/workspace_6693bc82-7011-44ae-90fa-d3f80475bd82_cbae2/src/utils.py", line 777, in check_diagnostic_clock
+    raise RuntimeError(
+RuntimeError: [DIAGNOSTIC] self-imposed 300s deadline reached (304s since pipeline start) -- raising on purpose to force a LOGGED non-zero exit instead of a silent judging-stand timeout. Processed 51,200/114,235 pairs (44.8%) at 217.6 pairs/s.
