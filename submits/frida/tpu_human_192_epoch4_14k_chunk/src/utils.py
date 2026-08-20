@@ -441,13 +441,14 @@ def _find_token_pattern_starts(arr, tok_a, tok_b):
 # happened to succeed.
 #
 # 14_000 here specifically (not frida/tpu_human_256_epoch4's own 150_000) --
-# matches the chunk size the crashed frida_tpu_human_224_epoch4_14k_chunk
-# run used, kept the same on purpose: that run's "Container finished with
-# non-zero exit code" log cut off with no visible traceback (real cause
-# undetermined -- could be an OOM, a chunk-size interaction, or something
-# else entirely). Re-testing this exact chunk size on the ALREADY-Check-
-# passing 192-length config isolates whether 14_000 itself is implicated,
-# rather than changing two things (length AND chunk size) again at once.
+# this lineage has reached Public (114,235 pairs, well past Check scale)
+# without any chunk-size-related failure -- the two real crashes hit here
+# (sys.path_importer_cache poisoning, then multiprocessing.Pool forking
+# 240 processes) were both root-caused and fixed elsewhere in this file,
+# and neither implicated this constant. 14_000 is a known-safe value at
+# this point, not an open question (frida_tpu_human_224_epoch4_14k_chunk's
+# own earlier crash, before those two fixes existed, is now understood to
+# very likely have been the same multiprocessing.Pool bug, not this).
 TOKENIZE_CHUNK_SIZE = 14_000
 
 
@@ -637,23 +638,65 @@ def _load_model_weights(base_model_path, adapter_path, classifier_path, device):
 # exists to catch.
 
 
+# FIXED-SHAPE batching -- every GPU-facing forward call gets EXACTLY
+# batch_size rows, never a ragged final batch. Added after a real, still not
+# fully explained anomaly: seq=192/batch=6912 OOM'd needing MORE total
+# memory (67.57 GiB already in use before the failed allocation) than the
+# LARGER seq=192/batch=8192 config had needed (52.65 GiB) -- backwards from
+# what pure per-batch linear scaling predicts. The attn-probs term itself
+# matched the derived formula exactly both times (22.78 GiB predicted and
+# logged at 6912, 27.00 GiB at 8192 -- see BATCH_SIZE_FIXED's own comment),
+# so the discrepancy is specifically in the OTHER, "already in use" memory,
+# not in this file's core VRAM model. The batch=6912 run needed MORE
+# iterations (17 vs 14 at batch=8192) AND its ragged final batch (3643 rows,
+# 52.7% of a full batch) was a DIFFERENT shape than every batch before it --
+# a real, previously-hit pattern in this project (see .claude/skills/
+# kaggle-experiment-safety: "a training loop that lets shapes drift... pays
+# a real compile on every new shape" -- the TPU/XLA version of this same
+# problem) where PyTorch's caching allocator can end up holding reserved
+# blocks for MULTIPLE distinct shapes simultaneously instead of reusing one,
+# inflating peak reserved memory well past what a single steady-state shape
+# would need. This is the best-supported hypothesis given the data, not a
+# proven root cause -- confirming it would need either real GPU profiling
+# or the deliberate-OOM-logging technique noted in README.md's "Как дёшево
+# профилировать реальный H100-стенд" section.
+#
+# The fix costs nothing in accuracy: the ragged tail is padded up to
+# batch_size by repeating its own last row (same technique already proven
+# in kaggle_kernels/frida-tpu-embed-cache-human's own ragged-tail handling),
+# only the valid prefix of that batch's output is kept, and the repeated
+# rows' predictions are computed and then discarded, never written to
+# `probs`. Every real pair still gets exactly the same forward pass and the
+# same prediction as before -- this only removes the ONE shape-varying call
+# from the loop.
 def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size):
     use_amp = device.type == "cuda"
     n = input_ids_all.shape[0]
     probs = np.empty(n, dtype=np.float32)
 
-    with torch.inference_mode():
-        for i in range(0, n, batch_size):
-            input_ids = torch.from_numpy(input_ids_all[i:i + batch_size]).to(device, non_blocking=True)
-            attention_mask = torch.from_numpy(attention_mask_all[i:i + batch_size]).to(device, non_blocking=True)
-
-            if use_amp:
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits = model(input_ids=input_ids, attention_mask=attention_mask)
-            else:
+    def run_one_batch(ids_np, mask_np, n_valid):
+        input_ids = torch.from_numpy(ids_np).to(device, non_blocking=True)
+        attention_mask = torch.from_numpy(mask_np).to(device, non_blocking=True)
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits = model(input_ids=input_ids, attention_mask=attention_mask)
+        else:
+            logits = model(input_ids=input_ids, attention_mask=attention_mask)
+        return torch.sigmoid(logits.float()).cpu().numpy()[:n_valid]
 
-            probs[i:i + input_ids.shape[0]] = torch.sigmoid(logits.float()).cpu().numpy()
+    with torch.inference_mode():
+        n_full = (n // batch_size) * batch_size
+        for i in range(0, n_full, batch_size):
+            probs[i:i + batch_size] = run_one_batch(
+                input_ids_all[i:i + batch_size], attention_mask_all[i:i + batch_size], batch_size)
+
+        if n_full < n:
+            tail = n - n_full
+            pad_ids = np.tile(input_ids_all[n - 1:n], (batch_size, 1))
+            pad_mask = np.tile(attention_mask_all[n - 1:n], (batch_size, 1))
+            pad_ids[:tail] = input_ids_all[n_full:n]
+            pad_mask[:tail] = attention_mask_all[n_full:n]
+            probs[n_full:n] = run_one_batch(pad_ids, pad_mask, tail)
 
     return probs
 
