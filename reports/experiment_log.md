@@ -390,3 +390,77 @@ one failed attempt.
 Not yet decided: the training architecture on top of these cached
 embeddings (e.g. classifier head over `[emb1, emb2, |emb1-emb2|]` vs. plain
 cosine similarity) — out of scope until the tokenization caches exist.
+
+## Empirical verification of the 5120-batch submission, and a char-budget bug found in every FRIDA cache-building kernel (2026-08-20)
+
+Two things checked in response to a direct request to verify — not just
+code-read — the currently deployed FRIDA submission
+(`submits/frida/tpu_human_192_epoch4_5120_batch`).
+
+**1) Does exactly 192 tokens reach CUDA, and is `inference_mode` really
+active?** Ran the submission's own `_load_needed_item_texts` →
+`_tokenize_items` → `_build_pairs` against the real local tokenizer and a
+real 2,000-pair sample of `matches.parquet` (not a synthetic test).
+`input_ids_all.shape == (2000, 192)` exactly matches `PAIR_MAX_LENGTH` —
+confirmed, no hidden inflation. `torch.inference_mode()` confirmed via grep
+to wrap the entire `_run_inference` batch loop, including every
+`run_one_batch` call made through the closure. Side finding: 82.6% of real
+pairs hit the 192-token cap exactly (median = 192, mean = 184.7) — real
+per-pair truncation is aggressive at this budget, which is directly
+relevant context for the second finding below.
+
+**2) Is the same character-budget truncation bug present in training?**
+Yes, in every FRIDA cache-building kernel checked. `MAX_NAME_CHARS,
+MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 128, 64, 384` is CLAUDE.md's canonical
+formula for the *128-token* MiniLM cross-encoder regime. It was carried
+over byte-for-byte (one kernel's own comment said `byte-matches CLAUDE.md`)
+into every FRIDA kernel targeting `max_length=256`, without ever being
+rescaled:
+
+- `kaggle_kernels/frida-tokenize-items-v2` — built
+  `maximmarkovbb/frida-tokenize-items-v2-cache`, the cache the **currently
+  best checkpoint** (val 0.7660) was trained on.
+- `kaggle_kernels/frida-tokenize-items-human` and `-llm` — built the v1
+  caches (`frida-tokenized-items-human`/`-llm`) that
+  `kaggle_kernels/frida-llm-tpu-sft` depends on. That kernel was confirmed
+  `RUNNING` (`kaggle kernels status maximmarkovbb/frida-llm-tpu-sft`) at
+  the moment this bug was found — actively resuming the 0.7660 checkpoint
+  on top of the same under-scaled cache.
+- `kaggle_kernels/frida-tokenize-items` (the earlier, superseded
+  combined-script attempt) had the identical constants too.
+
+Quantified from `kaggle_kernels/frida-char-token-ratio`'s real per-field
+chars/token ratios (name 2.83, category 2.34, attributes 2.96, combined
+3.12): `category`'s 64-char budget covers ~27 tokens against a real
+observed max of only 8 — 3× wasted headroom that produces zero benefit,
+since the category span gets excised before the model sees it anyway.
+`attributes`'s 384-char budget covers ~130 tokens against a real p90=136,
+p99=151, max=227 — real attribute content was being discarded by the
+*character*-level pre-slice before the tokenizer, and thus the model,
+ever had a chance to see it, even though the real combined-field token
+need (max 248) sits comfortably under the 256-token ceiling that was
+believed to be the binding constraint.
+
+Rescaled from the same ratios: `MAX_NAME_CHARS=156` (p99=50 tok × 2.83,
++10% margin), `MAX_CATEGORY_CHARS=28` (real max=8 tok × 2.34, +50%
+margin), `MAX_ATTR_CHARS=564` (remainder), `MAX_ITEM_CHARS=812`. Applied to
+the source of all four kernels listed above, each kernel's own inline
+derivation comment, in place of the old `byte-matches CLAUDE.md` note.
+
+**Scope of the fix, and what was deliberately left alone.** This only
+changes what a *future* cache rebuild would produce — no already-built
+cache, already-trained checkpoint, or the deployed submission's own
+inference-side char constants were touched. Two reasons: (a) the
+currently-running `frida-llm-tpu-sft` already started from the pre-built
+v1 caches before this fix landed, so editing the kernel source doesn't
+retroactively affect it — re-tokenization only happens on an explicit
+kernel re-run, not by a training job consuming an existing memmap dataset;
+(b) changing the *inference*-side char constants without a matching
+retrain would create a brand-new train/serve mismatch against the
+currently-deployed val=0.7660 checkpoint, which was itself trained under
+the old, under-scaled budget — very likely a net loss, not a fix, if done
+unilaterally on one side only. Explicit user decision: let
+`frida-llm-tpu-sft` finish as-is (it isn't regressing relative to its own
+starting checkpoint, which already carried this same limitation) rather
+than cancel it; the fix lands for whenever the cache is next rebuilt for a
+fresh training run.

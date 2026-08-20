@@ -58,8 +58,10 @@ rate this is a deliberate, negligible approximation of the policy, traded
 for keeping train-time cost at exactly zero.
 
 Byte-compatibility with the existing FRIDA lineage is preserved everywhere
-else: same "paraphrase: " prefix, same Name/Category/Attributes layout and
-CLAUDE.md char budgets, same max_length=256, same add_special_tokens=True
+else: same "paraphrase: " prefix, same Name/Category/Attributes layout, same
+max_length=256, same add_special_tokens=True. Char budgets are NOT the
+CLAUDE.md 128/64/384 formula -- those were rescaled for this kernel's
+256-token target, see the constants below.
 (bos=1 ... eos=2 per item -- the FRIDA convention, unlike this project's
 BERTA caches which store raw content and add specials at collate time).
 CPU kernel (no GPU/TPU quota spent): pure tokenization, 711K items.
@@ -87,8 +89,16 @@ ITEMS_HUMAN_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-match
 SEED = 42
 
 PREFIX = "paraphrase: "
-MAX_NAME_CHARS, MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 128, 64, 384
-MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 640, byte-matches CLAUDE.md
+# Rescaled for ITEM_MAX_LENGTH=256 (the 128/64/384 CLAUDE.md formula was sized
+# for MiniLM's 128-token regime and was silently under-covering real content
+# here -- category got ~3x more char budget than its real max needs, while
+# attributes got truncated below its real p90/p99 before the tokenizer ever
+# saw it). Derived from real FRIDA chars/token ratios (see
+# kaggle_kernels/frida-char-token-ratio): name p99=50tok*2.83=142c -> +10%
+# margin; category real max=8tok*2.34=19c -> +50% margin; attributes gets the
+# remainder up to a combined-text ceiling of 256tok*3.12c/tok=799c.
+MAX_NAME_CHARS, MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 156, 28, 564
+MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 812
 ITEM_MAX_LENGTH = 256
 
 LONG_VALUE_CHARS = 200      # rule 2 threshold

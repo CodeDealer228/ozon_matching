@@ -67,10 +67,16 @@ FRIDA_MODEL_NAME = "ai-forever/FRIDA"
 FRIDA_PREFIX = "paraphrase: "
 MAX_LENGTH = 256
 
-MAX_NAME_CHARS = 128
-MAX_CATEGORY_CHARS = 64
-MAX_ATTR_CHARS = 384
-MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 640, byte-matches CLAUDE.md
+# Rescaled for MAX_LENGTH=256 -- the 128/64/384 CLAUDE.md formula was sized
+# for MiniLM's 128-token regime; carried over unscaled here it wastes budget
+# on category (real max 8 tokens) while truncating attributes below its real
+# p90/p99 before the tokenizer ever sees it. See
+# kaggle_kernels/frida-char-token-ratio for the source ratios and
+# kaggle_kernels/frida-tokenize-items-v2 for the full derivation.
+MAX_NAME_CHARS = 156
+MAX_CATEGORY_CHARS = 28
+MAX_ATTR_CHARS = 564
+MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 812
 
 CHUNK_SIZE_START = 20_000
 CHUNK_SIZE_MIN = 2_000
