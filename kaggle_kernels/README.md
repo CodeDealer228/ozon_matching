@@ -122,9 +122,18 @@ pair-truncation, которую нужно было бы воспроизвод�
 
 | Кернел | Суть | GPU/TPU | Статус |
 |---|---|---|---|
-| [frida-tpu-embed-cache-human](frida-tpu-embed-cache-human) | кэш pooled pair-эмбеддингов (CLS, до головы) + логита собственного классификатора чекпоинта по **всем** 365,654 human-парам; `split` **наследует** канонический seed-42 сплит обучения LoRA, в `cache_meta.json` пишется `val_fingerprint`. Шардится по 8 ядрам на непересекающиеся куски одного memmap'а, хвост добивается паддингом до той же статической формы (ни одна строка не теряется), инкрементальный flush + `progress_rank{N}.json` | TPU v5e-8 (`maxamsecret`) | **подготовлено, НЕ запущено** — ждём, какой чекпоинт окажется лучше |
-| [frida-head-train](frida-head-train) | обучает `MultiLayerHead` (1536→512→128→1, LayerNorm+GELU+Dropout) поверх кэша. Учится на `split==0`, метрика — на чистом `split==1`, отбор по ней с early stopping. Отдаёт `head.pt` + `val_features.npy` (128-мерные признаки под CatBoost вместо 1536 сырых — ровно та причина, по которой переобучился `berta_catboost_top_final`) | 1×T4 (`maxamsecret`) | подготовлено, минуты работы |
-| [frida-llm-tpu-sft](frida-llm-tpu-sft) | **рецепт BERTA, перенесённый на FRIDA**: `matches_llm.parquet` (сэмпл 1.5M) + полный human train вперемешку, `PAIR_MAX_LENGTH=256`, `LR=2e-4`, `WARMUP_RATIO=0.10`, 2 эпохи, многослойная голова с warm-start из предыдущего шага | TPU v5e-8 (`maxamsecret`) | подготовлено |
+Все три — на аккаунте **`maximmarkovbb`** (там свежая TPU-квота). Аккаунт
+выбран не только под обучение: датасеты, которые эти кернелы создают, должны
+читаться теми, кто их потребляет, а `kaggle datasets create` делает датасет
+приватным. Держим всю цепочку на одном аккаунте — и ничего не надо
+расшаривать. Входы с `maxamsecret` (исходные данные + оба item-кэша) уже
+проверены на чтение с `maximmarkovbb`.
+
+| Кернел | Суть | GPU/TPU | Статус |
+|---|---|---|---|
+| [frida-tpu-embed-cache-human](frida-tpu-embed-cache-human) | кэш pooled pair-эмбеддингов (CLS, до головы) + логита собственного классификатора чекпоинта по **всем** 365,654 human-парам; `split` **наследует** канонический seed-42 сплит обучения LoRA, в `cache_meta.json` пишется `val_fingerprint`. Шардится по 8 ядрам на непересекающиеся куски одного memmap'а, хвост добивается паддингом до той же статической формы (ни одна строка не теряется), инкрементальный flush + `progress_rank{N}.json` | TPU v5e-8 | **подготовлено, НЕ запущено** — ждём, какой чекпоинт окажется лучше |
+| [frida-head-train](frida-head-train) | обучает `MultiLayerHead` (d_model→512→128→1, LayerNorm+GELU+Dropout) поверх кэша. Учится на `split==0`, метрика — на чистом `split==1`, отбор по ней с early stopping. Отдаёт `head.pt` + `val_features.npy` (128-мерные признаки под CatBoost вместо 1536 сырых — ровно та причина, по которой переобучился `berta_catboost_top_final`) | 1×T4 | подготовлено, минуты работы |
+| [frida-llm-tpu-sft](frida-llm-tpu-sft) | **рецепт BERTA, перенесённый на FRIDA**: **весь** `matches_llm.parquet` (11.19M, без сэмплирования) + полный human train вперемешку, `PAIR_MAX_LENGTH=256`, `LR=2e-4`, `WARMUP_RATIO=0.10`, **1 эпоха** (сколько успеет), многослойная голова с warm-start из предыдущего шага | TPU v5e-8 | подготовлено |
 
 Почему именно так: единственная конфигурация, давшая лучший тест-скор проекта
 (0.47), — это BERTA на `matches_llm`+human вперемешку при `PAIR_MAX_LENGTH=256`.
@@ -148,6 +157,24 @@ pair-truncation, которую нужно было бы воспроизвод�
   датасет с головой не примонтирован. Запускать 8.5ч TPU на случайно
   инициализированной голове — ровно тот класс «дорого и впустую», которым полна
   история проекта.
+- **LR-расписание меряется часами, а не эпохой.** Одна эпоха по 11.48M строк —
+  это ~26.5ч при замеренных ~120 строк/с, то есть прогон гарантированно
+  оборвётся по wall-clock на ~32%. Косинус, растянутый на всю эпоху, к этому
+  моменту стоял бы на ~96% пикового LR — чекпоинт остался бы «горячим»,
+  неотожжённым. Поэтому `num_training_steps` считается из бюджета времени
+  (`MAX_TRAIN_SECONDS × PROJECTED_ROWS_PER_SEC / batch`), а `LR_MIN_RATIO=0.05`
+  не даёт LR упасть в ноль, если реальная скорость окажется выше прогноза.
+  Расписание при этом остаётся **пошаговым**, а не по часам: все 8 реплик
+  делают одинаковое число шагов, значит и LR у них совпадает. Считать LR от
+  собственных часов каждой реплики — это дать их весам разъехаться, потому что
+  `xm.optimizer_step` олл-редьюсит градиенты, но шаг оптимизатора каждая
+  реплика делает свой.
+
+**Перед пушем публикующих кернелов** (`frida-tpu-embed-cache-human`,
+`frida-head-train`) не забыть про секреты: они зовут `kaggle datasets create`
+в рантайме, и `KAGGLE_USERNAME`/`KAGGLE_KEY` для `maximmarkovbb` ставятся
+только через веб-интерфейс Kaggle (kernel → Settings → Secrets),
+`kernel-metadata.json` этого не умеет.
 
 ## Giga-Embeddings-instruct (3.45B) — bi-encoder проба, запаркована
 
@@ -207,6 +234,6 @@ hard negatives по построению.
 - `maximmarkovbb/frida-tokenize-items-v2-cache` — item-token-кэш FRIDA с новой attribute-policy (два варианта: base/shuffled).
 - `maxamsecret/frida-lora-sft-epoch2-40` — чекпоинт FRIDA после эпохи 2 (0.67397).
 - `maximmarkovbb/frida-lora-checkpoint-v1-best` — чекпоинт FRIDA после отменённого continue-2ep прогона (0.69377, с optimizer-state) — точка резюма для `frida-lora-v2-epoch` и `frida-tpu-human-sft`.
-- `maxamsecret/frida-pair-embed-cache-human` — кэш pooled pair-эмбеддингов + classifier-логита FRIDA по всем 365,654 human-парам (выход `frida-tpu-embed-cache-human`, вход `frida-head-train`). Ещё не создан.
-- `maxamsecret/frida-multilayer-head` — обученная многослойная голова (выход `frida-head-train`, вход `frida-llm-tpu-sft`). Ещё не создан.
+- `maximmarkovbb/frida-pair-embed-cache-human` — кэш pooled pair-эмбеддингов + classifier-логита FRIDA по всем 365,654 human-парам (выход `frida-tpu-embed-cache-human`, вход `frida-head-train`). Ещё не создан.
+- `maximmarkovbb/frida-multilayer-head` — обученная многослойная голова (выход `frida-head-train`, вход `frida-llm-tpu-sft`). Ещё не создан.
 - `maximmarkovbb/frida-lora-v2-epoch-last` — **это ровно те веса, что дали 0.386 на тесте**: с сабмитом `submits/Frida Lora V2 Epoch` совпадают побайтово обе половины модели — `adapter_model.safetensors` (sha256 `6914cbb181b9c014…`) и `classifier.pt` (`75b4ce886c67555a…`). Чекпоинт FRIDA после `frida-lora-v2-epoch` (98.6% эпохи, с optimizer/scheduler-state). **Не провалидирован**: "тихий" save без eval, `train_state.json: best_macro_pr_auc` — унаследованное 0.69377 с предыдущего чекпоинта, а не метрика этих весов (ровно та ловушка со stale-метрикой, что разбиралась в `reports/berta_tpu_lora_provenance/`). Внутри лежит `PROVENANCE.md` с этим предупреждением.

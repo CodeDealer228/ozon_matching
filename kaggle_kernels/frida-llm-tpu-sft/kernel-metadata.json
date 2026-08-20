@@ -1,5 +1,5 @@
 {
-  "id": "maxamsecret/frida-llm-tpu-sft",
+  "id": "maximmarkovbb/frida-llm-tpu-sft",
   "title": "Frida Llm Tpu Sft",
   "code_file": "frida_llm_tpu_sft.py",
   "language": "python",
@@ -13,7 +13,7 @@
     "maxamsecret/ozon-ecup-2026-matching",
     "maxamsecret/frida-tokenized-items-human",
     "maxamsecret/frida-tokenized-items-llm",
-    "maxamsecret/frida-multilayer-head",
+    "maximmarkovbb/frida-multilayer-head",
     "maximmarkovbb/frida-lora-checkpoint-v1-best"
   ],
   "kernel_sources": [],

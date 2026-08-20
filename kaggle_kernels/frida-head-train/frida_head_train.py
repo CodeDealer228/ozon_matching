@@ -69,7 +69,7 @@ from sklearn.metrics import average_precision_score
 # =====================================================================
 
 SEED = 42
-CACHE_HINT = "/kaggle/input/datasets/maxamsecret/frida-pair-embed-cache-human"
+CACHE_HINT = "/kaggle/input/datasets/maximmarkovbb/frida-pair-embed-cache-human"
 
 # "train_split": fit on split==0, evaluate on split==1 (default -- see the
 #                leak-discipline note in the module docstring).
@@ -89,7 +89,7 @@ EARLY_STOP_PATIENCE = 8
 WORKING_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 OUTPUT_DIR = os.path.join(WORKING_DIR, "frida_head_train")
 
-DATASET_ID = "maxamsecret/frida-multilayer-head"
+DATASET_ID = "maximmarkovbb/frida-multilayer-head"
 DATASET_TITLE = "FRIDA multi-layer classification head"
 ENABLE_DATASET_PUSH = True
 

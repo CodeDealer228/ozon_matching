@@ -1,5 +1,5 @@
 {
-  "id": "maxamsecret/frida-tpu-embed-cache-human",
+  "id": "maximmarkovbb/frida-tpu-embed-cache-human",
   "title": "Frida Tpu Embed Cache Human",
   "code_file": "frida_tpu_embed_cache_human.py",
   "language": "python",

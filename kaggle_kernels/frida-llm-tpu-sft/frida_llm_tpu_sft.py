@@ -34,7 +34,7 @@ THE HEAD
 MultiLayerHead (duplicated verbatim from frida-head-train -- kernels are
 standalone scripts with no shared import, so a mismatch shows up as a
 state_dict load error, not silent misbehaviour) is warm-started from
-maxamsecret/frida-multilayer-head. The point of the warm start is that the
+maximmarkovbb/frida-multilayer-head. The point of the warm start is that the
 head arrives already knowing how to read FRIDA's pooled representation, so
 this run's first hour goes into the encoder rather than into re-teaching a
 random head what the old linear one already knew.
@@ -52,8 +52,9 @@ parameter set genuinely changed -- the single Linear became a multi-layer
 head -- so the saved Adam moments no longer correspond to the parameters
 being optimised. Loading them would either raise or, worse, silently pair
 moment estimates with the wrong tensors. Fresh optimizer + a fresh cosine
-schedule sized for THIS run's own 2 epochs, with WARMUP_RATIO=0.10 doing the
-work of easing back in. That warmup ratio is not arbitrary: the MiniLM
+schedule sized for this run's own reachable horizon (see the LR section
+below), with WARMUP_RATIO=0.10 doing the work of easing back in. That warmup
+ratio is not arbitrary: the MiniLM
 continue-SFT history showed an over-aggressive restart (LR=4e-4, 3% warmup)
 regressing below its own starting point and never recovering, and LR=2e-4
 with 10% warmup plus human data mixed into every batch is precisely what
@@ -80,23 +81,46 @@ re-verified in scripts/analyze_llm_label_overlap.py), so every pair lives
 entirely inside one scope and a per-pair scope tag is enough to route the
 lookup -- no merged 13GB index needed.
 
-SIZING: WHY LLM_SAMPLE_ROWS IS NOT "ALL OF IT"
+SIZING: ONE EPOCH OVER EVERYTHING, HOWEVER FAR IT GETS
 ===========================================================================
-Measured throughput of this project's first FRIDA TPU run (frida-tpu-human-sft,
-same model, same PAIR_MAX_LENGTH=256, same per-core batch): ~half of a
-292,523-row epoch in ~20 minutes, i.e. roughly 120 rows/s. Over the 8.5h
-wall-clock budget below that is ~3.7M rows total. Two epochs therefore fit
-about 1.85M rows per epoch, of which 292,523 are the full human train split,
-leaving ~1.55M for the LLM sample. LLM_SAMPLE_ROWS=1,500,000 sits just under
-that with margin.
+Per direct instruction: no LLM sampling (LLM_SAMPLE_ROWS=None -> all
+11,187,780 rows) and EPOCHS=1. Whatever the session reaches is what it
+reaches. berta-llm-tpu-sft took exactly this posture, and the checkpoint it
+produced at ~50% of its single epoch is still this project's best test score
+(0.47) -- a cut-off epoch is a normal outcome here, not a failure.
 
-Sampling rather than streaming all 11.19M rows is a deliberate break from
-berta-llm-tpu-sft, which could afford the full set only because BERTA is
-6.4x smaller. Asking for 2 epochs over 11.48M rows here would produce ~16% of
-one epoch and a scheduler whose cosine never anneals -- worse than 2 real
-epochs over a smaller sample. The sample is drawn once, with a fixed seed,
-and its fingerprint is recorded so a follow-up run can reuse or deliberately
-change it.
+Measured throughput (frida-tpu-human-sft: same model, same
+PAIR_MAX_LENGTH=256, same per-core batch) is ~120 rows/s -- half a
+292,523-row epoch in ~20 minutes. Against 11,480,303 mixed rows a full epoch
+needs ~26.5 hours, so the wall-clock cutoff, not the epoch boundary, is
+guaranteed to be what ends this run. Expect roughly 3.7M rows, ~32% of the
+epoch.
+
+THE LR SCHEDULE IS SIZED TO THE CLOCK, NOT TO THE EPOCH
+===========================================================================
+That guarantee has a consequence worth handling rather than ignoring. A
+cosine sized for the full 89,690-step epoch would still sit at ~96% of peak
+LR when the session dies at ~32%, leaving the final checkpoint at a hot,
+un-annealed point -- measurably worse than an annealed one. berta-llm-tpu-sft
+got away with a full-epoch schedule because it reached 50%, where cosine is
+already at half peak; 32% is a different situation.
+
+So num_training_steps is projected from the time budget instead:
+MAX_TRAIN_SECONDS * PROJECTED_ROWS_PER_SEC / global_batch, capped at the real
+epoch length. Both directions of a wrong projection are made graceful rather
+than sharp:
+  * faster than projected -> the schedule runs out early, and LR_MIN_RATIO
+    floors the LR at 5% of peak instead of the 0 a plain cosine decays to.
+    Training keeps making progress rather than sitting dead for hours.
+  * slower than projected -> the cosine simply does not finish annealing,
+    which is the ordinary mid-run state every recovered checkpoint in this
+    project has been in anyway.
+
+The schedule stays STEP-based, not wall-clock-based, on purpose. All 8
+replicas execute the same step count by construction, so they compute
+identical LRs. Driving LR from each replica's own clock would let their
+weights drift apart, because xm.optimizer_step all-reduces gradients but each
+replica then applies its own update with its own LR.
 
 TPU LESSONS CARRIED FORWARD (all real, previously-hit -- originals in
 kaggle_kernels/berta-llm-tpu-sft and frida-tpu-human-sft docstrings)
@@ -127,6 +151,7 @@ import os
 import sys
 import gc
 import json
+import math
 import time
 import hashlib
 import subprocess
@@ -142,7 +167,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
-from transformers import T5EncoderModel, get_scheduler, set_seed
+from transformers import T5EncoderModel, set_seed
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score
 
@@ -189,7 +214,7 @@ LABEL_COLON_TOKEN = 30
 # Multi-layer head -- MUST match frida-head-train's definition exactly.
 HEAD_HIDDEN = (512, 128)
 HEAD_DROPOUT = 0.15
-HEAD_HINT = "/kaggle/input/datasets/maxamsecret/frida-multilayer-head"
+HEAD_HINT = "/kaggle/input/datasets/maximmarkovbb/frida-multilayer-head"
 REQUIRE_PRETRAINED_HEAD = True
 
 # BERTA recipe's own numbers, and the MiniLM continue-SFT fix's numbers.
@@ -202,11 +227,19 @@ WARMUP_RATIO = 0.10
 PER_CORE_TRAIN_BATCH = 16
 PER_CORE_EVAL_BATCH = 32
 
-LLM_SAMPLE_ROWS = 1_500_000    # see docstring's sizing section
-EPOCHS = 2
-MAX_TRAIN_SECONDS = 30600      # 8.5h; TPU session hard cap is 9h
+LLM_SAMPLE_ROWS = None         # None = all 11,187,780 rows, no sampling
+EPOCHS = 1
+MAX_TRAIN_SECONDS = 30600      # 8.5h. Kaggle's TPU session cap is 9h (the 12h
+                                # cap is GPU) -- raise this only if a real TPU
+                                # run here is observed surviving past 9h.
 CHECKPOINT_EVERY_SECONDS = 3600
 LOG_EVERY_STEPS = 50
+
+# Used ONLY to size the LR schedule (see docstring). Measured on
+# frida-tpu-human-sft at this exact model/sequence/batch. If a future run
+# reports a different rate, update this rather than the schedule shape.
+PROJECTED_ROWS_PER_SEC = 120
+LR_MIN_RATIO = 0.05            # LR floor as a fraction of peak
 
 WORKING_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 OUTPUT_DIR = os.path.join(WORKING_DIR, "frida_llm_tpu_sft")
@@ -561,6 +594,21 @@ def build_resumed_model(device, rank, resume_dir, head_path):
     return model, hidden_dim
 
 
+def _make_lr_lambda(warmup_steps, total_steps, min_ratio):
+    """Linear warmup then cosine decay to a FLOOR of min_ratio * peak, never
+    to zero. Written out with LambdaLR (core PyTorch) rather than
+    transformers' cosine_with_min_lr, whose availability depends on the
+    transformers version the image happens to ship -- and TPU-image version
+    drift has already killed one kernel in this project."""
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        progress = min(progress, 1.0)
+        return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+    return lr_lambda
+
+
 # =====================================================================
 # METRICS + EVAL
 # =====================================================================
@@ -787,7 +835,9 @@ def _mp_fn(index):
 
     _log(rank, "CONFIG", f"world_size={world_size} pair_max_length={PAIR_MAX_LENGTH} "
                          f"epochs={EPOCHS} lr={LR} warmup={WARMUP_RATIO} "
-                         f"head={HEAD_HIDDEN} llm_sample={LLM_SAMPLE_ROWS:,}", force=True)
+                         f"head={HEAD_HIDDEN} "
+                         f"llm_sample={'ALL' if LLM_SAMPLE_ROWS is None else format(LLM_SAMPLE_ROWS, ',')}",
+         force=True)
     _log(rank, "DATA", f"train={len(train_frame['label']):,} val={len(val_frame['label']):,} "
                        f"val_fingerprint={_SHARED['val_fingerprint']} "
                        f"llm_fingerprint={_SHARED['llm_fingerprint']}", force=True)
@@ -822,12 +872,21 @@ def _mp_fn(index):
                          "warmup_ratio absorbs the restart", force=True)
 
     steps_per_epoch = len(labels) // total_batch
-    total_steps = steps_per_epoch * EPOCHS
+    epoch_steps = steps_per_epoch * EPOCHS
+
+    # Schedule horizon = what the clock can actually buy, not what the epoch
+    # nominally contains. See the docstring's LR section for why, and for why
+    # this stays step-based rather than reading each replica's own clock.
+    projected_steps = int(MAX_TRAIN_SECONDS * PROJECTED_ROWS_PER_SEC / total_batch)
+    total_steps = max(1, min(epoch_steps, projected_steps))
     warmup_steps = max(1, int(total_steps * WARMUP_RATIO))
-    scheduler = get_scheduler("cosine", optimizer=optimizer, num_warmup_steps=warmup_steps,
-                              num_training_steps=total_steps)
-    _log(rank, "TRAIN", f"steps/epoch={steps_per_epoch} total_steps={total_steps} "
-                        f"warmup={warmup_steps} max_train_seconds={MAX_TRAIN_SECONDS} "
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, _make_lr_lambda(warmup_steps, total_steps, LR_MIN_RATIO))
+    _log(rank, "TRAIN", f"steps/epoch={epoch_steps} projected_reachable={projected_steps} "
+                        f"-> schedule_steps={total_steps} "
+                        f"({100 * total_steps / max(epoch_steps, 1):.1f}% of the epoch) "
+                        f"warmup={warmup_steps} lr_floor={LR_MIN_RATIO * LR:.2e} "
+                        f"max_train_seconds={MAX_TRAIN_SECONDS} "
                         f"checkpoint_every={CHECKPOINT_EVERY_SECONDS}s", force=True)
 
     val_full_loader, val_remainder_loader = make_eval_loader(val_frame, caches, pad_id,

@@ -1,5 +1,5 @@
 {
-  "id": "maxamsecret/frida-head-train",
+  "id": "maximmarkovbb/frida-head-train",
   "title": "Frida Head Train",
   "code_file": "frida_head_train.py",
   "language": "python",
@@ -10,7 +10,7 @@
   "enable_internet": true,
   "keywords": [],
   "dataset_sources": [
-    "maxamsecret/frida-pair-embed-cache-human"
+    "maximmarkovbb/frida-pair-embed-cache-human"
   ],
   "kernel_sources": [],
   "competition_sources": [],

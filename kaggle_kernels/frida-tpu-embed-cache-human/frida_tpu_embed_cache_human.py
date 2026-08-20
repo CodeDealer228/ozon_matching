@@ -162,7 +162,7 @@ LOG_EVERY_BATCHES = 100
 SHARD_WAIT_TIMEOUT_S = 3600
 SHARD_POLL_S = 10
 
-DATASET_ID = "maxamsecret/frida-pair-embed-cache-human"
+DATASET_ID = "maximmarkovbb/frida-pair-embed-cache-human"
 DATASET_TITLE = "FRIDA pair embedding cache (human, all 365654 pairs)"
 ENABLE_DATASET_PUSH = True
 
@@ -681,7 +681,7 @@ def _publish_dataset():
             json.dump({"id": DATASET_ID, "title": DATASET_TITLE,
                        "licenses": [{"name": "CC0-1.0"}]}, f, indent=2)
         subprocess.check_call([sys.executable, "-m", "kaggle", "datasets", "create",
-                               "-p", OUTPUT_DIR, "-r", "skip", "--dir-mode", "zip"])
+                               "-p", OUTPUT_DIR, "-r", "skip"])
         print("[PUBLISH] dataset created", flush=True)
     except Exception as e:
         print(f"[PUBLISH] FAILED ({type(e).__name__}: {e}) -- output is still in "
