@@ -29,10 +29,10 @@ has produced.
 
 Run 2 (this configuration): maximmarkovbb/frida-lora-v2-epoch-last -- the
 weights behind the submission that scored 0.386 on the test stand, confirmed
-by sha256: the dataset's adapter_model.safetensors and the submitted
-submits/Frida Lora V2 Epoch/.../adapter_model.safetensors are byte-identical
-(6914cbb181b9c014...). So whatever this run reports is that submission's
-real val score.
+by sha256 on BOTH halves of the model -- the dataset's and the submission's
+adapter_model.safetensors match (6914cbb181b9c014...) and so do their
+classifier.pt (75b4ce886c67555a...). Nothing is inferred: whatever this run
+reports is that submission's real val score.
 
 THE 0.69 ATTACHED TO THAT SUBMISSION IS NOT ITS SCORE. Its train_state.json
 reads {"global_step": 1127, "best_macro_pr_auc": 0.6937681383971788} -- and

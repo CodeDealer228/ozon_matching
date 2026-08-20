@@ -71,8 +71,10 @@ README — быстрый старт и карта репозитория, CLAUD
   вернулся нулевого размера — та же ловушка со stale-метрикой, что разобрана в
   `reports/berta_tpu_lora_provenance/`. Реальный val меряется в
   `kaggle_kernels/frida-validate-checkpoint`; веса сабмита и датасета
-  `maximmarkovbb/frida-lora-v2-epoch-last` совпадают побайтово (sha256
-  `6914cbb181b9c014…`), так что мерить есть что.
+  `maximmarkovbb/frida-lora-v2-epoch-last` совпадают побайтово по **обеим**
+  половинам модели — `adapter_model.safetensors` (sha256 `6914cbb181b9c014…`)
+  и `classifier.pt` (`75b4ce886c67555a…`), так что мерить есть что и ничего
+  не додумывается.
 
   **Третья, самая конкретная гипотеза про 0.386 — рассинхрон препроцессинга
   train/inference.** `frida-lora-v2-epoch` обучался на кэше
