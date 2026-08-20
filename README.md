@@ -25,13 +25,15 @@ README — быстрый старт и карта репозитория, CLAUD
 
 | Сабмит (`submits/<dir>`) | Тест-скор | Архитектура |
 |---|---|---|
-| **`matching-berta_tpu_lora-submit`** (`submits/berta_tpu_lora`) | **0.47 (лучший)** | BERTA (128.3M) cross-encoder + LoRA, TPU SFT на `matches_llm.parquet`+human, `PAIR_MAX_LENGTH=256` — чекпоинт восстановлен из упавшего рана на 50% эпохи, подробный разбор происхождения в `reports/berta_tpu_lora_provenance/` |
+| **`matching-berta_tpu_lora-submit`** (`submits/berta/tpu_lora`) | **0.47 (лучший)** | BERTA (128.3M) cross-encoder + LoRA, TPU SFT на `matches_llm.parquet`+human, `PAIR_MAX_LENGTH=256` — чекпоинт восстановлен из упавшего рана на 50% эпохи, подробный разбор происхождения в `reports/berta_tpu_lora_provenance/` |
 | `berta_tpu_lora_after_llm` | 0.466 | тот же тренировочный кернел, чекпоинт на 100% эпохи (после фикса краша) — val у него реально **ниже** (~0.697 против 0.7087 у 50%-чекпоинта, не просто устаревшая метрика в `train_state.json`) — согласуется с просадкой на тесте |
 | `berta_catboost_pca32` | 0.469 | топ-чекпоинт + PCA(32) на эмбеддинге + classifier_score + tf-idf + category → CatBoost — фикс переобучения `berta_catboost_top_final` (см. ниже), почти закрыл разрыв, но всё ещё чуть ниже чистого классификатора |
 | `ecup_qwen_stage2_submit` | 0.41 | Qwen3-Embedding-0.6B bi-encoder + LoRA + MLP-голова |
 | `berta_catboost_top_final` | 0.457 | топ-чекпоинт + 768 сырых эмбеддингов + classifier_score + tf-idf + category → CatBoost — **хуже чистого классификатора** несмотря на более высокий val (0.7467 против 0.7087); переобучение, см. раздел ниже |
 | `berta_catboost` | 0.40 | BERTA (128.3M) cross-encoder + LoRA + CatBoost-голова, `PAIR_MAX_LENGTH=128` |
 | `berta_catboost_256_len` | 0.39 | то же, но `PAIR_MAX_LENGTH=256` — скор **ниже** 128-версии, вероятная причина: та BERTA дообучалась на длине пары 128, не 256 |
+| `frida_tpu_human_256_epoch4` | **падает на Check** (см. ниже) | FRIDA + LoRA, `PAIR_MAX_LENGTH=**256**`, v2-порядок атрибутов, 4 эпохи human-only на TPU — val **0.7660**, лучший val проекта — но пока не проходит Check-стадию (1 мин/1000 пар), см. «Check-стадия падает» ниже |
+| `frida_tpu_human_256_epoch2` | **падает на Check** (см. ниже) | тот же прогон, эпоха 2 (val 0.7602) — проверка гипотезы «меньше human-only эпох лучше переносится на тест», заблокирована тем же таймингом |
 | `Frida Lora V2 Epoch` | 0.386 | FRIDA (823M) cross-encoder + LoRA, `PAIR_MAX_LENGTH=128`, чекпоинт из `maximmarkovbb/frida-lora-v2-epoch/output` (98.6% эпохи, val ≈0.69) — см. разбор ниже |
 | `ecup_qwen_bi_encoder` | 0.37 | Qwen3-Embedding bi-encoder, более ранняя версия |
 | `ecup_qwen_bi_encoder_128_len` | 0.35 | то же, `max_length=128` |
@@ -80,11 +82,52 @@ README — быстрый старт и карта репозитория, CLAUD
   train/inference.** `frida-lora-v2-epoch` обучался на кэше
   `frida-tokenize-items-v2-cache`, чья политика парсит JSON атрибутов и
   выносит длинные/https/oem-значения в конец **до** обрезки по 384 символам.
-  Сабмит так не делает: `submits/Frida Lora V2 Epoch/frida_lora/src/utils.py`
+  Сабмит так не делает: `submits/frida/lora_v2_epoch/frida_lora/src/utils.py`
   режет сырую нераспарсенную строку атрибутов, то есть подаёт v1-порядок. До
   модели доезжают буквально другие символы. Это не рассуждение о
   генерализации, а измеримая величина — валидатор теперь считает один и тот же
   чекпоинт на обоих кэшах, и разрыв между строками и есть цена рассинхрона.
+
+### Check-стадия падает для `frida_tpu_human_256_epoch4`/`epoch2` (2026-08-20, не решено)
+
+Ни один из двух FRIDA-256-чекпоинтов ещё не смог пройти даже **Check**
+(1 мин / 1000 пар, не оценивается, но обязателен) — три реальных прогона на
+судейском стенде, каждый менял **ровно одну переменную**, все три упали с
+`Error: Container did not finish in time` за 2-3 минуты:
+
+| Прогон | Что менялось | Результат |
+|---|---|---|
+| `frida_human_256len_16k_batch` | фикс. `batch_size=1024→16384`, без probe | упал, ~3 мин |
+| исходный `frida_tpu_human_256_epoch4` (с GPU batch-size probe) | добавлен probe (doubling+binary search до реального forward pass) | упал, ~2 мин |
+| `frida_tpu_human_256_epoch4_200k_tokenizing_chunk` | `TOKENIZE_CHUNK_SIZE=20_000→200_000` (10×) | упал, менее 3 мин |
+
+**Вывод: дело не в `batch_size`, не в probe и не в размере чанка
+токенизации.** На Check-стадии всего ~1000 пар / ~2000 уникальных items —
+при таком масштабе токенизация/reorder/сборка пар тривиально быстры
+независимо от этих констант (один чанк в любом случае). То, что варьирование
+всех трёх ни разу не изменило исход, указывает на **фиксированные накладные
+расходы на старте**, не масштабирующиеся с числом пар: загрузка весов модели
+(823M, bf16, через `peft`), офлайн-установка колёс (`maybe_offline_install`,
+~25 пакетов через `pip --no-index`), или первая CUDA-компиляция под новую
+форму (`PAIR_MAX_LENGTH=256`, раньше никогда не тестировался на реальном
+стенде ни один FRIDA-чекпоинт этой длины).
+
+**GPU batch-size probe убран** (см. `submits/frida/tpu_human_256_epoch4/src/utils.py`) —
+даже если он не единственная причина, он гарантированно добавляет несколько
+реальных forward pass'ов чистого оверхеда перед тем, как реальные 1000 пар
+Check вообще коснутся GPU, а для такого маленького прогона батч выше 1000 в
+принципе не нужен. `batch_size` вместо этого — аналитическая оценка потолка
+по arithmetic активаций (не измерение, не probe), с честно показанной
+формулой и допущениями в коде.
+
+**Следующая правка, ещё не протестирована на стенде:** загрузка весов модели
+переведена в фоновый поток (`threading.Thread`), параллельно с
+загрузкой/reorder текста товаров и токенизацией на главном потоке — раньше
+всё шло строго последовательно, хотя токенизации нужен только токенайзер
+(грузится отдельно и быстро), а не полные веса. Это чисто планировочное
+изменение (не меняет ни одно предсказание), нацеленное именно на
+фиксированные накладные расходы старта — следующий кандидат для изолированного
+теста по той же методологии (1 изменение = 1 сабмит).
 
 ### Известное ограничение: мало данных без лика для головы поверх BERTA
 
@@ -127,7 +170,7 @@ classifier_score + tf-idf + category) вышел **хуже** чистого к�
 действительно даёт прирост качества.
 
 Исторически первый работающий сабмит — LoRA-дообученный
-`cross-encoder/ms-marco-MiniLM-L-12-v2` (`submits/lora/`):
+`cross-encoder/ms-marco-MiniLM-L-12-v2` (`submits/minilm/lora/`):
 
 | Вариант | macro PR-AUC (val) | Mean PR-AUC (лидерборд) |
 |---|---|---|
@@ -141,12 +184,12 @@ classifier_score + tf-idf + category) вышел **хуже** чистого к�
 
 Коротко, что перепробовано (детали и обоснование выбора — в CLAUDE.md):
 
-- **`submits/lora`** — исходный baseline: `cross-encoder/ms-marco-MiniLM-L-12-v2`
+- **`submits/minilm/lora`** — исходный baseline: `cross-encoder/ms-marco-MiniLM-L-12-v2`
   (33M) + LoRA SFT на `matches.parquet`. Отправная точка проекта.
 - **BERTA** (`sergeyzh/BERTA`, 128.3M, дистиллят FRIDA в BERT-форме) —
   LoRA-дообученный cross-encoder, с несколькими вариантами головы: линейная
-  (`submits/berta_probe`, `submits/berta_tpu_lora`) и CatBoost поверх
-  эмбеддингов (`submits/berta_catboost`, `submits/berta_catboost_256_len`).
+  (`submits/probes/berta`, `submits/berta/tpu_lora`) и CatBoost поверх
+  эмбеддингов (`submits/berta/catboost`, `submits/berta/catboost_256_len`).
   Обучающие кернелы: `kaggle_kernels/berta-lora-sft*`, `berta-merge-lora`,
   `berta-catboost-*`, `berta-llm-tpu-sft` (полномасштабный SFT на TPU
   v5e-8 поверх `matches_llm.parquet`).
@@ -156,7 +199,8 @@ classifier_score + tf-idf + category) вышел **хуже** чистого к�
   `kaggle_kernels/frida-tokenize-items*`, `frida-lora-sft*`,
   `frida-lora-continue-2ep`, `frida-lora-v2-epoch` (актуальная версия —
   тайм-аут-устойчивые чекпоинты, новая политика упорядочивания атрибутов).
-  Сабмит: `submits/frida_lora_adapter`, `submits/frida_probe`.
+  Сабмит: `submits/frida/lora_v2_epoch`, `submits/frida/tpu_human_256_epoch4`,
+  `submits/probes/frida`.
 - **Giga-Embeddings-instruct** (3.45B, `giga3b_probe`) — проба
   bi-encoder-подхода на ещё большем энкодере; zero-shot cosine similarity
   уже бьёт обученный baseline, но candidate-пары почти не переиспользуют
@@ -166,7 +210,7 @@ classifier_score + tf-idf + category) вышел **хуже** чистого к�
 - **`omarelshehy/arabic-english-sts-matryoshka`** (~560M, `matryoshka_probe`) —
   проба "насколько крупный энкодер потянет H100-стенд" в схеме
   baseline-архитектуры (frozen encoder → CLS → LogReg).
-- **Qwen3-Embedding-0.6B bi-encoder** (`submits/ecup_qwen_stage2_submit`,
+- **Qwen3-Embedding-0.6B bi-encoder** (`submits/qwen/stage2`,
   `ecup_qwen_biencoder_submit_128_length`, `matching-qwen-berta-catboost-submit`) —
   LoRA + MLP/CatBoost голова поверх эмбеддингов. **Текущий лучший результат
   проекта на реальном тесте.**
@@ -245,14 +289,18 @@ negative_patterns/            по-категорийный набор hard-nega
                               (20 категорий, генерируется kaggle_kernels/negative-pattern-sampling)
 reports/                     письменные находки: experiment_log.md (полная хронология),
                               per-category val-метрики, анализ пересечения LLM-меток
-submits/baseline/            референсное решение от организаторов
-submits/lora/                исходный LoRA-сабмит (MiniLM cross-encoder)
-submits/berta_*/             BERTA cross-encoder варианты (probe/catboost/TPU)
-submits/frida_*/             FRIDA bi-encoder варианты
-submits/giga3b_probe/        Giga-3B bi-encoder проба
-submits/matryoshka_probe/    матрёшка-энкодер проба (baseline-архитектура)
-submits/ecup_qwen_*/,
-submits/matching-qwen-*/     Qwen3-Embedding bi-encoder — текущий лучший результат
+submits/                     все сабмиты, по семействам моделей (2 уровня: <семейство>/<вариант>)
+  minilm/baseline/            референсное решение от организаторов
+  minilm/lora/                 исходный LoRA-сабмит (MiniLM cross-encoder)
+  berta/                       BERTA cross-encoder варианты (tpu_lora — **0.47, лучший**;
+                                catboost*, human_continue_384/) — см. berta/tpu_lora/README.md
+  frida/                       FRIDA cross-encoder варианты (lora_v2_epoch — 0.386;
+                                tpu_human_256_epoch4/epoch2 — новый val 0.7660, тест пока не пройден)
+                                — см. frida/tpu_human_256_epoch4/README.md
+  qwen/                        Qwen3-Embedding bi-encoder (тиммейт `grigoriyyy`) — stage2 (0.41,
+                                текущий лучший результат помимо BERTA), bi_encoder_128_len, berta_catboost
+  probes/                      быстрые классификатор-пробы по разным энкодерам
+                                (berta/frida/giga3b/matryoshka) — не полноценные сабмиты
 ```
 
 ## Пересборка и тестирование сабмита
@@ -274,7 +322,7 @@ python scripts/test_submission.py --submission-dir submits/<name> --n-pairs 1000
 `submits/<name>/`) — баги упаковки (обёрточная папка в zip, пакет, которого
 нет в судейском Docker-образе) проявляются только на реальном архиве.
 
-Для LoRA-сабмита (`submits/lora`) есть отдельный шаг мёржа адаптера:
+Для LoRA-сабмита (`submits/minilm/lora`) есть отдельный шаг мёржа адаптера:
 ```bash
 python scripts/merge_lora.py                # LoRA-адаптер -> смёрженные веса
 ```

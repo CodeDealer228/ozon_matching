@@ -54,7 +54,7 @@ text = f"Name: {name[:128]} Category: {category[:64]} Attributes: {attributes[:3
 `attributes` is a **raw string slice**, not `json.loads`'d (parsing 13M+ JSON
 blobs OOMs). Tokenization: `max_length=128`, `padding="max_length"`,
 `truncation=True`, `text=text1, text_pair=text2`.
-`submits/baseline` uses full `json.loads` instead — intentional mismatch for
+`submits/minilm/baseline` uses full `json.loads` instead — intentional mismatch for
 the baseline comparison, but our `run.py` must use the formula above (what
 the LoRA weights were trained on).
 
@@ -248,7 +248,7 @@ adapter/classifier of `frida-lora-sft-human-only-10-epochs`'s **epoch-1**
 checkpoint (val 0.652) — *not* epoch 2's 0.674, which hasn't been submitted
 anywhere yet. Its `src/utils.py` is a real, battle-tested reference for
 FRIDA inference specifically:
-- Does **not** merge the LoRA adapter (unlike `submits/lora`, which merges
+- Does **not** merge the LoRA adapter (unlike `submits/minilm/lora`, which merges
   precisely to drop the `peft` runtime dependency) — ships `frida-base/`
   (bf16, to fit the 5GB zip budget) and `frida-lora-adapter/` separately,
   plus a `wheels/` dir of ~26 offline pip wheels for `peft` + its transitive
@@ -260,17 +260,16 @@ FRIDA inference specifically:
   writable in the judging container.
 - **Its pairwise text-preprocessing contract is FRIDA-specific, not the
   formula in this file's "Text preprocessing" section above** (that one is
-  `submits/lora`/MiniLM's contract only). FRIDA's is: item-level
+  `submits/minilm/lora`/MiniLM's contract only). FRIDA's is: item-level
   tokenization with special tokens, `Category:` span excision (zero
   discriminative signal, proven), fair-share truncation to 128 — byte-match
   to what `frida-lora-sft-*` kernels train against, detailed in
   `kaggle_kernels/frida-lora-sft-human-only-10-epochs/README.md`.
 
-No tracked `submits/frida_lora_adapter/` exists yet (the working code above
-is only in the local, gitignored zip) — worth promoting `run.py`/
-`src/utils.py`/`metadata.json` into git, mirroring `submits/lora`'s
-pattern, once it's decided which checkpoint (epoch 1, epoch 2, or a
-resumed/finished FRIDA run) should be the one tracked.
+Now tracked as `submits/frida/lora_v2_epoch/` (epoch-1-lineage checkpoint,
+test 0.386) and `submits/frida/tpu_human_256_epoch4/` (the newer
+`PAIR_MAX_LENGTH=256` checkpoint, val 0.7660, test not yet passed -- see its
+own README.md for the Check-stage timing investigation).
 
 ### Known val ↔ leaderboard pairs
 
@@ -315,9 +314,9 @@ scripts/analyze_per_category.py                   offline post-analysis of saved
 scripts/merge_lora.py, build_submission_zip.py, test_submission.py   submission build/test pipeline
 data/, data/splits/                               local data + canonical split
 reports/                                          written findings (tracked; kernel outputs are not) — experiment_log.md has full narrative detail
-submits/baseline/                                 organizer-provided reference (structural template)
-submits/lora/                                     our submission
-submits/giga3b_probe/                             bi-encoder pipeline (dependency-injected encoder); parked, see above
+submits/minilm/baseline/                                 organizer-provided reference (structural template)
+submits/minilm/lora/                                     our submission
+submits/probes/giga3b/                             bi-encoder pipeline (dependency-injected encoder); parked, see above
 ```
 
 ## Submission constraints
@@ -325,7 +324,7 @@ submits/giga3b_probe/                             bi-encoder pipeline (dependenc
 - **Offline** at inference — everything must be in the Docker image + archive.
 - Image `odsai/ecup26-matching-baseline:1.0` (declared in `metadata.json`,
   `{"image": ..., "entry_point": "python -u run.py"}`) **lacks `polars`** —
-  `submits/lora/src/utils.py` only imports what `submits/baseline/src/utils.py`
+  `submits/minilm/lora/src/utils.py` only imports what `submits/minilm/baseline/src/utils.py`
   does: `numpy`, `pandas`+`pyarrow`, `torch`, `transformers`. Custom images can
   be pushed to Docker Hub if a package is truly needed, but that's unverified/
   higher-effort — last resort.
@@ -340,7 +339,7 @@ submits/giga3b_probe/                             bi-encoder pipeline (dependenc
   locally + on a Kaggle GPU dry-run before spending one.
 - `run.py` CLI: `--items_path --matches_path --output_path` (underscore —
   rules prose has a hyphen typo, working baseline code uses underscore).
-- Hardware-aware tuning in `submits/lora/src/utils.py` (mirrors baseline):
+- Hardware-aware tuning in `submits/minilm/lora/src/utils.py` (mirrors baseline):
   `TRITON_CACHE_DIR`/`TORCHINDUCTOR_CACHE_DIR` → `/dev/shm`,
   `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`RAYON_NUM_THREADS=32`,
   `TOKENIZERS_PARALLELISM=true`, **bf16** autocast (not fp16 — native H100
@@ -349,8 +348,8 @@ submits/giga3b_probe/                             bi-encoder pipeline (dependenc
 Build/test:
 ```bash
 python scripts/merge_lora.py                # LoRA adapter -> merged weights
-python scripts/build_submission_zip.py       # -> submits/lora/matching-lora-submit.zip (zip root, no wrapping folder)
-python scripts/test_submission.py --submission-dir submits/lora --n-pairs 1000
+python scripts/build_submission_zip.py       # -> submits/minilm/lora/matching-lora-submit.zip (zip root, no wrapping folder)
+python scripts/test_submission.py --submission-dir submits/minilm/lora --n-pairs 1000
 ```
 Always also extract the actual built zip to a clean dir and test *that*
 (packaging bugs only show up in the real archive).
@@ -420,7 +419,7 @@ Always also extract the actual built zip to a clean dir and test *that*
    Russian-capable encoder (`rubert-tiny2`, multilingual MiniLM) — ~3x more
    content in the same window given the current 1.33 chars/token. Any
    text-formula/`max_length` change must land in both training code and
-   `submits/lora/src/utils.py` (byte-match requirement).
+   `submits/minilm/lora/src/utils.py` (byte-match requirement).
 4. Consider per-category loss weighting: the metric is a plain mean over 20
    categories, but the training loss is proportional to the pooled row counts.
 5. **Next up**: FRIDA bi-encoder (see above) — per-item tokenization caches
@@ -433,10 +432,10 @@ Always also extract the actual built zip to a clean dir and test *that*
    against 0.5282/0.53229.
 6. Teammate `grigoriyyy`'s parallel **bi-encoder** track (Qwen3-Embedding-
    0.6B + LoRA + MLP head) already produced real scored submissions, tracked
-   under `submits/ecup_qwen_stage2_submit` (test 0.41, current best of any
+   under `submits/qwen/stage2` (test 0.41, current best of any
    submission in the repo — a checkpoint that *regressed* ~1% on val but
    *gained* on the real test stand, see `[[submission-test-scores]]`-style
-   note in project memory) and `submits/ecup_qwen_biencoder_submit_128_length`
+   note in project memory) and `submits/qwen/bi_encoder_128_len`
    (0.35/0.37 variants). Worth understanding *why* the train-overfit
    checkpoint generalizes better here before assuming it's a fluke — it's
    already informed how FRIDA/BERTA checkpoint selection for submission is
@@ -458,7 +457,7 @@ Always also extract the actual built zip to a clean dir and test *that*
    training (mixed into SFT like `matches_llm.parquet` already is, a
    separate pretraining/augmentation stage, targeted at the weak categories
    from (7), etc.) — depends on what (7)'s error patterns actually show.
-10. **`submits/matching-qwen-berta-catboost-submit` fits the timing budget
+10. **`submits/qwen/berta_catboost` fits the timing budget
     but scores badly** — root cause: the CatBoost head was trained on
     LLM-labeled data (`matches_llm.parquet`), but BERTA's own eval
     distribution and Qwen3's own eval distribution differ from each other
