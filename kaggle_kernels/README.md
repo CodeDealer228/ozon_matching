@@ -113,7 +113,41 @@ pair-truncation, которую нужно было бы воспроизвод�
 | [frida-tokenize-items-v2](frida-tokenize-items-v2) | новая политика упорядочивания `attributes` (демоушен длинных/https/oem-значений в конец + 5% shuffle), два готовых варианта под zero-overhead аугментацию | CPU | датасет `frida-tokenize-items-v2-cache` |
 | [frida-lora-v2-epoch](frida-lora-v2-epoch) | текущая версия обучения: 4 метрики в output, time-aware "тихие" чекпоинты (без eval после 11ч), устойчивость к OOM на каждом шаге, eval только в конце эпохи, липкий chunk_size для eval (фикс повторяющегося `eval OOM`-варнинга), новая attribute-policy без оверхеда | 1×T4 (`maximmarkovbb`) | отменено на 10.5ч, step 1127/1143 (98.6% эпохи). Единственный чекпоинт — "тихий" save **без eval**, лог кернела пустой (0 байт, потерян при отмене) → реальное качество неизвестно. Опубликован как `maximmarkovbb/frida-lora-v2-epoch-last` с честной `PROVENANCE.md` |
 | [frida-validate-checkpoint](frida-validate-checkpoint) | автономный валидатор любого FRIDA LoRA-чекпоинта: macro PR-AUC на канонической val (73,131 пара), адаптер ищется в `/kaggle/input` по содержимому (`adapter_config.json`), а не по имени датасета | 1×T4 (`maximmarkovbb`) | первый прогон — против `v1-best` (само-проверка: должен воспроизвести 0.69377); дальше — против `frida-lora-v2-epoch-last` |
-| [frida-tpu-human-sft](frida-tpu-human-sft) | FRIDA на TPU v5e-8, human-only, **`PAIR_MAX_LENGTH` 128 → 256** (единственное реальное изменение — 128 обрезал ~94% пар), 4 эпохи, чекпоинты **каждый час** по wall-clock, eval в try/except который не может уронить обучение | TPU v5e-8 (`maxamsecret`) | v1 упал на 47-й секунде (`RobertaProcessing.__new__() got an unexpected keyword argument 'cls'` — рассинхрон transformers/tokenizers на TPU-образе). Фикс: не токенизировать в скрипте вообще, брать готовый кэш `frida-tokenize-items-v2-cache` (256 токенов), `pad_id` выводить из самого кэша. Перезапущено |
+| [frida-tpu-human-sft](frida-tpu-human-sft) | FRIDA на TPU v5e-8, human-only, **`PAIR_MAX_LENGTH` 128 → 256** (единственное реальное изменение — 128 обрезал ~94% пар), 4 эпохи, чекпоинты **каждый час** по wall-clock, eval в try/except который не может уронить обучение | TPU v5e-8 (`maxamsecret`) | v1 упал на 47-й секунде (`RobertaProcessing.__new__() got an unexpected keyword argument 'cls'` — рассинхрон transformers/tokenizers на TPU-образе). Фикс: не токенизировать в скрипте вообще, брать готовый кэш `frida-tokenize-items-v2-cache` (256 токенов), `pad_id` выводить из самого кэша. Перезапущено; замеренная скорость ~120 строк/с (полэпохи из 292,523 строк за ~20 мин) — это единственная реальная точка отсчёта throughput'а FRIDA на TPU |
+
+### Пайплайн «многослойная голова + рецепт BERTA» (подготовлено, запускается по цепочке)
+
+Три кернела, которые надо гонять именно в этом порядке — каждый следующий
+потребляет датасет предыдущего:
+
+| Кернел | Суть | GPU/TPU | Статус |
+|---|---|---|---|
+| [frida-tpu-embed-cache-human](frida-tpu-embed-cache-human) | кэш pooled pair-эмбеддингов (CLS, до головы) + логита собственного классификатора чекпоинта по **всем** 365,654 human-парам; `split` **наследует** канонический seed-42 сплит обучения LoRA, в `cache_meta.json` пишется `val_fingerprint`. Шардится по 8 ядрам на непересекающиеся куски одного memmap'а, хвост добивается паддингом до той же статической формы (ни одна строка не теряется), инкрементальный flush + `progress_rank{N}.json` | TPU v5e-8 (`maxamsecret`) | **подготовлено, НЕ запущено** — ждём, какой чекпоинт окажется лучше |
+| [frida-head-train](frida-head-train) | обучает `MultiLayerHead` (1536→512→128→1, LayerNorm+GELU+Dropout) поверх кэша. Учится на `split==0`, метрика — на чистом `split==1`, отбор по ней с early stopping. Отдаёт `head.pt` + `val_features.npy` (128-мерные признаки под CatBoost вместо 1536 сырых — ровно та причина, по которой переобучился `berta_catboost_top_final`) | 1×T4 (`maxamsecret`) | подготовлено, минуты работы |
+| [frida-llm-tpu-sft](frida-llm-tpu-sft) | **рецепт BERTA, перенесённый на FRIDA**: `matches_llm.parquet` (сэмпл 1.5M) + полный human train вперемешку, `PAIR_MAX_LENGTH=256`, `LR=2e-4`, `WARMUP_RATIO=0.10`, 2 эпохи, многослойная голова с warm-start из предыдущего шага | TPU v5e-8 (`maxamsecret`) | подготовлено |
+
+Почему именно так: единственная конфигурация, давшая лучший тест-скор проекта
+(0.47), — это BERTA на `matches_llm`+human вперемешку при `PAIR_MAX_LENGTH=256`.
+У FRIDA не было ни того, ни другого (только human, только 128) — и она даёт
+0.386 при сопоставимом val. Оба отличия закрываются в `frida-llm-tpu-sft`.
+Это осознанно не чистый A/B: меняются сразу LLM-микс, длина пары и голова —
+при 5 сабмитах в день и ~8.5ч TPU за прогон дешевле сначала купить всю дельту,
+а разбирать вклад по частям потом.
+
+Три вещи, которые в этом пайплайне сделаны намеренно и легко сломать при правке:
+- **`optimizer.pt` резюмируемого чекпоинта НЕ загружается** в `frida-llm-tpu-sft`
+  — набор параметров изменился (Linear → многослойная голова), моменты Adam
+  больше не соответствуют оптимизируемым тензорам. Свежий оптимизатор + 10%
+  warmup вместо этого.
+- **Оба item-кэша — v1-политики** (`frida-tokenized-items-human` +
+  `-llm`). v2-кэш есть только для human-скоупа, а смешивать v2-порядок
+  атрибутов у human-пар с v1-порядком у LLM-пар нельзя: порядок атрибутов стал
+  бы коррелировать с источником метки. Оба кэша ищутся по `n_items`, не по
+  имени папки — иначе `os.walk` мог бы подсунуть не тот.
+- **`REQUIRE_PRETRAINED_HEAD=True`** — кернел падает на первых секундах, если
+  датасет с головой не примонтирован. Запускать 8.5ч TPU на случайно
+  инициализированной голове — ровно тот класс «дорого и впустую», которым полна
+  история проекта.
 
 ## Giga-Embeddings-instruct (3.45B) — bi-encoder проба, запаркована
 
@@ -173,4 +207,6 @@ hard negatives по построению.
 - `maximmarkovbb/frida-tokenize-items-v2-cache` — item-token-кэш FRIDA с новой attribute-policy (два варианта: base/shuffled).
 - `maxamsecret/frida-lora-sft-epoch2-40` — чекпоинт FRIDA после эпохи 2 (0.67397).
 - `maximmarkovbb/frida-lora-checkpoint-v1-best` — чекпоинт FRIDA после отменённого continue-2ep прогона (0.69377, с optimizer-state) — точка резюма для `frida-lora-v2-epoch` и `frida-tpu-human-sft`.
+- `maxamsecret/frida-pair-embed-cache-human` — кэш pooled pair-эмбеддингов + classifier-логита FRIDA по всем 365,654 human-парам (выход `frida-tpu-embed-cache-human`, вход `frida-head-train`). Ещё не создан.
+- `maxamsecret/frida-multilayer-head` — обученная многослойная голова (выход `frida-head-train`, вход `frida-llm-tpu-sft`). Ещё не создан.
 - `maximmarkovbb/frida-lora-v2-epoch-last` — чекпоинт FRIDA после `frida-lora-v2-epoch` (98.6% эпохи, с optimizer/scheduler-state). **Не провалидирован**: "тихий" save без eval, `train_state.json: best_macro_pr_auc` — унаследованное 0.69377 с предыдущего чекпоинта, а не метрика этих весов (ровно та ловушка со stale-метрикой, что разбиралась в `reports/berta_tpu_lora_provenance/`). Внутри лежит `PROVENANCE.md` с этим предупреждением.

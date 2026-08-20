@@ -1,0 +1,20 @@
+{
+  "id": "maxamsecret/frida-tpu-embed-cache-human",
+  "title": "Frida Tpu Embed Cache Human",
+  "code_file": "frida_tpu_embed_cache_human.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maximmarkovbb/frida-tokenize-items-v2-cache",
+    "maximmarkovbb/frida-lora-checkpoint-v1-best"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}

@@ -1,0 +1,19 @@
+{
+  "id": "maxamsecret/frida-head-train",
+  "title": "Frida Head Train",
+  "code_file": "frida_head_train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/frida-pair-embed-cache-human"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}
