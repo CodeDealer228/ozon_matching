@@ -397,6 +397,12 @@ Always also extract the actual built zip to a clean dir and test *that*
 - Kaggle GPU quota: 30h/week, **12h max per session** (hard cap, confirmed
   the hard way — see `reports/experiment_log.md`). TPU quota: separate
   20h/week pool, 9h max per session.
+- Before writing/pushing/relaunching any quota-burning kernel, use the
+  **`kaggle-experiment-safety`** skill
+  (`.claude/skills/kaggle-experiment-safety/`): session-cap budgeting, the
+  checkpoint contract, the list of calls that silently ruin a run, and a
+  pre-push checklist — all distilled from real incidents in this repo, with
+  the evidence in its `references/incidents.md`.
 
 ## Open TODOs
 
