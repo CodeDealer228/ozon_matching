@@ -21,14 +21,48 @@ constant that DOES need to match whatever the checkpoint was actually
 trained at -- set explicitly below per checkpoint, not auto-detected (no
 reliable way to infer it from the adapter files themselves).
 
-First run (as pushed): validates maximmarkovbb/frida-lora-checkpoint-v1-best
-(the FRIDA continue-2ep run's own best, val_macro_pr_auc=0.69377 as reported
-by that run itself, at PAIR_MAX_LENGTH=128) -- both to produce a real,
-independently-verified number for a checkpoint that already has one (a
-sanity check on this validator itself) and because it's the one checkpoint
-currently guaranteed to be available. Re-point dataset_sources at
-frida-lora-v2-epoch's own checkpoint once that run actually finishes/gets
-cancelled with recoverable output.
+Run 1 (already executed): maximmarkovbb/frida-lora-checkpoint-v1-best, whose
+own run reported val_macro_pr_auc=0.69377 at PAIR_MAX_LENGTH=128. That run
+exists to sanity-check the validator itself against a checkpoint with a
+known number, before any decision gets made from a number only this kernel
+has produced.
+
+Run 2 (this configuration): maximmarkovbb/frida-lora-v2-epoch-last -- the
+weights behind the submission that scored 0.386 on the test stand, confirmed
+by sha256: the dataset's adapter_model.safetensors and the submitted
+submits/Frida Lora V2 Epoch/.../adapter_model.safetensors are byte-identical
+(6914cbb181b9c014...). So whatever this run reports is that submission's
+real val score.
+
+THE 0.69 ATTACHED TO THAT SUBMISSION IS NOT ITS SCORE. Its train_state.json
+reads {"global_step": 1127, "best_macro_pr_auc": 0.6937681383971788} -- and
+0.69376813... is exactly frida-lora-checkpoint-v1-best's number, the
+checkpoint that run RESUMED from. The wall-clock quiet save wrote the
+inherited running best rather than a metric for its own weights, and the
+kernel log came back 0 bytes, so nothing ever measured these weights. Same
+stale-metric trap traced in reports/berta_tpu_lora_provenance/.
+
+WHY THIS RUN EVALUATES EVERY MOUNTED CACHE, NOT ONE
+===========================================================================
+frida-lora-v2-epoch trained against maximmarkovbb/frida-tokenize-items-v2-cache,
+whose attribute-ordering policy parses the JSON and demotes long/https/oem
+values to the end BEFORE the 384-character slice. The submission that scored
+0.386 does not do that: submits/Frida Lora V2 Epoch/frida_lora/src/utils.py
+slices the raw unparsed attributes string, i.e. the v1 ordering. So the
+served text is not the trained text, and the characters surviving the slice
+genuinely differ.
+
+That makes the mismatch measurable rather than speculative. This kernel now
+scores the same checkpoint against every mounted item cache -- v1
+(frida-tokenized-items-human, what the submission effectively fed it) and v2
+(frida-tokenize-items-v2-cache/variant_base, what it trained on) -- and the
+gap between the two rows is the cost of that mismatch in val macro PR-AUC.
+
+Reading the outcome: a high v2 score with a much lower v1 score means the
+checkpoint is fine and the submission's preprocessing threw the points away,
+which is a cheap fix. Both low means the checkpoint itself is weak and the
+0.386 is honest. Only variant_base is evaluated; variant_shuffled is a
+train-time augmentation and would make the metric non-deterministic.
 """
 import os
 import sys
@@ -110,12 +144,33 @@ def _find_dataset_file(hint, filename):
     return hint
 
 
-def _find_item_cache_dir():
-    if os.path.isdir("/kaggle/input"):
-        for root, _dirs, files in os.walk("/kaggle/input"):
-            if "cache_meta.json" in files and "input_ids.bin" in files:
-                return root
-    return None
+def _find_item_cache_dirs():
+    """Returns EVERY mounted item cache, as (label, dir_with_the_bins).
+
+    Evaluating the same checkpoint against more than one cache is the point:
+    the caches differ in ATTRIBUTE ORDERING (v1 keeps the raw JSON order, v2
+    demotes long/https/oem values to the end before the character slice), and
+    a checkpoint trained on one ordering but served the other is looking at
+    different text. That is a measurable quantity, not a hypothesis -- the gap
+    between two rows of this kernel's output IS the cost of the mismatch.
+
+    Two on-disk layouts exist. v1 caches keep ids/input_ids/attention_mask
+    flat next to cache_meta.json; the v2 cache keeps cache_meta.json at the
+    root with variant_base/ and variant_shuffled/ underneath. Only
+    variant_base is evaluated -- variant_shuffled is a train-time
+    augmentation and would make the metric non-deterministic."""
+    found = []
+    if not os.path.isdir("/kaggle/input"):
+        return found
+    for root, dirs, files in os.walk("/kaggle/input"):
+        if "cache_meta.json" not in files:
+            continue
+        if "input_ids.bin" in files:
+            found.append((os.path.basename(root.rstrip("/")) or root, root))
+        elif "variant_base" in dirs:
+            label = os.path.basename(root.rstrip("/")) or root
+            found.append((f"{label}/variant_base", os.path.join(root, "variant_base")))
+    return sorted(found)
 
 
 def _find_checkpoint_dir():
@@ -295,13 +350,12 @@ def main():
     del matches_pd, labels_all, indices, _train_idx, val_idx
     gc.collect()
 
-    cache_dir = _find_item_cache_dir()
-    if cache_dir is None:
+    caches = _find_item_cache_dirs()
+    if not caches:
         raise RuntimeError("No item-token cache found under /kaggle/input -- expected a FRIDA item "
                             "cache (frida-tokenized-items-human or frida-tokenize-items-v2-cache) "
                             "mounted via dataset_sources/kernel_sources.")
-    item_input_ids, item_lengths, category_label_start, attr_label_start, compact_lengths, id_to_row = \
-        load_item_cache(cache_dir)
+    print(f"[CACHE] {len(caches)} cache(s) mounted: {[c[0] for c in caches]}")
 
     items_human_path = _find_dataset_file(ITEMS_HUMAN_PATH_HINT, "items_human.parquet")
     needed_ids = pd.unique(pd.concat([val_pd["id1"], val_pd["id2"]]))
@@ -337,45 +391,83 @@ def main():
     model = FridaCrossEncoderClassifier(peft_model, classifier_head).to(device)
     model.eval()
 
-    row1 = val_pd["id1"].map(id_to_row).to_numpy().astype(np.int64)
-    row2 = val_pd["id2"].map(id_to_row).to_numpy().astype(np.int64)
     labels = val_pd["label"].to_numpy().astype(np.float32)
     categories = val_pd["category1"].map(category_to_id).fillna(category_to_id.get("UNKNOWN", -1)).to_numpy().astype(np.int64)
-    dataset = PairIndexDataset(row1, row2, labels, categories)
-    collate_fn = make_pair_collate_fn(item_input_ids, item_lengths, category_label_start, attr_label_start,
-                                       pad_id, PAIR_MAX_LENGTH)
-    loader = DataLoader(dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False, num_workers=2,
-                         collate_fn=collate_fn, pin_memory=torch.cuda.is_available())
 
-    all_logits, all_labels, all_categories = [], [], []
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        for batch in tqdm(loader, desc="Validate", dynamic_ncols=True):
-            input_ids, attention_mask, batch_labels, batch_categories = batch
-            input_ids = input_ids.to(device, non_blocking=True)
-            attention_mask = attention_mask.to(device, non_blocking=True)
-            logits = model(input_ids=input_ids, attention_mask=attention_mask)
-            all_logits.append(logits.float().cpu())
-            all_labels.append(batch_labels)
-            all_categories.append(batch_categories)
-    print(f"[EVAL] forward pass done in {time.perf_counter() - t0:.1f}s")
+    per_cache = []
+    for cache_label, cache_dir in caches:
+        print("-" * 90)
+        print(f"[EVAL] cache: {cache_label} ({cache_dir})")
+        item_input_ids, item_lengths, category_label_start, attr_label_start, _compact, id_to_row = \
+            load_item_cache(cache_dir)
 
-    logits = torch.cat(all_logits, dim=0)
-    labels_t = torch.cat(all_labels, dim=0)
-    categories_arr = np.concatenate(all_categories, axis=0)
-    probs = torch.sigmoid(logits).numpy()
-    y_true = (labels_t.numpy() >= 0.5).astype(int)
-    macro_pr_auc, n_categories = compute_metrics(y_true, probs, categories_arr)
+        row1 = val_pd["id1"].map(id_to_row)
+        row2 = val_pd["id2"].map(id_to_row)
+        missing = int(row1.isna().sum() + row2.isna().sum())
+        if missing:
+            # A cache that does not cover the human val split cannot be
+            # compared against one that does -- skip it loudly rather than
+            # score a subset and report it as if it were the same number.
+            print(f"[EVAL] SKIPPED {cache_label}: {missing:,} val endpoints absent from this cache")
+            per_cache.append({"cache": cache_label, "skipped_missing_endpoints": missing})
+            del item_input_ids, item_lengths, category_label_start, attr_label_start, id_to_row
+            gc.collect()
+            continue
 
-    result = {
-        "checkpoint_dir": checkpoint_dir, "pair_max_length": PAIR_MAX_LENGTH,
-        "val_fingerprint": val_fingerprint, "n_val": len(val_pd),
-        "n_categories_evaluated": n_categories, "val_macro_pr_auc": macro_pr_auc,
-    }
-    print(f"[RESULT] {json.dumps(result, indent=2)}")
-    with open(os.path.join(OUTPUT_DIR, "validation_result.json"), "w") as f:
-        json.dump(result, f, indent=2)
+        dataset = PairIndexDataset(row1.to_numpy().astype(np.int64),
+                                   row2.to_numpy().astype(np.int64), labels, categories)
+        collate_fn = make_pair_collate_fn(item_input_ids, item_lengths, category_label_start,
+                                          attr_label_start, pad_id, PAIR_MAX_LENGTH)
+        loader = DataLoader(dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False, num_workers=2,
+                            collate_fn=collate_fn, pin_memory=torch.cuda.is_available())
 
+        all_logits, all_labels, all_categories = [], [], []
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            for batch in tqdm(loader, desc=f"Validate[{cache_label}]", dynamic_ncols=True):
+                input_ids, attention_mask, batch_labels, batch_categories = batch
+                input_ids = input_ids.to(device, non_blocking=True)
+                attention_mask = attention_mask.to(device, non_blocking=True)
+                logits = model(input_ids=input_ids, attention_mask=attention_mask)
+                all_logits.append(logits.float().cpu())
+                all_labels.append(batch_labels)
+                all_categories.append(batch_categories)
+        elapsed = time.perf_counter() - t0
+
+        logits = torch.cat(all_logits, dim=0)
+        labels_t = torch.cat(all_labels, dim=0)
+        categories_arr = np.concatenate(all_categories, axis=0)
+        probs = torch.sigmoid(logits).numpy()
+        y_true = (labels_t.numpy() >= 0.5).astype(int)
+        macro_pr_auc, n_categories = compute_metrics(y_true, probs, categories_arr)
+        print(f"[EVAL] {cache_label}: val_macro_pr_auc={macro_pr_auc:.5f} "
+              f"({n_categories} categories, {elapsed:.0f}s)")
+        per_cache.append({"cache": cache_label, "cache_dir": cache_dir,
+                          "val_macro_pr_auc": macro_pr_auc,
+                          "n_categories_evaluated": n_categories,
+                          "forward_seconds": round(elapsed, 1)})
+
+        # Written after EVERY cache, not once at the end: a session that dies
+        # on the second cache still leaves the first one's number on disk.
+        with open(os.path.join(OUTPUT_DIR, "validation_result.json"), "w") as f:
+            json.dump({"checkpoint_dir": checkpoint_dir, "pair_max_length": PAIR_MAX_LENGTH,
+                       "val_fingerprint": val_fingerprint, "n_val": len(val_pd),
+                       "per_cache": per_cache}, f, indent=2)
+
+        del item_input_ids, item_lengths, category_label_start, attr_label_start, id_to_row
+        del dataset, loader, all_logits, all_labels, all_categories, logits
+        gc.collect()
+
+    print("=" * 90)
+    scored = [c for c in per_cache if "val_macro_pr_auc" in c]
+    for c in scored:
+        print(f"[RESULT] {c['cache']:<45} val_macro_pr_auc={c['val_macro_pr_auc']:.5f}")
+    if len(scored) > 1:
+        best, worst = max(scored, key=lambda c: c["val_macro_pr_auc"]), \
+                      min(scored, key=lambda c: c["val_macro_pr_auc"])
+        print(f"[RESULT] spread across caches: {best['val_macro_pr_auc'] - worst['val_macro_pr_auc']:.5f} "
+              f"({best['cache']} - {worst['cache']}) -- this IS the attribute-ordering "
+              f"train/serve mismatch cost")
     print(f"[DONE] total {_elapsed():.0f}s")
 
 
