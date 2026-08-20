@@ -639,10 +639,23 @@ def _load_model_weights(base_model_path, adapter_path, classifier_path, device):
 # `probs`. Every real pair still gets exactly the same forward pass and the
 # same prediction as before -- this only removes the ONE shape-varying call
 # from the loop.
+# Progress logging every ~20% of rows, not per-batch tqdm -- a full tqdm bar
+# either doesn't render in a non-interactive judging log at all, or if its
+# carriage-return-based updates get flattened to one plain line per batch by
+# a simple log capture, hundreds of lines could push the actually useful
+# early lines out of a length-capped log. If a run dies on TIME (not OOM),
+# this is the only way to know afterward how far inference actually got --
+# same motivation as README.md's "Как дёшево профилировать реальный
+# H100-стенд": every log line here survives even a run that never finishes.
+PROGRESS_LOG_FRACTION = 0.20
+
+
 def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size):
     use_amp = device.type == "cuda"
     n = input_ids_all.shape[0]
     probs = np.empty(n, dtype=np.float32)
+    t0 = time.time()
+    next_log_at = max(1, int(n * PROGRESS_LOG_FRACTION))
 
     def run_one_batch(ids_np, mask_np, n_valid):
         input_ids = torch.from_numpy(ids_np).to(device, non_blocking=True)
@@ -654,11 +667,24 @@ def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size)
             logits = model(input_ids=input_ids, attention_mask=attention_mask)
         return torch.sigmoid(logits.float()).cpu().numpy()[:n_valid]
 
+    def maybe_log_progress(done):
+        nonlocal next_log_at
+        if done < next_log_at:
+            return
+        elapsed = time.time() - t0
+        rate = done / max(elapsed, 1e-9)
+        eta = (n - done) / max(rate, 1e-9)
+        print(f"[7/7]   progress: {done:,}/{n:,} ({100 * done / n:.0f}%) "
+              f"in {elapsed:.1f}s ({rate:.1f} pairs/s, ETA {eta:.0f}s)", flush=True)
+        while next_log_at <= done:
+            next_log_at += max(1, int(n * PROGRESS_LOG_FRACTION))
+
     with torch.inference_mode():
         n_full = (n // batch_size) * batch_size
         for i in range(0, n_full, batch_size):
             probs[i:i + batch_size] = run_one_batch(
                 input_ids_all[i:i + batch_size], attention_mask_all[i:i + batch_size], batch_size)
+            maybe_log_progress(i + batch_size)
 
         if n_full < n:
             tail = n - n_full
@@ -667,7 +693,9 @@ def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size)
             pad_ids[:tail] = input_ids_all[n_full:n]
             pad_mask[:tail] = attention_mask_all[n_full:n]
             probs[n_full:n] = run_one_batch(pad_ids, pad_mask, tail)
+            maybe_log_progress(n)
 
+    print(f"[7/7]   inference done: {n:,}/{n:,} (100%) in {time.time() - t0:.1f}s", flush=True)
     return probs
 
 
