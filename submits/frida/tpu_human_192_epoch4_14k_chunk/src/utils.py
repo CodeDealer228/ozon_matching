@@ -21,6 +21,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "20")
 os.environ.setdefault("RAYON_NUM_THREADS", "20")
 
 import gc
+import importlib
 import json
 import multiprocessing
 import sys
@@ -167,7 +168,25 @@ def maybe_offline_install(wheels_dir):
             print(result.stdout[-2000:], flush=True)
             print(result.stderr[-2000:], flush=True)
         else:
-            print(f"[SETUP] offline install ok, {target_dir} on sys.path", flush=True)
+            # THE ACTUAL BUG this fixed, found via a real crash: target_dir
+            # was appended to sys.path ABOVE, before this directory existed
+            # on disk (that early append is what lets the "already
+            # importable" skip check work at all). The `import peft` probe
+            # right after that append then failed as expected on a genuinely
+            # empty/nonexistent directory -- but that failed probe caches a
+            # negative result for target_dir in sys.path_importer_cache, and
+            # Python does NOT automatically notice the directory getting
+            # populated moments later by pip within the SAME process.
+            # Without invalidate_caches() here, THIS install still reports
+            # success, but the first `import peft` anywhere else in this
+            # process afterward -- in this codebase, that's
+            # _load_model_weights's `from peft import PeftModel`, running in
+            # a BACKGROUND THREAD -- raises ModuleNotFoundError despite the
+            # package genuinely being on disk and on sys.path. Confirmed via
+            # a real judging-stand crash with exactly that traceback.
+            importlib.invalidate_caches()
+            print(f"[SETUP] offline install ok, {target_dir} on sys.path "
+                  f"(import cache invalidated)", flush=True)
     except OSError as e:
         print(f"[WARN] offline install failed ({e}) -- continuing, import will fail loudly "
               f"if peft is truly absent", flush=True)
