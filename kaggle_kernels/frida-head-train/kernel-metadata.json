@@ -10,7 +10,7 @@
   "enable_internet": true,
   "keywords": [],
   "dataset_sources": [
-    "maximmarkovbb/frida-pair-embed-cache-human"
+    "maximmarkovbb/frida-lora-embed-cache-human"
   ],
   "kernel_sources": [],
   "competition_sources": [],

@@ -101,7 +101,11 @@ from sklearn.metrics import average_precision_score
 # =====================================================================
 
 SEED = 42
-CACHE_HINT = "/kaggle/input/datasets/maximmarkovbb/frida-pair-embed-cache-human"
+# Actual published slug -- differs from the cache kernel's own DATASET_ID
+# constant (frida-pair-embed-cache-human); doesn't matter for correctness
+# since _find_cache_root() falls back to an os.walk search by CONTENT
+# (cache_meta.json + pair_embedding.bin together), not by this exact path.
+CACHE_HINT = "/kaggle/input/datasets/maximmarkovbb/frida-lora-embed-cache-human"
 
 # "train_split": fit on split==0, evaluate on split==1 (default -- see the
 #                leak-discipline note in the module docstring).

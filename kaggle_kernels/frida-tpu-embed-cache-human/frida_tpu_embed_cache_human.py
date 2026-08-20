@@ -397,9 +397,29 @@ def build_model(device, rank, adapter_dir, hidden_dim):
         if "lora_" in name:
             p.data = p.data.float()
 
+    # classifier.pt's location relative to adapter_dir is NOT consistent
+    # across this project's checkpoint history -- a real crash caught this.
+    # adapter_dir is the directory CONTAINING adapter_config.json (i.e. the
+    # PEFT directory itself). frida-tpu-human-sft's own save_checkpoint()
+    # writes classifier.pt as a SIBLING of that PEFT directory
+    # (save_dir/classifier.pt, save_dir/adapter/adapter_config.json) -- which
+    # is what maximmarkovbb/frida-tpu-human-256-epoch4 (this kernel's actual
+    # checkpoint) contains. But other checkpoints in this project's history
+    # (e.g. frida-lora-checkpoint-v1-best, produced by an older kernel) place
+    # it INSIDE the PEFT directory instead. Try both rather than assume one.
+    classifier_candidates = [
+        os.path.join(os.path.dirname(adapter_dir.rstrip("/")), "classifier.pt"),
+        os.path.join(adapter_dir, "classifier.pt"),
+    ]
+    classifier_path = next((p for p in classifier_candidates if os.path.isfile(p)), None)
+    if classifier_path is None:
+        raise RuntimeError(f"[MODEL] classifier.pt not found at either candidate location: "
+                           f"{classifier_candidates}")
+
     head = nn.Linear(hidden_dim, 1)
-    head.load_state_dict(torch.load(os.path.join(adapter_dir, "classifier.pt"), map_location="cpu"))
-    _log(rank, "MODEL", f"adapter merged + classifier loaded from {adapter_dir}", force=True)
+    head.load_state_dict(torch.load(classifier_path, map_location="cpu"))
+    _log(rank, "MODEL", f"adapter loaded from {adapter_dir}, classifier from {classifier_path}",
+        force=True)
 
     model = FridaPairEncoder(peft_model, head).to(device)
     model.eval()
