@@ -1,0 +1,23 @@
+{
+  "id": "maximmarkovbb/berta-embed-cache-all-human",
+  "title": "Berta Embed Cache All Human",
+  "code_file": "berta_embed_cache_all_human.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/berta-human-continue-384-best-checkpoint"
+  ],
+  "kernel_sources": [
+    "maxamsecret/berta-merge-lora",
+    "maxamsecret/berta-tokenize-llm-256"
+  ],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}

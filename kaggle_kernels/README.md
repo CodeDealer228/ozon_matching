@@ -85,6 +85,15 @@ fork-процессов независимо перезагружали и ко�
 все реплики шарят один и тот же прочитанный кусок памяти через
 copy-on-write; обучение теперь останавливается ровно после одной эпохи.
 
+| Кернел | Суть | GPU/TPU | Итог |
+|---|---|---|---|
+| [berta-tpu-human-continue-384](berta-tpu-human-continue-384) | резюм топ-чекпоинта, **только** human-разметка (без `matches_llm.parquet`), `PAIR_MAX_LENGTH=384`, 10 эпох, чекпоинт+валидация каждую эпоху | TPU v5e-8 | все 10 эпох прошли; val **монотонно падал** после эпохи 1 (0.7551→0.7501→...→0.7217) — реальное переобучение на маленьком (292K) train; лучший чекпоинт — эпоха 1 |
+| [berta-top-embed-extract](berta-top-embed-extract) | эмбеддинг + скор классификатора топ-чекпоинта на val-сплите (73,131 пар, без лика) | 1×T4 | датасет-выход для catboost-трека ниже |
+| [tfidf-category-index-fit](tfidf-category-index-fit) | по TF-IDF-индексу на категорию, fit на полном каталоге, хранятся только маленькие fitted-векторайзеры (не per-item векторы) | CPU | ~20 файлов по 5-15МБ, датасет-выход |
+| [berta-catboost-top-final](berta-catboost-top-final) | CatBoost на [768 сырых эмбеддингов + classifier_score + tfidf_score + category] | 2×GPU | val **0.7467** (лучше классификатора!), но тест **0.457** — хуже классификатора (0.47); `get_feature_importance()`: 96.11% на эмбеддингах, classifier_score — 1.9%; переобучение на 58,504 строках / 771 фиче |
+| `submits/berta_catboost_pca32` (локальный переобуч, кернела нет) | то же, но PCA(32) вместо сырых эмбеддингов + сильнее регуляризация (`depth` 8→6, `l2_leaf_reg` 15→30) | CPU (локально) | val 0.7419, тест **0.469** — почти закрыл разрыв, но всё ещё чуть ниже классификатора; importance classifier_score выросла до 19.3% |
+| [berta-embed-cache-all-human](berta-embed-cache-all-human) | кэш эмбеддинга+скора на **всех** 365,654 human-парах (train+val) чекпоинтом `berta-tpu-human-continue-384` — готовит данные под будущую многослойную голову (~5× больше данных без лика, чем нынешний val-срез) | 1-2×T4 (auto-probe batch) | **подготовлено, НЕ запущено** — ждём подтверждения качества `berta-tpu-human-continue-384` на тесте |
+
 ## FRIDA (`ai-forever/FRIDA`, 823M, T5-энкодер)
 
 Bi-encoder — item-level токенизация вместо per-pair (нет joint
@@ -156,6 +165,8 @@ hard negatives по построению.
 - `maxamsecret/berta-tokenized-items-llm` / `-human` — item-token-кэш BERTA, `max_length=256`.
 - `rays0n/berta-lora-sft-checkpoint`, `maxamsecret/berta-lora-sft-5epoch` — чекпоинты BERTA LoRA SFT (разные этапы).
 - `rays0n/berta-llm-continue-train` — лучший на сегодня BERTA-чекпоинт (0.7255), вход `berta-merge-lora`.
+- `maxamsecret/berta-tpu-lora-top-checkpoint` — чекпоинт из упавшего `berta-llm-tpu-sft` (val=0.7087, test=0.47, лучший сабмит проекта) — вход `berta-top-embed-extract`, `berta-tpu-human-continue-384`.
+- `maxamsecret/berta-human-continue-384-best-checkpoint` — лучший чекпоинт `berta-tpu-human-continue-384` (эпоха 1, val=0.7551) — вход (пока не запущенного) `berta-embed-cache-all-human`.
 - `maxamsecret/frida-tokenized-items-human` / `-llm` — item-token-кэш FRIDA.
 - `maximmarkovbb/frida-tokenize-items-v2-cache` — item-token-кэш FRIDA с новой attribute-policy (два варианта: base/shuffled).
 - `maxamsecret/frida-lora-sft-epoch2-40` — чекпоинт FRIDA после эпохи 2 (0.67397).
