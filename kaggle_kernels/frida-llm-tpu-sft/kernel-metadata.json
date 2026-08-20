@@ -13,8 +13,8 @@
     "maxamsecret/ozon-ecup-2026-matching",
     "maxamsecret/frida-tokenized-items-human",
     "maxamsecret/frida-tokenized-items-llm",
-    "maximmarkovbb/frida-multilayer-head",
-    "maximmarkovbb/frida-lora-checkpoint-v1-best"
+    "maximmarkovbb/frida-head-trained",
+    "maximmarkovbb/frida-tpu-human-256-epoch4"
   ],
   "kernel_sources": [],
   "competition_sources": [],

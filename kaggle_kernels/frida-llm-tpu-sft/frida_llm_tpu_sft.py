@@ -76,6 +76,22 @@ inference. The alternative -- re-tokenizing the LLM scope under the v2 policy
 (~83 min on a TPU CPU session, precedent: frida-tokenize-items-llm) -- is the
 cleaner long-term fix if the v2 ordering proves to be worth something.
 
+KNOWN, ACCEPTED MISMATCH as of the checkpoint this run resumes: the reasoning
+above was written when this kernel resumed frida-lora-checkpoint-v1-best,
+itself trained on v1-ordered data -- so v1-both-scopes was fully consistent
+end to end. It now resumes maximmarkovbb/frida-tpu-human-256-epoch4
+(val 0.7660), which was trained on the v2 cache
+(maximmarkovbb/frida-tokenize-items-v2-cache). This run's own human+LLM data
+is still internally consistent with ITSELF (v1 both scopes, as argued
+above), but no longer with what the resumed checkpoint already learned --
+the same class of train/serve mismatch that this project has real evidence
+costs real score (README.md's FRIDA-0.386 analysis: a v1/v2 mismatch between
+a submission's preprocessing and its training cache was a leading candidate
+cause). Accepted here rather than blocking the launch on an ~83-minute
+v2-LLM-cache build the user did not ask for -- if this run's val trajectory
+looks off relative to frida-tpu-human-sft's own (0.7437 -> 0.7660 over 4
+epochs, human-only), this mismatch is the first thing to suspect.
+
 The two id universes are fully disjoint (0 shared ids of 12.4M vs 711K,
 re-verified in scripts/analyze_llm_label_overlap.py), so every pair lives
 entirely inside one scope and a per-pair scope tag is enough to route the
@@ -212,9 +228,19 @@ ATTRIBUTES_LABEL_TOKEN = 91837
 LABEL_COLON_TOKEN = 30
 
 # Multi-layer head -- MUST match frida-head-train's definition exactly.
-HEAD_HIDDEN = (512, 128)
-HEAD_DROPOUT = 0.15
-HEAD_HINT = "/kaggle/input/datasets/maximmarkovbb/frida-multilayer-head"
+# (1024, 256)/0.2 is the WINNER of a real 5-architecture comparison run
+# (frida-head-train, all_architectures_result.json), not a guess: "wide"
+# beat linear_plus/shallow_wide/deep/deep_narrow at macro_pr_auc=0.76696 on
+# the clean split==1 holdout (baseline linear head there: 0.76600 -- all 5
+# candidates landed within +0.0006 to +0.0010 of that baseline and of each
+# other, a thin margin worth remembering as "roughly tied", not "wide is
+# clearly best"). _find_head_file() below re-derives this pair from the
+# dataset's own result JSON and asserts it matches these two constants, so a
+# future edit to one without the other fails loudly here rather than as a
+# cryptic state_dict shape mismatch inside build_resumed_model().
+HEAD_HIDDEN = (1024, 256)
+HEAD_DROPOUT = 0.2
+HEAD_HINT = "/kaggle/input/datasets/maximmarkovbb/frida-head-trained"
 REQUIRE_PRETRAINED_HEAD = True
 
 # BERTA recipe's own numbers, and the MiniLM continue-SFT fix's numbers.
@@ -275,12 +301,52 @@ def _find_resume_adapter_dir():
 
 
 def _find_head_file():
-    if os.path.isfile(os.path.join(HEAD_HINT, "head.pt")):
-        return os.path.join(HEAD_HINT, "head.pt")
-    if os.path.isdir("/kaggle/input"):
-        for root, _dirs, files in os.walk("/kaggle/input"):
-            if "head.pt" in files:
-                return os.path.join(root, "head.pt")
+    """The published frida-head-trained dataset holds SIX head.pt files, not
+    one: a winner copy plus one per losing architecture under
+    architectures/<name>/head.pt (kept for comparison). An os.walk for the
+    first file literally named "head.pt" -- this function's original,
+    simpler version -- is genuinely ambiguous there and could silently pick
+    a loser. Resolve unambiguously instead: find the dataset's own
+    all_architectures_result.json (there is exactly one), read which
+    architecture it declares as winner, and build that architecture's own
+    path from the name -- self-describing, no dependence on os.walk order
+    or on the dataset's exact directory nesting (which has already differed
+    from this kernel's own naming assumption once: DATASET_ID in
+    frida-head-train says frida-multilayer-head, the actually-published
+    dataset is frida-head-trained, with an extra frida_head_train/ nesting
+    level neither name predicts).
+
+    Also asserts the winner matches this module's own HEAD_HIDDEN/
+    HEAD_DROPOUT -- both are set from this exact result file's winner as of
+    this writing, but if either constant is ever hand-edited without the
+    other being updated to match, this fails loudly here (clear message)
+    rather than inside build_resumed_model() as an opaque state_dict shape
+    mismatch."""
+    if not os.path.isdir("/kaggle/input"):
+        return None
+    for root, _dirs, files in os.walk("/kaggle/input"):
+        if "all_architectures_result.json" not in files:
+            continue
+        with open(os.path.join(root, "all_architectures_result.json")) as f:
+            summary = json.load(f)
+        winner = summary["winner"]
+        winner_layers = tuple(winner["layer_sizes"])
+        winner_dropout = winner["dropout"]
+        if winner_layers != HEAD_HIDDEN or winner_dropout != HEAD_DROPOUT:
+            raise RuntimeError(
+                f"[HEAD] frida-head-trained's own winner is {winner['name']} "
+                f"layers={winner_layers} dropout={winner_dropout}, but this module's "
+                f"HEAD_HIDDEN={HEAD_HIDDEN} HEAD_DROPOUT={HEAD_DROPOUT} don't match -- "
+                f"update the constants above to agree before running.")
+        candidate = os.path.join(root, "architectures", winner["name"], "head.pt")
+        if not os.path.isfile(candidate):
+            raise RuntimeError(f"[HEAD] result JSON declares winner={winner['name']!r} "
+                               f"but {candidate} does not exist")
+        print(f"[HEAD] winner={winner['name']} layers={winner_layers} "
+              f"dropout={winner_dropout} macro_pr_auc={winner['macro_pr_auc']:.5f} "
+              f"(baseline linear head: {summary['baseline_linear_head_macro_pr_auc']:.5f})",
+              flush=True)
+        return candidate
     return None
 
 
