@@ -1,0 +1,5 @@
+{
+  "epoch": 1,
+  "global_step": 1142,
+  "val_macro_pr_auc": 0.7550802786405144
+}

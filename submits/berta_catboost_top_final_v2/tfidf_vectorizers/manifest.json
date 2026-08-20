@@ -1,0 +1,132 @@
+{
+  "categories": {
+    "Автотовары": "tfidf_cat00.joblib",
+    "Аптека": "tfidf_cat01.joblib",
+    "Бытовая техника": "tfidf_cat02.joblib",
+    "Бытовая химия": "tfidf_cat03.joblib",
+    "Галантерея и аксессуары": "tfidf_cat04.joblib",
+    "Детские товары": "tfidf_cat05.joblib",
+    "Дом и сад": "tfidf_cat06.joblib",
+    "Канцелярские товары": "tfidf_cat07.joblib",
+    "Красота и гигиена": "tfidf_cat08.joblib",
+    "Мебель": "tfidf_cat09.joblib",
+    "Музыкальные инструменты": "tfidf_cat10.joblib",
+    "Обувь": "tfidf_cat11.joblib",
+    "Одежда": "tfidf_cat12.joblib",
+    "Продукты питания": "tfidf_cat13.joblib",
+    "Спорт и отдых": "tfidf_cat14.joblib",
+    "Строительство и ремонт": "tfidf_cat15.joblib",
+    "Товары для животных": "tfidf_cat16.joblib",
+    "Хобби и творчество": "tfidf_cat17.joblib",
+    "Электроника": "tfidf_cat18.joblib",
+    "Ювелирные изделия": "tfidf_cat19.joblib"
+  },
+  "max_features": 20000,
+  "ngram_range": [
+    1,
+    2
+  ],
+  "fit_sample_per_category": 300000,
+  "stats": {
+    "Автотовары": {
+      "n_available": 1028081,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Аптека": {
+      "n_available": 590750,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Бытовая техника": {
+      "n_available": 602241,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Бытовая химия": {
+      "n_available": 379701,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Галантерея и аксессуары": {
+      "n_available": 728338,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Детские товары": {
+      "n_available": 703910,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Дом и сад": {
+      "n_available": 938725,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Канцелярские товары": {
+      "n_available": 659106,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Красота и гигиена": {
+      "n_available": 745706,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Мебель": {
+      "n_available": 642548,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Музыкальные инструменты": {
+      "n_available": 339875,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Обувь": {
+      "n_available": 633353,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Одежда": {
+      "n_available": 827617,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Продукты питания": {
+      "n_available": 497606,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Спорт и отдых": {
+      "n_available": 666988,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Строительство и ремонт": {
+      "n_available": 909895,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Товары для животных": {
+      "n_available": 558992,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Хобби и творчество": {
+      "n_available": 646361,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Электроника": {
+      "n_available": 905213,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    },
+    "Ювелирные изделия": {
+      "n_available": 392755,
+      "n_fit_on": 300000,
+      "vocab_size": 20000
+    }
+  }
+}
