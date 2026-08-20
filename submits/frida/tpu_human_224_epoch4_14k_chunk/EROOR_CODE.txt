@@ -1,0 +1,55 @@
+Error: Container finished with non-zero exit code
+
+CUDA Version 12.8.0
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+=== Starting FRIDA LoRA (adapter, no merge) prediction pipeline ===
+[SETUP] offline-installing ['peft', 'accelerate', 'huggingface_hub', 'click', 'hf-xet', 'httpx', 'httpcore', 'h11', 'anyio', 'idna', 'certifi', 'colorama', 'typer', 'annotated-doc', 'rich', 'pygments', 'markdown-it-py', 'mdurl', 'shellingham', 'packaging', 'tqdm', 'filelock', 'fsspec', 'typing_extensions', 'psutil', 'pyyaml', 'safetensors'] (--no-deps, exact list, from /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/wheels) into /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs ...
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/typing_extensions.py already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/httpx-0.28.1.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/fsspec-2026.7.0.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/mdurl already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/colorama already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/annotated_doc-0.0.5.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/filelock-3.32.3.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/annotated_doc already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/fsspec already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/anyio already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/yaml already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/safetensors-0.8.0.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/huggingface_hub-1.27.0.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/typer-0.27.1.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/peft already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/tqdm-4.70.0.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/typer already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/filelock already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/colorama-0.4.6.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/httpx already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/tqdm already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/click-8.4.2.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/markdown_it_py-4.2.0.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/psutil-7.2.2.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/rich already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/shellingham-1.5.4.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/httpcore-1.0.9.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/hf_xet-1.6.0.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/anyio-4.14.2.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/__pycache__ already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/packaging-26.3.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/httpcore already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/pyyaml-6.0.3.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/safetensors already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/click already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/mdurl-0.1.2.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/certifi-2026.7.22.dist-info already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/markdown_it already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/pygments already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/accelerate already exists. Specify --upgrade to force replacement.
+WARNING: Target directory /workspace_3c1fc17e-4c82-4357-a3a5-b504020a2f8d_d49c2/tpu_human_224_epoch4_14k_chunk/frida_lora_adapter_offline_pkgs/hf_xet already exists. Specify

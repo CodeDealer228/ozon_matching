@@ -11,7 +11,6 @@ os.environ.setdefault("RAYON_NUM_THREADS", "32")
 
 import gc
 import json
-import multiprocessing
 import sys
 import subprocess
 import tempfile
@@ -147,8 +146,8 @@ def maybe_offline_install(wheels_dir):
 #      text).
 #   3. allocate_pair_budget fair-share truncation instead of the tokenizer's
 #      own truncation="longest_first" pair logic.
-MAX_NAME_CHARS, MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 128, 64, 384
-MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 640
+MAX_NAME_CHARS, MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 192, 128, 512
+MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64 
 PREFIX = "paraphrase: "
 ITEM_MAX_LENGTH = 192        # matches the v2 item cache's own cap
 # 256, NOT the 128 the earlier FRIDA submissions used: this checkpoint comes
@@ -259,16 +258,27 @@ def _log_bf16_capability(device):
               f"case, not a bug.", flush=True)
 
 
-# Below this many items, a multiprocessing.Pool's own startup cost (spawning
-# workers, pickling the task list back and forth) is bigger than what it
-# would save -- measured locally: reorder_attributes alone runs at ~52K
-# items/sec single-threaded (10.6s for 550K real items from
-# items_human.parquet), so anything under a few thousand items finishes in
-# well under a pool's fork/spawn overhead. Real submissions sit at ~230K-550K
-# unique items (Public/Private), comfortably above this.
-REORDER_POOL_THRESHOLD = 20_000
-
-
+# multiprocessing.Pool(os.cpu_count()) was tried here and REMOVED after a
+# real judging-stand crash: os.cpu_count() reported 240 on that container
+# (see README.md's "os.cpu_count() ... returned 240, not the 20 CLAUDE.md
+# documents"), and Pool(240) forks 240 new OS processes essentially at once
+# in multiprocessing.pool._repopulate_pool_static -- which failed with
+# `BlockingIOError: [Errno 11] Resource temporarily unavailable` from
+# os.fork() itself, killing the whole run on Public (114,235 pairs) within
+# the first minute. CPU CORE COUNT and PROCESS COUNT are governed by
+# different, unrelated limits in a container (cpu.max/cpuset vs.
+# pids.max/RLIMIT_NPROC) -- os.cpu_count() says nothing safe about the
+# latter, and this run proved a real container here caps it well below 240.
+#
+# No replacement worker-count constant was picked, on purpose: any number
+# is a guess against an unmeasured real ceiling, and finding that ceiling
+# by resubmitting until one doesn't crash would cost more real submission
+# attempts than this optimization was ever going to save. Measured cost of
+# the single-threaded fallback (what this now always uses) at REAL run
+# scale: reorder_attributes runs ~52K items/sec locally (10.6s for the
+# largest 550K-item scale this project has measured) -- at 223,536 items
+# (this project's own Public-stage scale), that is ~4.3s. A single-digit
+# number of seconds, not a reason to reintroduce a proven crash risk.
 def _reorder_and_slice(attr):
     return reorder_attributes(attr)[:MAX_ATTR_CHARS]
 
@@ -306,17 +316,7 @@ def _load_needed_item_texts(items_path, needed_ids):
     categories = df["category"].fillna("").astype(str).tolist()
     attributes = df["attributes"].fillna("").astype(str).tolist()
 
-    if len(attributes) >= REORDER_POOL_THRESHOLD:
-        n_workers = max(1, os.cpu_count() or 1)
-        # chunksize tuned so each worker gets a handful of batches (better
-        # load balance than one giant chunk per worker) without so many
-        # chunks that IPC overhead dominates -- 8 batches/worker is a
-        # reasonable middle ground for a CPU-bound, near-uniform-cost task.
-        chunksize = max(1, len(attributes) // (n_workers * 8))
-        with multiprocessing.Pool(n_workers) as pool:
-            attrs_ordered = pool.map(_reorder_and_slice, attributes, chunksize=chunksize)
-    else:
-        attrs_ordered = [_reorder_and_slice(a) for a in attributes]
+    attrs_ordered = [_reorder_and_slice(a) for a in attributes]
 
     texts = []
     for name, category, attr_ordered in zip(names, categories, attrs_ordered):
@@ -356,7 +356,7 @@ def _find_token_pattern_starts(arr, tok_a, tok_b):
 # output: each text is tokenized independently (no cross-item padding/
 # truncation interaction), so concatenating chunk results is byte-identical
 # to one giant call that happened to succeed.
-TOKENIZE_CHUNK_SIZE = 200_000
+TOKENIZE_CHUNK_SIZE = 14_000
 
 
 def _tokenize_items(tokenizer, id_to_text):
@@ -666,8 +666,8 @@ def predict_pipeline(items_path, matches_path, base_model_path, adapter_path, cl
     needed_ids = pd.unique(pd.concat([match_df["id1"], match_df["id2"]])).tolist()
     print(f"[1/6] pairs={len(match_df):,} unique ids needed={len(needed_ids):,} ({time.time() - t0:.1f}s)", flush=True)
 
-    print("[2/6] Loading needed item texts (attribute reorder parallelized "
-          f"across {os.cpu_count() or 1} cores above {REORDER_POOL_THRESHOLD:,} items) ...", flush=True)
+    print("[2/6] Loading needed item texts (single-threaded reorder -- "
+          "see _reorder_and_slice's comment for why) ...", flush=True)
     id_to_text = _load_needed_item_texts(items_path, needed_ids)
     print(f"[2/6] items loaded={len(id_to_text):,} ({time.time() - t0:.1f}s)", flush=True)
 
