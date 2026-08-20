@@ -12,7 +12,7 @@
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
     "maximmarkovbb/frida-tokenize-items-v2-cache",
-    "maximmarkovbb/frida-lora-checkpoint-v1-best"
+    "maximmarkovbb/frida-tpu-human-256-epoch4"
   ],
   "kernel_sources": [],
   "competition_sources": [],
