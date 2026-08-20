@@ -89,16 +89,23 @@ ITEMS_HUMAN_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-match
 SEED = 42
 
 PREFIX = "paraphrase: "
-# Rescaled for ITEM_MAX_LENGTH=256 (the 128/64/384 CLAUDE.md formula was sized
-# for MiniLM's 128-token regime and was silently under-covering real content
-# here -- category got ~3x more char budget than its real max needs, while
-# attributes got truncated below its real p90/p99 before the tokenizer ever
-# saw it). Derived from real FRIDA chars/token ratios (see
-# kaggle_kernels/frida-char-token-ratio): name p99=50tok*2.83=142c -> +10%
-# margin; category real max=8tok*2.34=19c -> +50% margin; attributes gets the
-# remainder up to a combined-text ceiling of 256tok*3.12c/tok=799c.
-MAX_NAME_CHARS, MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 156, 28, 564
-MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 812
+# Char budget derived from a real, full-dataset rule (not the old
+# 10k-sample interpolation) -- see reports/experiment_log.md
+# "Char-budget rule v2" entry. Exact percentiles over ALL 711,304
+# items_human.parquet rows + chars/token measured directly against
+# THIS tokenizer (FRIDA RobertaTokenizer): name=2.847, category=2.343,
+# attributes=2.994 chars/token, skeleton overhead=15 tokens.
+#   NAME_CHAR_TARGET=140     -- p98=137 char + margin -> ~98.1% of real
+#                               names fit UNTRUNCATED (target: 95-99%)
+#   CATEGORY_CHAR_TARGET=32  -- true max=23 chars across all 20 known
+#                               categories + margin -> 100% fit
+#   MAX_ATTR_CHARS=529       -- remainder of ITEM_MAX_LENGTH=256 tokens
+#                               after overhead+name+category token cost
+MAX_NAME_CHARS, MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 140, 32, 529
+# 30 = exact len("Name: ")+len(" Category: ")+len(" Attributes: "), not
+# a rounded guess -- individual fields are already bounded by the slice
+# above, so this is a precise (not padded) final safety slice.
+MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 30  # 731
 ITEM_MAX_LENGTH = 256
 
 LONG_VALUE_CHARS = 200      # rule 2 threshold

@@ -5,9 +5,19 @@ import os
 os.environ.setdefault("TRITON_CACHE_DIR", "/dev/shm/.triton_cache")
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/dev/shm/.inductor_cache")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
-os.environ.setdefault("OMP_NUM_THREADS", "32")
-os.environ.setdefault("MKL_NUM_THREADS", "32")
-os.environ.setdefault("RAYON_NUM_THREADS", "32")
+os.environ.setdefault("OMP_NUM_THREADS", "20")
+os.environ.setdefault("MKL_NUM_THREADS", "20")
+os.environ.setdefault("RAYON_NUM_THREADS", "20")
+# Added after real evidence, not preemptively: the seq=192/batch=5888 OOM
+# (with fixed-shape batching already applied -- see _run_inference's own
+# comment) reported "7.77 GiB is reserved by PyTorch but unallocated" --
+# LARGE, unlike the two earlier crashes (306.73 MiB and 266.48 MiB, both
+# negligible) where this same flag would not plausibly have helped. Must be
+# set before `import torch` -- the caching allocator reads it at CUDA
+# context init, not per-call -- hence positioned in this same env block,
+# ahead of the import below. Zero quality risk: this only changes how the
+# allocator manages memory internally, never what gets computed.
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import gc
 import json

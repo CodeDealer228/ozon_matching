@@ -464,3 +464,96 @@ unilaterally on one side only. Explicit user decision: let
 starting checkpoint, which already carried this same limitation) rather
 than cancel it; the fix lands for whenever the cache is next rebuilt for a
 fresh training run.
+
+## Char-budget rule v2: exact full-dataset numbers replace the first fix's 10k-sample interpolation, plus a general rule (2026-08-20)
+
+The fix above (156/28/564) was itself sloppier than it needed to be: it
+derived from the 10k-item Kaggle sample in `frida-char-token-ratio`, which
+only reports p90/p99 for `name` (33/50 tokens) — the "p99=50 tok × 2.83 +
+10% margin" arithmetic was really an eyeballed interpolation, not a
+measured percentile. `items_human.parquet` (214MB) is fully present
+locally in `data/` — computing exact percentiles over all 711,304 items
+costs a few seconds locally, no Kaggle kernel needed, and was one script
+away the whole time. Redone properly on request ("зафиксировать в README
+эту досадную оплошность").
+
+**Exact full-dataset char-length percentiles** (`items_human.parquet`,
+711,304 items, pandas `.quantile()`, no sampling):
+
+| Field | p50 | p90 | p95 | p97 | p98 | p99 | p99.5 | max |
+|---|---|---|---|---|---|---|---|---|
+| name | 54 | 94 | 113 | 126 | 137 | 158 | 181 | 4126* |
+| attributes | 353 | 852 | 1070 | — | — | 1686 | — | 114807* |
+
+(*outliers, not representative — one item apparently has a 114KB attributes
+blob). `category`: exactly 20 distinct strings project-wide, true max
+length **23 chars** across all of them (not 8 tokens as the previous
+fix's rough token-level estimate implied via the sample-based analysis).
+
+**chars/token, measured directly against each tokenizer** (20k-item local
+sample, both loaded and run locally — FRIDA from the already-downloaded
+`submits/frida/*/models/frida-base`, BERTA freshly pulled from
+`sergeyzh/BERTA` on HF Hub, tokenizer files only):
+
+| Tokenizer | class | vocab | name | category | attributes |
+|---|---|---|---|---|---|
+| FRIDA | RobertaTokenizer (byte-BPE) | 93,651 | 2.847 | 2.343 | 2.994 |
+| BERTA | BertTokenizer (WordPiece) | 55,083 | 2.783 | 2.612 | **2.500** |
+
+BERTA is a real, previously unmeasured gap in this project's char/token
+assumptions — every prior chars/token number here was FRIDA-specific and
+had been implicitly assumed to transfer, but BERTA's own tokenizer is
+meaningfully less efficient on `attributes` specifically (2.500 vs 2.994),
+meaning a shared char budget would have under-served BERTA relative to
+FRIDA even if both used "the same" numbers.
+
+**The realization that reframes the whole rule**: `MAX_NAME_CHARS` and
+`MAX_CATEGORY_CHARS` should not be functions of `max_seq_len` at all. The
+two stated goals — "95-99% of names survive uncut" and "100% of categories
+survive uncut" — are properties of the field-length *distribution*, fixed
+regardless of how large the eventual token budget is. Only the leftover
+budget for `attributes` should scale with `max_seq_len`:
+
+```python
+NAME_CHAR_TARGET = 140      # p98=137 (exact) + margin -> ~98.1% of names survive uncut
+CATEGORY_CHAR_TARGET = 32   # true max=23 across all 20 categories + margin -> 100%
+
+def derive_char_budgets(max_seq_len, chars_per_token, overhead_tokens=15):
+    name_tok = ceil(NAME_CHAR_TARGET / chars_per_token["name"])
+    cat_tok = ceil(CATEGORY_CHAR_TARGET / chars_per_token["category"])
+    attr_tok = max_seq_len - overhead_tokens - name_tok - cat_tok
+    return NAME_CHAR_TARGET, CATEGORY_CHAR_TARGET, floor(attr_tok * chars_per_token["attributes"])
+```
+
+`overhead_tokens=15` is the measured (not assumed) token cost of the
+literal skeleton `"paraphrase: Name:  Category:  Attributes: "` (empty
+field content, both special tokens included) — tokenized directly against
+both FRIDA and BERTA, which happened to agree exactly at 15.
+
+Instantiated at `max_seq_len=128/192/256` (name/category constant, only
+attributes varies):
+
+| max_seq_len | MAX_ATTR_CHARS (FRIDA) | MAX_ATTR_CHARS (BERTA) |
+|---|---|---|
+| 128 | 146 | 122 |
+| 192 | 338 | 282 |
+| 256 | **529** | **442** |
+
+256 is the recommended build target: since the char-slice happens once at
+item-cache-build time, and any downstream `PAIR_MAX_LENGTH` (128/192/256,
+used across different submissions in this project's history) does its own
+fair-share truncation on top of the item cache afterward, a single
+256-token item cache is a valid donor for every smaller `PAIR_MAX_LENGTH`
+— there is no correctness reason to build three separate item caches.
+
+**Applied to five kernel sources** (all previously carrying either the
+original 128/64/384 bug or the first fix's rough 156/28/564): the four
+FRIDA cache kernels touched by the previous fix
+(`frida-tokenize-items-v2`, `-human`, `-llm`, and the superseded
+`frida-tokenize-items`), now all `140/32/529`, plus a **fifth kernel found
+for the first time**, `berta-tokenize-llm-256` — same architecture (item-
+level char-slice into `ITEM_MAX_LENGTH=256`) as FRIDA's caches, same
+uncorrected `128/64/384` bug, never touched by the earlier fix because it
+hadn't been located yet. Now `140/32/442` (BERTA's own ratios). Same scope
+boundary as before: source-only, no rebuild triggered, no training or
+deployed-submission contract touched.

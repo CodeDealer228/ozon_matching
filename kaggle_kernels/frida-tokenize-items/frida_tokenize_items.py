@@ -59,16 +59,25 @@ FRIDA_MODEL_NAME = "ai-forever/FRIDA"
 FRIDA_PREFIX = "paraphrase: "
 MAX_LENGTH = 256
 
-# Rescaled for MAX_LENGTH=256 -- the 128/64/384 CLAUDE.md formula was sized
-# for MiniLM's 128-token regime; carried over unscaled here it wastes budget
-# on category (real max 8 tokens) while truncating attributes below its real
-# p90/p99 before the tokenizer ever sees it. See
-# kaggle_kernels/frida-char-token-ratio for the source ratios and
-# kaggle_kernels/frida-tokenize-items-v2 for the full derivation.
-MAX_NAME_CHARS = 156
-MAX_CATEGORY_CHARS = 28
-MAX_ATTR_CHARS = 564
-MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 64  # 812
+# Char budget derived from a real, full-dataset rule (not the old
+# 10k-sample interpolation) -- see reports/experiment_log.md
+# "Char-budget rule v2" entry. Exact percentiles over ALL 711,304
+# items_human.parquet rows + chars/token measured directly against
+# THIS tokenizer (FRIDA RobertaTokenizer): name=2.847, category=2.343,
+# attributes=2.994 chars/token, skeleton overhead=15 tokens.
+#   NAME_CHAR_TARGET=140     -- p98=137 char + margin -> ~98.1% of real
+#                               names fit UNTRUNCATED (target: 95-99%)
+#   CATEGORY_CHAR_TARGET=32  -- true max=23 chars across all 20 known
+#                               categories + margin -> 100% fit
+#   MAX_ATTR_CHARS=529       -- remainder of ITEM_MAX_LENGTH=256 tokens
+#                               after overhead+name+category token cost
+MAX_NAME_CHARS = 140
+MAX_CATEGORY_CHARS = 32
+MAX_ATTR_CHARS = 529
+# 30 = exact len("Name: ")+len(" Category: ")+len(" Attributes: "), not
+# a rounded guess -- individual fields are already bounded by the slice
+# above, so this is a precise (not padded) final safety slice.
+MAX_ITEM_CHARS = MAX_NAME_CHARS + MAX_CATEGORY_CHARS + MAX_ATTR_CHARS + 30  # 731
 
 CHUNK_SIZE_START = 20_000
 CHUNK_SIZE_MIN = 2_000
