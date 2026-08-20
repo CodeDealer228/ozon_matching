@@ -1,11 +1,13 @@
-# REAL scoring attempt -- seq=128 already passed for real (0.398 test score),
-# so this shorter-than-256-training length is no longer assumed to fail. Still
-# carries the diagnostic safety net (progress-every-20%, one VRAM log,
-# self-forced failure) from the earlier pure-diagnostic runs, but the deadline
-# was raised (DIAGNOSTIC_FORCE_FAIL_AT_SECONDS in src/utils.py, now 700s) so it
-# can no longer convert a real pass within budget into a false failure -- it
-# only fires if Private is genuinely about to overrun. See README.md's
-# "Как дёшево профилировать реальный H100-стенд" for the technique's origin.
+# REAL scoring attempt. No diagnostic self-crash -- an earlier version of
+# this submission carried one (progress-every-20%, one VRAM log, a forced
+# RuntimeError at a wall-clock deadline), but real ODS results showed it
+# still firing on Private ("Error: Container finished with non-zero exit
+# code" alongside a real Public score, the controlled-crash signature, not
+# a platform timeout's silent "did not finish in time") even after the
+# deadline was raised to 700s -- removed entirely so the platform's own
+# real timeout is the only limiter. See README.md's "Как дёшево
+# профилировать реальный H100-стенд" for why the mechanism existed in the
+# first place.
 import argparse
 import os
 

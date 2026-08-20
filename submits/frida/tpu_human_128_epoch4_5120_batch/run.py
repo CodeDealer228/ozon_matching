@@ -1,10 +1,13 @@
-# DIAGNOSTIC SUBMISSION -- not a real scoring attempt. Deliberately forces a
-# logged, non-zero-exit failure at ~5 minutes into the pipeline (see
-# DIAGNOSTIC_FORCE_FAIL_AT_SECONDS in src/utils.py) so Private-stage progress
-# is visible in the logs instead of being silently swallowed by a real
-# "Container did not finish in time" timeout, which shows nothing. Also logs
-# peak VRAM once at ~3 minutes. See README.md's "Как дёшево профилировать
-# реальный H100-стенд" for the general technique.
+# REAL scoring attempt. No diagnostic self-crash -- an earlier version of
+# this submission carried one (progress-every-20%, one VRAM log, a forced
+# RuntimeError at a wall-clock deadline), but real ODS results showed it
+# still firing on Private ("Error: Container finished with non-zero exit
+# code" alongside a real Public score, the controlled-crash signature, not
+# a platform timeout's silent "did not finish in time") even after the
+# deadline was raised to 700s -- removed entirely so the platform's own
+# real timeout is the only limiter. See README.md's "Как дёшево
+# профилировать реальный H100-стенд" for why the mechanism existed in the
+# first place.
 import argparse
 import os
 

@@ -716,35 +716,28 @@ def _load_model_weights(base_model_path, adapter_path, classifier_path, device):
 PROGRESS_LOG_FRACTION = 0.20
 
 # ---------------------------------------------------------------------
-# DIAGNOSTIC MODE -- this submission is not a real scoring attempt. It is
-# built to answer one question cheaply: how far does Private-stage
-# inference actually get in a bounded window? A real "Container did not
-# finish in time" kill shows NO logs at all (confirmed: the previous
-# batch=5888 attempt ran clean through Public into Private, then died at
-# ~7-8 minutes with nothing printed) -- so a genuine timeout tells us
-# nothing. A "Container finished with non-zero exit code" crash DOES show
-# everything printed up to that point (confirmed repeatedly this session,
-# once pip's own noise was fixed). So this run deliberately RAISES an
-# exception at a bounded wall-clock point well inside the real timeout,
-# converting a silent kill into a loud, informative one. See README.md's
-# "Как дёшево профилировать реальный H100-стенд" for the general technique
-# this formalizes.
-#
-# Both times below are measured from predict_pipeline's OWN start (t0
-# passed in as pipeline_t0), not from when inference itself begins --
-# "3 minutes after predict starts" per direct instruction, not "3 minutes
-# of pure inference."
-DIAGNOSTIC_VRAM_LOG_AT_SECONDS = 180   # ~3 min: log peak VRAM once
-DIAGNOSTIC_FORCE_FAIL_AT_SECONDS = 300  # ~5 min: raise, forcing a logged exit
+# NOTE: this submission previously carried a deliberate DIAGNOSTIC
+# self-crash (VRAM-log-once + forced RuntimeError at a wall-clock
+# deadline), added earlier this session to extract profiling data from
+# runs already known to time out. REMOVED here: real ODS results for
+# 128/160/176 all showed "Error: Container finished with non-zero exit
+# code" despite a real Public score -- the controlled-crash signature,
+# not a platform timeout's silent "did not finish in time" -- meaning
+# the diagnostic's own deadline was almost certainly still firing on
+# Private even though Private may well have finished for real within its
+# actual 780s budget. These are real final candidates now, not pure
+# profiling runs of an already-known-to-fail config, so a self-imposed
+# timer that can silently convert a legitimate Private pass into a
+# reported failure is pure liability -- removed entirely. The platform's
+# own real timeout is now the only limiter.
 
 
-def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size, pipeline_t0):
+def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size):
     use_amp = device.type == "cuda"
     n = input_ids_all.shape[0]
     probs = np.empty(n, dtype=np.float32)
     t0 = time.time()
     next_log_at = max(1, int(n * PROGRESS_LOG_FRACTION))
-    vram_logged = [False]
 
     def run_one_batch(ids_np, mask_np, n_valid):
         input_ids = torch.from_numpy(ids_np).to(device, non_blocking=True)
@@ -768,25 +761,6 @@ def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size,
         while next_log_at <= done:
             next_log_at += max(1, int(n * PROGRESS_LOG_FRACTION))
 
-    def check_diagnostic_clock(done):
-        pipeline_elapsed = time.time() - pipeline_t0
-        if not vram_logged[0] and pipeline_elapsed >= DIAGNOSTIC_VRAM_LOG_AT_SECONDS \
-                and device.type == "cuda":
-            vram_logged[0] = True
-            allocated = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
-            reserved = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
-            print(f"[DIAGNOSTIC] peak VRAM at {pipeline_elapsed:.0f}s since pipeline start: "
-                  f"{allocated:.2f} GiB allocated, {reserved:.2f} GiB reserved "
-                  f"(done={done:,}/{n:,})", flush=True)
-        if pipeline_elapsed >= DIAGNOSTIC_FORCE_FAIL_AT_SECONDS:
-            rate = done / max(time.time() - t0, 1e-9)
-            raise RuntimeError(
-                f"[DIAGNOSTIC] self-imposed {DIAGNOSTIC_FORCE_FAIL_AT_SECONDS}s deadline reached "
-                f"({pipeline_elapsed:.0f}s since pipeline start) -- raising on purpose to force a "
-                f"LOGGED non-zero exit instead of a silent judging-stand timeout. "
-                f"Processed {done:,}/{n:,} pairs ({100 * done / n:.1f}%) at {rate:.1f} pairs/s."
-            )
-
     with torch.inference_mode():
         n_full = (n // batch_size) * batch_size
         for i in range(0, n_full, batch_size):
@@ -794,7 +768,6 @@ def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size,
                 input_ids_all[i:i + batch_size], attention_mask_all[i:i + batch_size], batch_size)
             done = i + batch_size
             maybe_log_progress(done)
-            check_diagnostic_clock(done)
 
         if n_full < n:
             tail = n - n_full
@@ -804,7 +777,6 @@ def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size,
             pad_mask[:tail] = attention_mask_all[n_full:n]
             probs[n_full:n] = run_one_batch(pad_ids, pad_mask, tail)
             maybe_log_progress(n)
-            check_diagnostic_clock(n)
 
     print(f"[7/7]   inference done: {n:,}/{n:,} (100%) in {time.time() - t0:.1f}s", flush=True)
     return probs
@@ -884,8 +856,7 @@ def predict_pipeline(items_path, matches_path, base_model_path, adapter_path, cl
     print(f"[6/7] model ready ({time.time() - t0:.1f}s)", flush=True)
 
     print(f"[7/7] Running inference (batch_size={batch_size}) ...", flush=True)
-    probs = _run_inference(model, input_ids_all, attention_mask_all, device, batch_size=batch_size,
-                           pipeline_t0=t0)
+    probs = _run_inference(model, input_ids_all, attention_mask_all, device, batch_size=batch_size)
     print(f"[7/7] done ({time.time() - t0:.1f}s)", flush=True)
 
     results_df = pd.DataFrame({
