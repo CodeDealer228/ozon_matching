@@ -5,9 +5,19 @@ import os
 os.environ.setdefault("TRITON_CACHE_DIR", "/dev/shm/.triton_cache")
 os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", "/dev/shm/.inductor_cache")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
-os.environ.setdefault("OMP_NUM_THREADS", "32")
-os.environ.setdefault("MKL_NUM_THREADS", "32")
-os.environ.setdefault("RAYON_NUM_THREADS", "32")
+os.environ.setdefault("OMP_NUM_THREADS", "20")
+os.environ.setdefault("MKL_NUM_THREADS", "20")
+os.environ.setdefault("RAYON_NUM_THREADS", "20")
+# Added after real evidence, not preemptively: a real seq=192/batch=5888
+# OOM (see BATCH_SIZE_FIXED's own comment where present) reported "7.77 GiB
+# is reserved by PyTorch but unallocated" -- LARGE, unlike two earlier
+# crashes (306.73 MiB and 266.48 MiB, both negligible) where this flag
+# would not plausibly have helped. Must be set before `import torch` -- the
+# caching allocator reads it at CUDA context init, not per-call -- hence
+# positioned in this same env block, ahead of the import below. Zero
+# quality risk: only changes how the allocator manages memory internally,
+# never what gets computed.
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import gc
 import json
@@ -658,10 +668,23 @@ def probe_max_batch_size(model, device, pair_max_length, pad_id,
 # `probs`. Every real pair still gets exactly the same forward pass and the
 # same prediction as before -- this only removes the ONE shape-varying call
 # from the loop.
+# Progress logging every ~20% of rows, not per-batch tqdm -- a full tqdm bar
+# either doesn't render in a non-interactive judging log at all or, if it
+# does (as -updates get flattened to newlines by a plain log capture), one
+# line per batch could mean hundreds of lines, pushing the actually useful
+# early lines out of a length-capped log. If a run dies on TIME (not OOM),
+# this is the only way to know afterward how far inference actually got --
+# same motivation as README.md's "Как дёшево профилировать реальный
+# H100-стенд": every log line here survives even a run that never finishes.
+PROGRESS_LOG_FRACTION = 0.20
+
+
 def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size):
     use_amp = device.type == "cuda"
     n = input_ids_all.shape[0]
     probs = np.empty(n, dtype=np.float32)
+    t0 = time.time()
+    next_log_at = max(1, int(n * PROGRESS_LOG_FRACTION))
 
     def run_one_batch(ids_np, mask_np, n_valid):
         input_ids = torch.from_numpy(ids_np).to(device, non_blocking=True)
@@ -673,11 +696,28 @@ def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size)
             logits = model(input_ids=input_ids, attention_mask=attention_mask)
         return torch.sigmoid(logits.float()).cpu().numpy()[:n_valid]
 
+    def maybe_log_progress(done):
+        nonlocal next_log_at
+        if done < next_log_at:
+            return
+        elapsed = time.time() - t0
+        rate = done / max(elapsed, 1e-9)
+        eta = (n - done) / max(rate, 1e-9)
+        print(f"[7/7]   progress: {done:,}/{n:,} ({100 * done / n:.0f}%) "
+              f"in {elapsed:.1f}s ({rate:.1f} pairs/s, ETA {eta:.0f}s)", flush=True)
+        # next_log_at advances by whole multiples of the fraction so a batch
+        # size that overshoots several thresholds in one step (batch_size
+        # close to or above 20% of n) still logs once per threshold crossed,
+        # not once total.
+        while next_log_at <= done:
+            next_log_at += max(1, int(n * PROGRESS_LOG_FRACTION))
+
     with torch.inference_mode():
         n_full = (n // batch_size) * batch_size
         for i in range(0, n_full, batch_size):
             probs[i:i + batch_size] = run_one_batch(
                 input_ids_all[i:i + batch_size], attention_mask_all[i:i + batch_size], batch_size)
+            maybe_log_progress(i + batch_size)
 
         if n_full < n:
             tail = n - n_full
@@ -686,7 +726,9 @@ def _run_inference(model, input_ids_all, attention_mask_all, device, batch_size)
             pad_ids[:tail] = input_ids_all[n_full:n]
             pad_mask[:tail] = attention_mask_all[n_full:n]
             probs[n_full:n] = run_one_batch(pad_ids, pad_mask, tail)
+            maybe_log_progress(n)
 
+    print(f"[7/7]   inference done: {n:,}/{n:,} (100%) in {time.time() - t0:.1f}s", flush=True)
     return probs
 
 
