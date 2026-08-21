@@ -48,20 +48,36 @@ Measured throughput math (this project's own 120 rows/s at
 PAIR_MAX_LENGTH=256 on frida-tpu-human-sft, scaled to seq=192 and to a
 full-FT+Adafactor+grad-checkpointing forward/backward -- ~128 rows/s):
 against the full 11,187,780-row LLM set, 3 epochs would need ~74h, well past
-even a full week's 20h TPU quota. LLM_TOTAL_ROWS=1,000,000 (not per
+even a full week's 20h TPU quota. 1,000,000 LLM training rows (not per
 category, unlike frida-percat-lora -- this run pools all categories into one
 model) keeps 3 epochs inside a single ~8.2h session:
 3 x (256,006 human-train + 1,000,000 llm) / 128 rows/s ~= 8.18h.
 
-Subsample policy is the SAME stratified_llm_sample as frida-percat-lora
-(duplicated here -- kernels are standalone scripts): category-balanced
-quota, stratified by the 10 discrete target levels within each category, no
-confidence filter (see that kernel's docstring for the full reasoning --
-short version: matches_llm targets are a 9-judge vote count, already 81.25%
-"confident" by nature, and PR-AUC is decided at the boundary that filtering
-would discard). README.md carries the same prominent warning: any reported
-number from this run describes training on "human + an LLM subsample", not
-"human + LLM".
+TRAIN/VAL: THE PRE-BUILT, NO-LEAK SPLIT -- NOT DERIVED INLINE ANYMORE
+===========================================================================
+An earlier version of this kernel drew its 1M-row LLM training subsample
+directly from the full 11.19M-row pool via an inline stratified_llm_sample
+call, with no val held out first -- so there was never an LLM-label val set
+that hadn't already been trained on. kaggle_kernels/frida-llm-train-val-
+split fixes this RETROACTIVELY: it reproduces that exact 1M-row subsample
+byte-for-byte (same seed=42, same category-balanced quota stratified by the
+10 discrete target levels -- matches_llm targets are a 9-judge vote count,
+already 81.25% "confident" by nature, so a confidence filter was considered
+and rejected: PR-AUC is decided at the boundary such a filter would
+discard) and marks it "train", then draws a NEW 100K-row val set
+EXCLUSIVELY from the untouched ~10.19M remainder, stratified by target
+level + length tercile within category -- structurally leak-free by
+construction. This kernel now reads both sides straight from that published
+parquet (LLM_SPLIT_PATH_HINT) instead of re-deriving anything inline.
+
+"Использовать llm-val не вместо human-val, а параллельно" (per direct
+instruction): llm_val_frame is evaluated as a SECOND, independent metric at
+every checkpoint, alongside (never instead of) the human item-disjoint val
+above -- see do_full_checkpoint's own two eval calls and
+train_state.json's val_macro_pr_auc vs llm_val_macro_pr_auc fields.
+
+README.md carries the same prominent warning: any reported number from this
+run describes training on "human + an LLM subsample", not "human + LLM".
 
 THE HEAD: [1024, 512, 128, 1], OPPOSITE-DIRECTION SCHEDULE FROM THE BACKBONE
 ===========================================================================
@@ -172,9 +188,15 @@ import torch_xla.distributed.parallel_loader as pl_xla
 SEED = 42
 MODEL_NAME = "ai-forever/FRIDA"
 
-MATCHES_LLM_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/matches_llm.parquet"
-ITEMS_FULL_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/items.parquet"
 ITEM_SPLIT_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/matches_item_disjoint_70_30_seed42.parquet"
+# Pre-built, no-leak LLM train/val split (kaggle_kernels/frida-llm-train-val-
+# split). Supersedes this kernel's OWN earlier inline stratified_llm_sample
+# call against the raw matches_llm.parquet/items.parquet, which drew its 1M
+# training rows straight from the full 11.19M-row pool with no val held out
+# first -- a real gap the split kernel exists to close retroactively (its
+# "train" side reproduces that exact 1M byte-for-byte; "val" is new, drawn
+# only from the untouched ~10.19M remainder).
+LLM_SPLIT_PATH_HINT = "/kaggle/input/datasets/maxamsecret/frida-llm-train-val-split/llm_train_val_split.parquet"
 
 # v2 caches (frida-tokenize-items-cpu): correct char budget (140/32/529, see
 # reports/experiment_log.md "Char-budget rule v2") + the light v2 attribute
@@ -190,8 +212,6 @@ ITEM_MAX_LENGTH = 256
 # at 1.65x over Public's budget). Training at the serving length removes the
 # train/serve mismatch every FRIDA submission so far has paid for.
 PAIR_MAX_LENGTH = 192
-
-MAX_CATEGORY_CHARS = 32   # matches the v2 cache's own NAME/CATEGORY/ATTR budget
 
 CATEGORY_LABEL_TOKEN = 55917    # " Category" (+ colon=30 immediately after)
 ATTRIBUTES_LABEL_TOKEN = 91837  # " Attributes"
@@ -229,8 +249,6 @@ FOCAL_GAMMA = 2.0                # Lin et al. RetinaNet default; not tuned
 PER_CORE_TRAIN_BATCH = 48
 PER_CORE_EVAL_BATCH = 72
 
-# NOT the full 11,187,780-row LLM set -- see docstring's "LLM DATA" section.
-LLM_TOTAL_ROWS = 1_000_000
 EPOCHS = 3
 
 MAX_TRAIN_SECONDS = 30600       # 8.5h -- Kaggle's TPU session cap is 9h
@@ -638,7 +656,8 @@ def evaluate(model, full_loader, remainder_loader, device, category_names):
 # 5-hourly weights-only saves (see docstring's CHECKPOINT CONTRACT)
 # =====================================================================
 
-def save_checkpoint(model, optimizer, global_step, epoch, val_macro_pr_auc, label, rank):
+def save_checkpoint(model, optimizer, global_step, epoch, val_macro_pr_auc, label, rank,
+                    llm_val_macro_pr_auc=None):
     if rank != 0:
         return
     save_dir = os.path.join(OUTPUT_DIR, label)
@@ -654,15 +673,17 @@ def save_checkpoint(model, optimizer, global_step, epoch, val_macro_pr_auc, labe
     with open(os.path.join(save_dir, "train_state.json"), "w") as f:
         json.dump({
             "epoch": epoch, "global_step": global_step,
-            "val_macro_pr_auc": val_macro_pr_auc,   # explicit null if unvalidated
+            "val_macro_pr_auc": val_macro_pr_auc,           # explicit null if unvalidated
+            "llm_val_macro_pr_auc": llm_val_macro_pr_auc,   # explicit null if unvalidated/failed --
+                                                             # a SECOND, independent metric, never a
+                                                             # substitute for val_macro_pr_auc above
             "head": {"type": "FullSftHead", "layer_sizes": list(HEAD_HIDDEN),
                      "dropout": HEAD_DROPOUT},
             "pair_max_length": PAIR_MAX_LENGTH,
-            "split": "item-disjoint 70/30 seed42",
-            "llm_is_subsample": True, "llm_total_rows": LLM_TOTAL_ROWS,
+            "split": "item-disjoint 70/30 seed42 (human) + no-leak retroactive split (llm)",
         }, f, indent=2)
     print(f"[SAVE] {label}: epoch={epoch} step={global_step} "
-          f"val_macro_pr_auc={val_macro_pr_auc}", flush=True)
+          f"val_macro_pr_auc={val_macro_pr_auc} llm_val_macro_pr_auc={llm_val_macro_pr_auc}", flush=True)
 
 
 # =====================================================================
@@ -687,36 +708,6 @@ def _build_frame(id1, id2, label, category, scope, caches):
 
 def _concat_frames(a, b):
     return {k: np.concatenate([a[k], b[k]]) for k in a}
-
-
-def stratified_llm_sample(target, cat_id, n_per_category, seed):
-    """Verbatim policy from frida-percat-lora -- see that kernel's own
-    docstring for the full derivation (10 discrete target levels, confidence
-    filtering considered and rejected). Duplicated rather than imported:
-    kernels are standalone scripts."""
-    rng = np.random.RandomState(seed)
-    keep = []
-    realized = {}
-    for c in np.unique(cat_id):
-        cat_rows = np.flatnonzero(cat_id == c)
-        n_take = min(n_per_category, len(cat_rows))
-        cat_targets = target[cat_rows]
-        levels, level_counts = np.unique(cat_targets, return_counts=True)
-        quota = np.floor(level_counts / level_counts.sum() * n_take).astype(np.int64)
-        deficit = n_take - int(quota.sum())
-        if deficit > 0:
-            quota[np.argsort(-level_counts)[:deficit]] += 1
-        picked = []
-        for level, q in zip(levels, quota):
-            if q <= 0:
-                continue
-            pool = cat_rows[cat_targets == level]
-            q = min(q, len(pool))
-            picked.append(rng.choice(pool, size=q, replace=False))
-        sel = np.concatenate(picked) if picked else np.array([], dtype=np.int64)
-        keep.append(sel)
-        realized[int(c)] = {"taken": int(len(sel)), "available": int(len(cat_rows))}
-    return np.concatenate(keep), realized
 
 
 def _load_shared_data():
@@ -755,53 +746,42 @@ def _load_shared_data():
     del split_df, human_val
     gc.collect()
 
-    # ---- LLM subsample: category-balanced quota, stratified by target level
-    # -- NOT the full 11.19M-row set. See docstring's "LLM DATA" section. ----
-    llm = (
-        pl.scan_parquet(_find_dataset_file(MATCHES_LLM_PATH_HINT, "matches_llm.parquet"))
-        .filter(pl.col("id1").is_not_null() & pl.col("id2").is_not_null())
-        .select(["id1", "id2", "target"])
-        .collect(engine="streaming")
-    )
-    n_llm_total = llm.height
-    llm_item_cat = (
-        pl.scan_parquet(_find_dataset_file(ITEMS_FULL_PATH_HINT, "items.parquet"))
-        .select(["id", "category"])
-        .with_columns(pl.col("category").fill_null("UNKNOWN").cast(pl.Utf8)
-                      .str.slice(0, MAX_CATEGORY_CHARS))
-        .with_columns(pl.col("category").replace_strict(category_to_id, default=-1)
-                      .cast(pl.Int32).alias("cat_id"))
-        .select(["id", "cat_id"])
-        .collect(engine="streaming")
-    )
-    llm = llm.join(llm_item_cat.rename({"id": "id1"}), on="id1", how="inner")
-    del llm_item_cat
-    gc.collect()
-    llm = llm.filter(pl.col("cat_id") >= 0)
-    print(f"[{_elapsed():8.1f}s][SETUP] llm rows with a known category: "
-          f"{llm.height:,} / {n_llm_total:,}", flush=True)
-
-    llm_pd = llm.to_pandas()
-    del llm
-    gc.collect()
-    n_per_category = max(1, LLM_TOTAL_ROWS // len(category_vocab))
-    sel, sample_report = stratified_llm_sample(
-        llm_pd["target"].to_numpy(), llm_pd["cat_id"].to_numpy(), n_per_category, SEED)
-    llm_pd = llm_pd.iloc[sel].reset_index(drop=True)
-    print(f"[{_elapsed():8.1f}s][SETUP] LLM SUBSAMPLE: {len(llm_pd):,} rows "
-          f"({n_per_category:,}/category, stratified by target level, seed={SEED}) "
-          f"-- NOT the full {n_llm_total:,}-row set", flush=True)
-
-    llm_frame = _build_frame(llm_pd["id1"], llm_pd["id2"], llm_pd["target"],
-                             llm_pd["cat_id"].to_numpy().astype(np.int64), 1, caches)
-    del llm_pd
+    # ---- LLM train/val: pre-built, no-leak split (frida-llm-train-val-split
+    # kernel) -- NOT the full 11.19M-row set, and NOT re-derived inline
+    # anymore. See docstring's "LLM DATA" section + LLM_SPLIT_PATH_HINT's
+    # own comment for why this replaced an earlier inline version. ----
+    llm_split_path = _find_dataset_file(LLM_SPLIT_PATH_HINT, "llm_train_val_split.parquet")
+    llm_split_df = pl.read_parquet(llm_split_path).to_pandas()
+    llm_split_df["cat_id"] = llm_split_df["category"].map(category_to_id).astype(np.int64)
+    llm_train = llm_split_df[llm_split_df["split"] == "train"].reset_index(drop=True)
+    llm_val = llm_split_df[llm_split_df["split"] == "val"].reset_index(drop=True)
+    n_llm_total = len(llm_split_df)
+    llm_val_fingerprint = hashlib.sha256(
+        ",".join(f"{a}-{b}" for a, b in sorted(zip(llm_val["id1"], llm_val["id2"]))).encode("utf-8")
+    ).hexdigest()[:16]
+    print(f"[{_elapsed():8.1f}s][SETUP] llm(no-leak split) train={len(llm_train):,} "
+          f"val={len(llm_val):,} val_fingerprint={llm_val_fingerprint} "
+          f"-- NOT the full 11,187,780-row matches_llm.parquet", flush=True)
+    del llm_split_df
     gc.collect()
 
-    train_frame = _concat_frames(human_train_frame, llm_frame)
+    # LLM train keeps the CONTINUOUS soft target (never thresholded) -- same
+    # treatment this project has always given LLM rows in the loss. LLM val
+    # uses the binarized label: average_precision_score needs a real 0/1
+    # ground truth, same as the human val frame below.
+    llm_train_frame = _build_frame(llm_train["id1"], llm_train["id2"], llm_train["target"],
+                                   llm_train["cat_id"].to_numpy().astype(np.int64), 1, caches)
+    llm_val_frame = _build_frame(llm_val["id1"], llm_val["id2"], llm_val["label"],
+                                 llm_val["cat_id"].to_numpy().astype(np.int64), 1, caches)
+    del llm_train, llm_val
+    gc.collect()
+
+    n_llm_train = len(llm_train_frame["label"])
+    train_frame = _concat_frames(human_train_frame, llm_train_frame)
     print(f"[{_elapsed():8.1f}s][SETUP] mixed train={len(train_frame['label']):,} "
-          f"(human {len(human_train_frame['label']):,} + llm_subsample {len(llm_frame['label']):,})",
+          f"(human {len(human_train_frame['label']):,} + llm_train {n_llm_train:,})",
           flush=True)
-    del human_train_frame, llm_frame
+    del human_train_frame, llm_train_frame
     gc.collect()
 
     # ---- realized per-category counts on the ACTUAL training mix, for the
@@ -815,20 +795,12 @@ def _load_shared_data():
           f"({category_vocab[int(np.argmin(cat_counts))]!r} largest, "
           f"{category_vocab[int(np.argmax(cat_counts))]!r} smallest)", flush=True)
 
-    with open(os.path.join(OUTPUT_DIR, "llm_subsample_report.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "policy": "stratified by discrete target level, category-balanced, "
-                       "NO confidence filter (see stratified_llm_sample docstring)",
-            "rows_per_category": n_per_category, "seed": SEED,
-            "llm_rows_total_available": int(n_llm_total), "llm_rows_used": int(len(sel)),
-            "per_category": {category_vocab[k]: v for k, v in sample_report.items()
-                             if k < len(category_vocab)},
-        }, f, ensure_ascii=False, indent=2)
-
     _SHARED.update(dict(
-        caches=caches, pad_id=pad_id, train_frame=train_frame, val_frame=val_frame,
+        caches=caches, pad_id=pad_id, train_frame=train_frame,
+        val_frame=val_frame, llm_val_frame=llm_val_frame,
         category_vocab=category_vocab, category_weight=category_weight,
-        val_fingerprint=val_fingerprint, n_llm_total=int(n_llm_total), n_llm_used=int(len(sel)),
+        val_fingerprint=val_fingerprint, llm_val_fingerprint=llm_val_fingerprint,
+        n_llm_total=int(n_llm_total), n_llm_train=int(n_llm_train),
     ))
     print(f"[{_elapsed():8.1f}s][SETUP] done -- ready for fork", flush=True)
 
@@ -847,6 +819,7 @@ def _mp_fn(index):
     caches = _SHARED["caches"]
     pad_id = _SHARED["pad_id"]
     train_frame, val_frame = _SHARED["train_frame"], _SHARED["val_frame"]
+    llm_val_frame = _SHARED["llm_val_frame"]
     category_vocab = _SHARED["category_vocab"]
     category_weight = torch.tensor(_SHARED["category_weight"], dtype=torch.float32, device=device)
 
@@ -854,8 +827,8 @@ def _mp_fn(index):
                          f"lr={LR} head_lr_peak={LR * HEAD_LR_PEAK_MULTIPLIER} "
                          f"warmup={WARMUP_RATIO} human_weight={HUMAN_WEIGHT} "
                          f"focal_gamma={FOCAL_GAMMA} epochs={EPOCHS} "
-                         f"llm_subsample_total={_SHARED['n_llm_used']:,} "
-                         f"(of {_SHARED['n_llm_total']:,})", force=True)
+                         f"llm_train={_SHARED['n_llm_train']:,} llm_val={len(llm_val_frame['label']):,} "
+                         f"(of {_SHARED['n_llm_total']:,} in the no-leak split)", force=True)
 
     model, hidden_dim = build_fresh_model(device, rank)
     total_batch = PER_CORE_TRAIN_BATCH * world_size
@@ -884,6 +857,10 @@ def _mp_fn(index):
 
     val_full_loader, val_remainder_loader = make_eval_loader(val_frame, caches, pad_id,
                                                               PER_CORE_EVAL_BATCH)
+    # "Использовать llm-val не вместо human-val, а параллельно" -- a second,
+    # independent loader/eval, never a replacement for the human one above.
+    llm_val_full_loader, llm_val_remainder_loader = make_eval_loader(
+        llm_val_frame, caches, pad_id, PER_CORE_EVAL_BATCH)
 
     global_step = 0
     best_val = -1.0
@@ -913,9 +890,32 @@ def _mp_fn(index):
             if rank == 0:
                 print(f"[METRICS] per_category: {json.dumps(m['per_category'], ensure_ascii=False)}",
                       flush=True)
-            save_checkpoint(model, optimizer, global_step, epoch_num, m["macro_pr_auc"], label, rank)
+
+            # Second, independent eval -- parallel to human val, never a
+            # substitute for it (per direct instruction). Its own failure
+            # must not take down the human-val checkpoint above, so it gets
+            # its own try/except and a None fallback rather than sharing the
+            # outer one.
+            llm_m = None
+            try:
+                llm_m = evaluate(model, llm_val_full_loader, llm_val_remainder_loader, device,
+                                 category_vocab)
+                _log(rank, "METRICS", f"{label}: llm_val_macro_pr_auc={llm_m['macro_pr_auc']:.4f} "
+                                      f"n_llm_val={llm_m['n']}", force=True)
+                if rank == 0:
+                    print(f"[METRICS] llm_val_per_category: "
+                          f"{json.dumps(llm_m['per_category'], ensure_ascii=False)}", flush=True)
+            except Exception as e:
+                _log(rank, "ERROR", f"llm_val eval FAILED at epoch={epoch_num} step={global_step} "
+                                    f"(human val above is unaffected): {type(e).__name__}: {e}",
+                     force=True)
+                model.train()
+
+            save_checkpoint(model, optimizer, global_step, epoch_num, m["macro_pr_auc"], label, rank,
+                            llm_val_macro_pr_auc=llm_m["macro_pr_auc"] if llm_m else None)
             if improved:
-                save_checkpoint(model, optimizer, global_step, epoch_num, m["macro_pr_auc"], "best", rank)
+                save_checkpoint(model, optimizer, global_step, epoch_num, m["macro_pr_auc"], "best", rank,
+                                llm_val_macro_pr_auc=llm_m["macro_pr_auc"] if llm_m else None)
             return True
         except Exception as e:
             _log(rank, "ERROR", f"eval/checkpoint FAILED at epoch={epoch_num} step={global_step}: "

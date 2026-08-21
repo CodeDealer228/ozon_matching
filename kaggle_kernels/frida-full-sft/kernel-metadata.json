@@ -11,7 +11,8 @@
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
     "maxamsecret/frida-tokenize-items-v3",
-    "maxamsecret/frida-item-disjoint-split"
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split"
   ],
   "competition_sources": [],
   "kernel_sources": [],
