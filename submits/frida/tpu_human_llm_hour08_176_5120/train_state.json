@@ -1,0 +1,14 @@
+{
+  "epoch": 1,
+  "global_step": 31093,
+  "val_macro_pr_auc": 0.6753523641187649,
+  "head": {
+    "type": "MultiLayerHead",
+    "layer_sizes": [
+      1024,
+      256
+    ],
+    "dropout": 0.2
+  },
+  "pair_max_length": 256
+}
