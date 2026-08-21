@@ -1,0 +1,19 @@
+{
+  "id": "maxamsecret/frida-full-sft",
+  "title": "FRIDA full fine-tune from scratch",
+  "code_file": "frida_full_sft.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenize-items-v3",
+    "maxamsecret/frida-item-disjoint-split"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
