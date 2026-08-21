@@ -1,6 +1,6 @@
 {
   "id": "maxamsecret/frida-full-sft",
-  "title": "FRIDA full fine-tune from scratch",
+  "title": "Frida Full Sft",
   "code_file": "frida_full_sft.py",
   "language": "python",
   "kernel_type": "script",

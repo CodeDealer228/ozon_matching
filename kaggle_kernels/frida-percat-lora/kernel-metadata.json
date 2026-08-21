@@ -1,6 +1,6 @@
 {
   "id": "rays0n/frida-percat-lora",
-  "title": "FRIDA per-category LoRA specialists",
+  "title": "Frida Percat Lora",
   "code_file": "frida_percat_lora.py",
   "language": "python",
   "kernel_type": "script",

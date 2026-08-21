@@ -218,9 +218,16 @@ LR_MIN_RATIO = 0.05
 HUMAN_WEIGHT = 2.0               # human rows count double vs LLM soft labels
 FOCAL_GAMMA = 2.0                # Lin et al. RetinaNet default; not tuned
 
-# ARITHMETIC ESTIMATE, not measured -- see docstring. Halve on a real OOM.
-PER_CORE_TRAIN_BATCH = 64
-PER_CORE_EVAL_BATCH = 96
+# MEASURED, not the original arithmetic estimate: a real push at 64/96
+# OOM'd at XLA COMPILE time (not even the first real step) --
+# "Used 19.05G of 15.75G hbm. Exceeded hbm capacity by 3.30G" -- 1.21x over.
+# 48/72 (64/72 scaled down by that ratio, rounded to a clean number with
+# real margin, not just barely under) is the corrected value. This died
+# cheaply: compile-time OOM costs ~seconds into the run, before touching any
+# real data, exactly the "fail cheap on TPU" property auto-probing would
+# have thrown away.
+PER_CORE_TRAIN_BATCH = 48
+PER_CORE_EVAL_BATCH = 72
 
 # NOT the full 11,187,780-row LLM set -- see docstring's "LLM DATA" section.
 LLM_TOTAL_ROWS = 1_000_000
