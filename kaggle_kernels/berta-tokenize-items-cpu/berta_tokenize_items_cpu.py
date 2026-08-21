@@ -108,11 +108,11 @@ OUTPUT_DIR = os.path.join(WORKING_DIR, "berta_item_tokens_cpu")
 SCOPES = {
     "human": {
         "dataset_id": "rays0n/berta-item-tokens-v2-human",
-        "dataset_title": "BERTA item tokens v2 (attr cleanup) -- human-labeled scope",
+        "dataset_title": "BERTA item tokens v2 -- human scope",
     },
     "llm": {
         "dataset_id": "rays0n/berta-item-tokens-v2-llm",
-        "dataset_title": "BERTA item tokens v2 (attr cleanup) -- LLM-labeled scope",
+        "dataset_title": "BERTA item tokens v2 -- LLM scope",
     },
 }
 
@@ -328,6 +328,13 @@ def tokenize_scope(items_pl, tokenizer, out_dir, extra_meta):
 
 
 def publish_dataset(out_dir, dataset_id, dataset_title):
+    # Fail here, at second zero, not after hours of real tokenization work --
+    # the FRIDA sibling kernel hit "The dataset title must be between 6 and
+    # 50 characters" AFTER both scopes (711K + 12.38M items, ~3.65h) had
+    # already finished, at the very last line. Same title-length bug was
+    # present here too (copy-pasted); checked locally before spending it again.
+    assert 6 <= len(dataset_title) <= 50, \
+        f"dataset_title must be 6-50 chars, got {len(dataset_title)}: {dataset_title!r}"
     with open(os.path.join(out_dir, "dataset-metadata.json"), "w") as f:
         json.dump({"id": dataset_id, "title": dataset_title, "licenses": [{"name": "CC0-1.0"}]}, f)
     _log("PUBLISH", f"creating dataset {dataset_id} ...")
@@ -336,6 +343,11 @@ def publish_dataset(out_dir, dataset_id, dataset_title):
 
 
 def main():
+    for scope_name, scope in SCOPES.items():
+        title = scope["dataset_title"]
+        assert 6 <= len(title) <= 50, \
+            f"SCOPES[{scope_name!r}]['dataset_title'] must be 6-50 chars, got {len(title)}: {title!r}"
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     _log_real_ram()
 
