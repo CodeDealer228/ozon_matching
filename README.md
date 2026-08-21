@@ -727,6 +727,76 @@ eval, потому что train, а не eval, был тем, на что смо
 ли (шардинг val через `DistributedSampler` + `all_gather` метрики, либо
 запускать eval только на `rank==0`).
 
+### Токенизация FRIDA v3, публикация BERTA, и три Kaggle-CLI баги, найденные при этом (2026-08-21/22)
+
+**FRIDA-кэш**: актуальный, полный по масштабу item-token кэш — это
+`maxamsecret/frida-tokenize-items-v3` (`human_scope`: 711,304 items,
+`llm_scope`: 12,384,610 items — файл `input_ids.bin` в `llm_scope` весит
+ровно `12,384,610 × 256 × 4` байт, подтверждая полный реальный масштаб, не
+сэмпл). `frida-percat-lora` и `frida-full-sft` уже ссылаются на него и в
+`HUMAN_CACHE_HINT`/`LLM_CACHE_HINT`, и в `kernel-metadata.json` →
+`dataset_sources` — проверено отдельно, правок не потребовалось. Строить
+"v2-human"/"v2-llm" заново не нужно, их не существует как отдельного шага —
+эта путаница возникла из лога, где hint-путь не учитывал вложенность
+`frida_item_tokens_cpu/` внутри датасета и потому "промахивался", уходя в
+fallback-поиск по содержимому — сам датасет в hint всегда был `v3`.
+
+**BERTA-токенизация** (`rays0n/berta-tokenize-items-cpu`) была
+приватной из-за бага ниже; перезапущена (v2) с обоими фиксами, статус
+`RUNNING` на 2026-08-22.
+
+При попытке опубликовать реальный output этих CPU-кернелов нашлись три
+независимых бага:
+
+1. **Версия Kaggle CLI, вшитая в образ**: `kaggle datasets create` падал с
+   `"The dataset title must be between 6 and 50 characters"` на честном
+   35-символьном тайтле — воспроизвёл тот же вызов локально на
+   `kaggle==2.2.4`, прошёл мгновенно. Баг именно в образном `kaggle==2.0.2`.
+   Фикс: пиновать `kaggle>=2.2.0` в `pip install` самого кернела (не голое
+   `"kaggle"`). Применено в `frida-tokenize-items-cpu` и
+   `berta-tokenize-items-cpu`.
+2. **`-t` — это не "публично"**: `-t`/`--keep-tabular` (не конвертировать
+   табличные файлы в CSV), а не флаг публикации. Реальный флаг — `-u`/
+   `--public`. Без `-u` `datasets create` по умолчанию делает датасет
+   **приватным**. Этот же паттерн (`-t` без `-u`) нашёлся одинаковым `grep`
+   по всему проекту в `berta-attr-augment`, `berta-hardneg-balanced`/
+   `-uniform`, `berta-llm-continue-train`, `berta-lora-sft-continue-5epoch`,
+   `berta-lora-sft-human-only-20-epochs`, `berta-weakcat-llm-train`,
+   `frida-head-train`, `frida-tokenize-items`, `frida-tokenize-items-human`/
+   `-llm`, `frida-tpu-embed-cache-human`, `publish-token-cache` — то есть
+   немало "опубликованных" ранее датасетов в истории проекта, вероятно,
+   на деле приватны. **Сознательно не исправлено ретроактивно** — смена
+   видимости уже существующего датасета отдельное решение, требующее
+   отдельного разрешения; фикс (`-u` добавлен) применён только в двух
+   реально трогаемых в этот момент кернелах (`frida-tokenize-items-cpu`,
+   `berta-tokenize-items-cpu`).
+3. **Реорганизация `~/.kaggle/`**: плоские файлы (`kaggle.json`,
+   `kaggle_rays0n.json`, ...) заменены на под-директории на аккаунт —
+   `C:/Users/mba90/.kaggle/kaggle_{account}/.kaggle/kaggle.json` (кроме
+   `kaggle_maximmarkovbb/kaggle.json`, он плоский, без вложенного
+   `.kaggle/`). **Это касается и аккаунта по умолчанию `maxamsecret`** —
+   старого `~/.kaggle/kaggle.json` больше нет вообще, голый `kaggle ...` без
+   переменных окружения теперь падает с ошибкой авторизации для любого
+   аккаунта, включая дефолтный. Старый паттерн `KAGGLE_USERNAME=...
+   KAGGLE_KEY=$(python -c "...json.load(open(...))['key']")` для не-дефолтных
+   аккаунтов больше не работает (`FileNotFoundError`). Новый рабочий паттерн
+   для ЛЮБОГО аккаунта:
+   ```bash
+   KAGGLE_CONFIG_DIR="C:/Users/mba90/.kaggle/kaggle_{account}/.kaggle" kaggle ...
+   # maximmarkovbb — исключение, без вложенного .kaggle/:
+   KAGGLE_CONFIG_DIR="C:/Users/mba90/.kaggle/kaggle_maximmarkovbb" kaggle ...
+   ```
+
+**Статус на 2026-08-22**: `rays0n/frida-percat-lora` (v3, оба фикса — LR
+warmup/grad-clip и parent-dir-name — применены) и
+`rays0n/berta-tokenize-items-cpu` (v2) — `RUNNING`.
+`maxamsecret/frida-full-sft` — **`ERROR`**: добавление второго
+(`llm_val`) eval-прохода вытолкнуло пиковое HBM-потребление на компиляции
+обратно за бюджет (`Used 16.62G of 15.75G hbm. Exceeded by 888.03M`), хотя
+предыдущая версия с одним eval-проходом чисто доходила до
+`starting epoch 1/3` на тех же batch-размерах (48/72). Не исправлено —
+ждём решения (дальше уменьшать batch, или делать eval дешевле/шардить его).
+
 ### Известное ограничение: мало данных без лика для головы поверх BERTA
 
 `berta_catboost_top_final` (CatBoost на 768 сырых эмбеддингах BERTA +

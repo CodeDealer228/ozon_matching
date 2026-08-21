@@ -82,7 +82,17 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "polars"])
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
                         "transformers==5.15.0", "tokenizers==0.22.2"])
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle"])
+# >=2.2.0, not a bare "kaggle": a real run hit this image's preinstalled
+# 2.0.2 giving a flatly wrong "The dataset title must be between 6 and 50
+# characters" on a title that was genuinely 35 chars -- reproduced as a real
+# 2.0.2-vs-2.2.4 CLI bug (the identical metadata succeeded instantly on
+# 2.2.4), confirmed AFTER both scopes (711K + 12.38M items) had already
+# finished, at the very last line. A bare "kaggle" install pulls whatever
+# happens to satisfy pip on this image, which is exactly what silently
+# reintroduced 2.0.2 here despite the version floor already existing on
+# publish_dataset's own local length assert -- that assert checks the RIGHT
+# thing but can't catch a wrong CLI.
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle>=2.2.0"])
 
 import numpy as np
 import pandas as pd
@@ -362,8 +372,12 @@ def publish_dataset(out_dir, dataset_id, dataset_title):
         f"dataset_title must be 6-50 chars, got {len(dataset_title)}: {dataset_title!r}"
     with open(os.path.join(out_dir, "dataset-metadata.json"), "w") as f:
         json.dump({"id": dataset_id, "title": dataset_title, "licenses": [{"name": "CC0-1.0"}]}, f)
-    _log("PUBLISH", f"creating dataset {dataset_id} ...")
-    subprocess.check_call(["kaggle", "datasets", "create", "-p", out_dir, "-t"])
+    # -u/--public: -t is --keep-tabular (don't convert .bin to CSV), NOT
+    # "public" -- without -u, `datasets create` defaults to PRIVATE. See
+    # berta-tokenize-items-cpu's identical comment for the wider pattern
+    # this belongs to across the project's older publish code.
+    _log("PUBLISH", f"creating dataset {dataset_id} (public) ...")
+    subprocess.check_call(["kaggle", "datasets", "create", "-p", out_dir, "-t", "-u"])
     _log("PUBLISH", f"published at https://www.kaggle.com/datasets/{dataset_id}")
 
 

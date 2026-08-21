@@ -69,7 +69,10 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "polars"])
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
                         "transformers==5.15.0", "tokenizers==0.22.2"])
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle"])
+# >=2.2.0, not a bare "kaggle" -- see frida-tokenize-items-cpu's identical
+# fix for the real 2.0.2-vs-2.2.4 CLI bug this addresses (same error, same
+# root cause, hit on this kernel's own real run too).
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "kaggle>=2.2.0"])
 
 import numpy as np
 import pandas as pd
@@ -337,8 +340,16 @@ def publish_dataset(out_dir, dataset_id, dataset_title):
         f"dataset_title must be 6-50 chars, got {len(dataset_title)}: {dataset_title!r}"
     with open(os.path.join(out_dir, "dataset-metadata.json"), "w") as f:
         json.dump({"id": dataset_id, "title": dataset_title, "licenses": [{"name": "CC0-1.0"}]}, f)
-    _log("PUBLISH", f"creating dataset {dataset_id} ...")
-    subprocess.check_call(["kaggle", "datasets", "create", "-p", out_dir, "-t"])
+    # -u/--public: real bug found the hard way -- -t is --keep-tabular (don't
+    # convert .bin files to CSV), NOT "public". Without -u, `datasets create`
+    # defaults to PRIVATE. Missing this flag is a real, wider pattern across
+    # this project's older publish_dataset-style code (frida-tokenize-items,
+    # frida-tokenize-items-human/-llm, several berta-*-train kernels all
+    # share the same -t-without-u gap) -- not fixed everywhere retroactively
+    # (changing an EXISTING dataset's visibility is a separate, deliberate
+    # action), but this kernel gets it right going forward.
+    _log("PUBLISH", f"creating dataset {dataset_id} (public) ...")
+    subprocess.check_call(["kaggle", "datasets", "create", "-p", out_dir, "-t", "-u"])
     _log("PUBLISH", f"published at https://www.kaggle.com/datasets/{dataset_id}")
 
 

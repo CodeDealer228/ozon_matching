@@ -359,31 +359,42 @@ Always also extract the actual built zip to a clean dir and test *that*
 - `.venv/` has only `kaggle`/`jupyter` tooling by default — install
   `polars pandas pyarrow scikit-learn mlflow torch transformers peft
   safetensors` on demand.
-- **Three separate Kaggle accounts, three separate GPU/TPU quotas** — do not
+- **Five separate Kaggle accounts, five separate GPU/TPU quotas** — do not
   mix up which kernel/dataset was pushed under which, and **ask which
   account before launching a new GPU session** if it isn't obvious from
   context:
-  - `maxamsecret` — default account, creds at `~/.kaggle/kaggle.json` (not in
-    repo). Owns `ozon-ecup-2026-matching` (the private source dataset) and
-    all FRIDA-related kernels/datasets (`frida-*`).
+  - `maxamsecret` — default account. Owns `ozon-ecup-2026-matching` (the
+    private source dataset) and all FRIDA-related kernels/datasets
+    (`frida-*`).
   - `rays0n` — second account, added 2026-08-13 specifically to run BERTA
     (`kaggle_kernels/berta-lora-sft`) on its own separate quota rather than
-    competing with FRIDA's runs. Creds at `~/.kaggle/kaggle_rays0n.json` (not
-    in repo, not the default file — never overwrite `kaggle.json` with
-    this). Has been granted read access to `maxamsecret/ozon-ecup-2026-matching`
-    (confirmed via `kaggle datasets files`). All BERTA kernels/datasets are
-    namespaced `rays0n/berta-*`, not `maxamsecret/...`.
+    competing with FRIDA's runs. Has been granted read access to
+    `maxamsecret/ozon-ecup-2026-matching` (confirmed via `kaggle datasets
+    files`). All BERTA kernels/datasets are namespaced `rays0n/berta-*`, not
+    `maxamsecret/...`.
   - `maximmarkovbb` — third account, added for the FRIDA v2 continue-train
     (`kaggle_kernels/frida-lora-v2-epoch`) with a clean, unused GPU quota.
-    Creds at `~/.kaggle/kaggle_maxim_markov.json`. Also has read access to
-    `maxamsecret/ozon-ecup-2026-matching`. Kernels/datasets under this
-    account are namespaced `maximmarkovbb/...` and, per its own convention,
-    always public.
-  - To run a CLI command as a non-default account, override via env vars
-    rather than touching the default file: `KAGGLE_USERNAME=rays0n
-    KAGGLE_KEY=$(python -c "import json;print(json.load(open('$HOME/.kaggle/kaggle_rays0n.json'))['key'])")
-    kaggle ...` (swap in `kaggle_maxim_markov.json`/`maximmarkovbb` as
-    needed). Any kernel pushed under a non-default account must also use
+    Also has read access to `maxamsecret/ozon-ecup-2026-matching`. Kernels/
+    datasets under this account are namespaced `maximmarkovbb/...` and, per
+    its own convention, always public.
+  - `ovosh789`, `alexandrzolotukhin` — added 2026-08-21, empty quotas
+    refreshing ~2026-08-22 03:00. Not yet assigned to a specific kernel;
+    usable right now for any job needing at least 5-7h of uninterrupted
+    quota.
+  - **Credential layout changed 2026-08-22**: flat files under `~/.kaggle/`
+    (`kaggle.json`, `kaggle_rays0n.json`, ...) were replaced by one
+    subdirectory per account: `C:/Users/mba90/.kaggle/kaggle_{account}/.kaggle/kaggle.json`
+    — for **every** account, including the default `maxamsecret` (there is
+    no longer a flat `~/.kaggle/kaggle.json` at all; a bare `kaggle ...` call
+    with no `KAGGLE_CONFIG_DIR` now fails auth even for the default
+    account). The one exception: `kaggle_maximmarkovbb/kaggle.json` is flat,
+    with no nested `.kaggle/`. The old `KAGGLE_USERNAME=...
+    KAGGLE_KEY=$(python -c "...json.load(open(...))['key']")` pattern no
+    longer works for any account (`FileNotFoundError`). Current correct
+    invocation for any account:
+    `KAGGLE_CONFIG_DIR="C:/Users/mba90/.kaggle/kaggle_{account}/.kaggle" kaggle ...`
+    (for `maximmarkovbb`: `KAGGLE_CONFIG_DIR="C:/Users/mba90/.kaggle/kaggle_maximmarkovbb" kaggle ...`,
+    no nested `.kaggle`). Any kernel pushed under a non-default account must also use
     that account's creds as kernel secrets (Kaggle website → kernel →
     Settings → Secrets) if it needs `KAGGLE_USERNAME`/`KAGGLE_KEY` at
     runtime (e.g. berta-lora-sft's checkpoint-dataset auto-publish) — this
