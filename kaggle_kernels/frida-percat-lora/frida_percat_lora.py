@@ -202,7 +202,14 @@ LORA_TARGET_MODULES = ["q", "k", "v", "o", "wi_0", "wi_1", "wo"]
 
 # BERTA recipe's own numbers, and the MiniLM continue-SFT fix's numbers.
 LR = 2e-4                  # adapter peak
-HEAD_LR_MULTIPLIER = 5.0   # head peak = LR * this, held flat through warmup
+# 5.0 (the first value tried) combined with an instant step-0 jump to peak
+# produced loss=nan on every category within the first 50 steps -- fixed by
+# BOTH a short head-specific ramp (see _make_head_lr_lambda) AND gradient
+# clipping (see the training loop) AND backing this off to 3.0 as extra
+# margin, not relying on either fix alone.
+HEAD_LR_MULTIPLIER = 3.0   # head peak = LR * this
+HEAD_WARMUP_STEPS = 20     # short ramp 0 -> peak, then flat until warmup_steps
+GRAD_CLIP_NORM = 1.0
 WEIGHT_DECAY = 0.01
 WARMUP_RATIO = 0.10
 HUMAN_WEIGHT = 2.0         # human rows count double against LLM soft labels
@@ -258,12 +265,37 @@ def _find_dataset_file(hint, filename):
     return hint
 
 
-def _find_resume_adapter_dir():
-    if os.path.isdir("/kaggle/input"):
-        for root, _dirs, files in os.walk("/kaggle/input"):
-            if "adapter_config.json" in files:
-                return root
-    return None
+def _find_resume_adapter_dir(prefer_name="best"):
+    """Collects EVERY directory under /kaggle/input containing an
+    adapter_config.json, rather than returning the first hit from os.walk.
+
+    Real risk found the hard way: the checkpoint dataset this now resumes
+    from (frida-lora-llm-label-human-deep-head) holds MULTIPLE valid
+    checkpoints side by side -- best/, checkpoint_hour01/ .. hour08+/, all
+    with their own adapter_config.json. os.walk's traversal order is not a
+    documented guarantee, so silently taking "whichever the filesystem
+    listed first" could merge the wrong checkpoint into every specialist
+    with no error, just a worse (or better, by luck) result nobody could
+    explain. Prefer a directory literally named `prefer_name`; if none
+    matches, fail loudly rather than guess."""
+    if not os.path.isdir("/kaggle/input"):
+        return None
+    candidates = []
+    for root, _dirs, files in os.walk("/kaggle/input"):
+        if "adapter_config.json" in files:
+            candidates.append(root)
+    if not candidates:
+        return None
+    preferred = [c for c in candidates if os.path.basename(c.rstrip("/\\")) == prefer_name]
+    if len(candidates) > 1:
+        print(f"[SETUP] {len(candidates)} candidate adapter dirs found under /kaggle/input: "
+              f"{candidates} -- ", end="", flush=True)
+        if not preferred:
+            raise RuntimeError(
+                f"multiple adapter checkpoints present but none is named '{prefer_name}' -- "
+                f"refusing to guess which one to resume. Candidates: {candidates}")
+        print(f"using the one named '{prefer_name}': {preferred[0]}", flush=True)
+    return preferred[0] if preferred else candidates[0]
 
 
 def _pattern_starts_chunked(input_ids, n_items, tok_a, tok_b, chunk=500_000):
@@ -638,11 +670,23 @@ def make_param_groups(model):
 
 
 def _make_head_lr_lambda(warmup_steps, total_steps, min_ratio):
-    """Head holds its (higher) peak FLAT through warmup while the adapter is
-    still ramping from zero, then joins the same cosine decay. The point is
-    to let a random head become useful before it can push noise back into a
-    good backbone."""
+    """Head ramps to its (higher) peak over a SHORT warmup (HEAD_WARMUP_STEPS,
+    much shorter than the adapter's own warmup_steps), then holds that peak
+    flat until the adapter's warmup ends, then joins the same cosine decay.
+
+    NOT an instant jump to peak at step 0 -- that was tried first and
+    produced loss=nan from the very first logged step (50/600) on every
+    category, reproducibly. A step-0 jump to a 5x-multiplied LR on a
+    freshly-initialised linear head has no gradient history to scale
+    against; the first real gradient can be large relative to a random
+    init, and an un-ramped, unclipped LR that size is enough to blow the
+    logits up in one step. A short ramp (still much faster than the
+    adapter's) plus gradient clipping (see the training loop) fixed it."""
+    head_warmup = max(1, min(HEAD_WARMUP_STEPS, warmup_steps))
+
     def lr_lambda(step):
+        if step < head_warmup:
+            return step / head_warmup
         if step < warmup_steps:
             return 1.0
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
@@ -1089,6 +1133,13 @@ def _mp_fn(index):
                                     torch.ones_like(per_sample))
                     loss = (per_sample * w).sum() / w.sum()
                     loss.backward()
+                    # Added after a real NaN: see HEAD_LR_MULTIPLIER's comment
+                    # and _make_head_lr_lambda's docstring for the full story.
+                    # Clips across BOTH param groups together (one global
+                    # norm), matching clip_grad_norm_'s own default behavior.
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for g in optimizer.param_groups for p in g["params"]],
+                        GRAD_CLIP_NORM)
                     xm.optimizer_step(optimizer)
                     scheduler.step()
                     global_step += 1

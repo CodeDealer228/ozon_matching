@@ -11,7 +11,7 @@
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
     "maxamsecret/frida-tokenize-items-v3",
-    "maximmarkovbb/frida-tpu-human-256-epoch4"
+    "maximmarkovbb/frida-lora-llm-label-human-deep-head"
   ],
   "competition_sources": [],
   "kernel_sources": [],
