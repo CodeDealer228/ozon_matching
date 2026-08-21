@@ -158,8 +158,17 @@ ITEMS_HUMAN_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-match
 # see reports/experiment_log.md "Char-budget rule v2") + the light v2
 # attribute cleanup. NOT the v1 caches, which carry the under-scaled
 # 128/64/384 budget sized for MiniLM's old 128-token regime.
-HUMAN_CACHE_HINT = "/kaggle/input/datasets/maxamsecret/frida-item-tokens-v2-human"
-LLM_CACHE_HINT = "/kaggle/input/datasets/maxamsecret/frida-item-tokens-v2-llm"
+#
+# Published as ONE dataset covering both scopes (frida-tokenize-items-cpu's
+# own two publish_dataset() calls failed at the very last step -- the
+# tokenization itself completed correctly, confirmed via cache_meta.json:
+# 711,304 human items, v2 policy applied to 711,232 of them -- so the user
+# published /kaggle/working by hand as a single dataset instead). These
+# hints therefore won't resolve to an exact path; that's fine,
+# _find_v1_cache_root() falls back to a content-matching walk of
+# /kaggle/input keyed on n_items, which is what actually finds them.
+HUMAN_CACHE_HINT = "/kaggle/input/datasets/maxamsecret/frida-tokenize-items-v3/human_scope"
+LLM_CACHE_HINT = "/kaggle/input/datasets/maxamsecret/frida-tokenize-items-v3/llm_scope"
 
 ITEMS_FULL_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/items.parquet"
 

@@ -10,8 +10,7 @@
   "enable_internet": true,
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
-    "maxamsecret/frida-item-tokens-v2-human",
-    "maxamsecret/frida-item-tokens-v2-llm",
+    "maxamsecret/frida-tokenize-items-v3",
     "maximmarkovbb/frida-tpu-human-256-epoch4"
   ],
   "competition_sources": [],
