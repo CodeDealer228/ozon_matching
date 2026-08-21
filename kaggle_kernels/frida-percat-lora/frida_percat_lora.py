@@ -286,7 +286,17 @@ def _find_resume_adapter_dir(prefer_name="best"):
             candidates.append(root)
     if not candidates:
         return None
-    preferred = [c for c in candidates if os.path.basename(c.rstrip("/\\")) == prefer_name]
+    # NOTE: a real bug lived here once -- comparing os.path.basename(c)
+    # against prefer_name. c is always the "adapter/" leaf directory itself
+    # (that's what os.walk found adapter_config.json in), so its OWN
+    # basename is always literally "adapter", never "best" or
+    # "checkpoint_hourNN" -- the label lives one level UP, in the PARENT
+    # directory's name. That version raised its own "none is named 'best'"
+    # error even with best/adapter genuinely present in the candidate list,
+    # which is how it was caught: loud and wrong beats silent and wrong, but
+    # still wrong. Fixed to check the parent's name instead.
+    preferred = [c for c in candidates
+                if os.path.basename(os.path.dirname(c.rstrip("/\\"))) == prefer_name]
     if len(candidates) > 1:
         print(f"[SETUP] {len(candidates)} candidate adapter dirs found under /kaggle/input: "
               f"{candidates} -- ", end="", flush=True)
