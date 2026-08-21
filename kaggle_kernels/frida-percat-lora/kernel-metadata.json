@@ -1,0 +1,20 @@
+{
+  "id": "rays0n/frida-percat-lora",
+  "title": "FRIDA per-category LoRA specialists",
+  "code_file": "frida_percat_lora.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-item-tokens-v2-human",
+    "maxamsecret/frida-item-tokens-v2-llm",
+    "maximmarkovbb/frida-tpu-human-256-epoch4"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
