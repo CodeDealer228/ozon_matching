@@ -1,0 +1,10 @@
+[READ] canonical split: C:\Users\fitai\hackathons\ozon_august_2026\ozon_matching\data\splits\matches_split_seed42.parquet
+[READ] human items: C:\Users\fitai\hackathons\ozon_august_2026\ozon_matching\data\items_human.parquet
+[PARSE] target items=121,290 target train pairs=61,943
+[ANALYZE] human train pairs
+  Обувь: 14,456
+  Ювелирные изделия: 13,959
+  Одежда: 18,380
+  Автотовары: 15,148
+[DONE] C:\Users\fitai\hackathons\ozon_august_2026\ozon_matching\artifacts\synthetic_negative_rules\rules.json
+[DONE] C:\Users\fitai\hackathons\ozon_august_2026\ozon_matching\artifacts\synthetic_negative_rules\report.md
