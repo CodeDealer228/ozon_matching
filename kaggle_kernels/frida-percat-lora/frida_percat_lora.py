@@ -1,3 +1,4 @@
+# %% [code]
 """
 FRIDA per-category specialists: merge the general adapter into the base
 weights, then train 20 INDEPENDENT (LoRA + linear classifier) pairs, one per
@@ -79,14 +80,28 @@ no-op. Positive RATE is what varies (7.7x). Each specialist therefore gets
 its OWN pos_weight, computed from its own training mix, plus a 2x weight on
 human-labeled rows relative to LLM soft-labeled ones.
 
-HEAD SCHEDULE
+HEAD SCHEDULE, GRADIENT CLIPPING, FAIL-LOUD ON NaN
 ===========================================================================
 The classifier is randomly initialised while the backbone is already strong,
-so the two need different schedules. Two param groups: the head starts at
-HEAD_LR (5x the adapter's) and holds it flat through the first 10% of steps
-while the adapter linearly warms 0 -> LR, after which both cosine-decay
-together to a floor. Without this the random head would backpropagate noise
-into a good backbone for the first few hundred steps.
+so the two need different schedules. Two param groups: the head ramps to
+HEAD_LR (3x the adapter's) over a SHORT warmup (HEAD_WARMUP_STEPS), holds
+that peak flat until the adapter's own (longer) warmup ends, then both
+cosine-decay together to a floor.
+
+This is a real fix, not a first-principles design choice: an earlier
+version jumped the head straight to peak at step 0 with no ramp and no
+gradient clipping anywhere, and a real run (frida-percat-lora.log)
+reproducibly hit loss=nan by the very first logged step on 15/20
+categories, with 2 more drifting into NaN once a harder batch hit later --
+17/20 specialists lost, only 3 (07/10/14) survived. Fixed with three
+changes together, not any one alone: the short head ramp above,
+HEAD_LR_MULTIPLIER backed off 5.0->3.0, and grad-norm clipping
+(GRAD_CLIP_NORM) before every optimizer step. A NaN loss also now fails
+LOUDLY and immediately (TrainingDivergedError, raised the moment
+torch.isfinite(loss) is False) instead of silently continuing to "train"
+on garbage for the rest of that category's steps -- the previous behavior
+wasted each failing category's full step budget before the problem
+surfaced at eval time.
 
 INHERITED LESSONS (kept verbatim from frida-llm-tpu-sft, do not re-derive)
 ===========================================================================
@@ -108,6 +123,7 @@ import json
 import math
 import time
 import hashlib
+import shutil
 import subprocess
 
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "polars", "peft"])
@@ -202,12 +218,17 @@ LORA_TARGET_MODULES = ["q", "k", "v", "o", "wi_0", "wi_1", "wo"]
 
 # BERTA recipe's own numbers, and the MiniLM continue-SFT fix's numbers.
 LR = 2e-4                  # adapter peak
-# 5.0 (the first value tried) combined with an instant step-0 jump to peak
-# produced loss=nan on every category within the first 50 steps -- fixed by
-# BOTH a short head-specific ramp (see _make_head_lr_lambda) AND gradient
-# clipping (see the training loop) AND backing this off to 3.0 as extra
-# margin, not relying on either fix alone.
-HEAD_LR_MULTIPLIER = 3.0   # head peak = LR * this
+# 5.0 combined with an instant step-0 jump to peak (see
+# _make_head_lr_lambda) is the confirmed root cause of a reproducible
+# early-NaN failure: a real run (frida-percat-lora.log) showed loss=nan
+# already by the FIRST logged step on 15/20 categories, with the other 2
+# of the 17 failures drifting into NaN a bit later once a harder batch
+# hit -- i.e. a freshly-initialised linear head jumping straight to a
+# 5x-multiplied LR with no ramp and no gradient clipping anywhere in the
+# step. Backed off to 3.0 and given its own short ramp, plus clipping
+# added to the step itself (see the training loop) -- not relying on
+# either fix alone.
+HEAD_LR_MULTIPLIER = 3.0
 HEAD_WARMUP_STEPS = 20     # short ramp 0 -> peak, then flat until warmup_steps
 GRAD_CLIP_NORM = 1.0
 WEIGHT_DECAY = 0.01
@@ -267,17 +288,18 @@ def _find_dataset_file(hint, filename):
 
 def _find_resume_adapter_dir(prefer_name="best"):
     """Collects EVERY directory under /kaggle/input containing an
-    adapter_config.json, rather than returning the first hit from os.walk.
+    adapter_config.json, rather than trusting os.walk's first hit.
 
-    Real risk found the hard way: the checkpoint dataset this now resumes
-    from (frida-lora-llm-label-human-deep-head) holds MULTIPLE valid
-    checkpoints side by side -- best/, checkpoint_hour01/ .. hour08+/, all
-    with their own adapter_config.json. os.walk's traversal order is not a
-    documented guarantee, so silently taking "whichever the filesystem
-    listed first" could merge the wrong checkpoint into every specialist
-    with no error, just a worse (or better, by luck) result nobody could
-    explain. Prefer a directory literally named `prefer_name`; if none
-    matches, fail loudly rather than guess."""
+    Real bug found the hard way: the previous version hardcoded a
+    priority path with a typo -- "/kaggle/inputdatasets/..." instead of
+    "/kaggle/input/datasets/..." (missing slash) -- which never exists,
+    so it silently fell through every time to a bare os.walk("/kaggle/
+    input") first-match. With TWO valid adapters now mounted (this SFT
+    checkpoint's own "best", and the older epoch4 checkpoint), which one
+    won was undefined -- the run this exact bug shipped in got lucky, a
+    future one might not. Prefer a directory literally named
+    `prefer_name`; if more than one candidate matches that name, or none
+    do while multiple candidates exist, fail loudly rather than guess."""
     if not os.path.isdir("/kaggle/input"):
         return None
     candidates = []
@@ -286,25 +308,16 @@ def _find_resume_adapter_dir(prefer_name="best"):
             candidates.append(root)
     if not candidates:
         return None
-    # NOTE: a real bug lived here once -- comparing os.path.basename(c)
-    # against prefer_name. c is always the "adapter/" leaf directory itself
-    # (that's what os.walk found adapter_config.json in), so its OWN
-    # basename is always literally "adapter", never "best" or
-    # "checkpoint_hourNN" -- the label lives one level UP, in the PARENT
-    # directory's name. That version raised its own "none is named 'best'"
-    # error even with best/adapter genuinely present in the candidate list,
-    # which is how it was caught: loud and wrong beats silent and wrong, but
-    # still wrong. Fixed to check the parent's name instead.
-    preferred = [c for c in candidates
-                if os.path.basename(os.path.dirname(c.rstrip("/\\"))) == prefer_name]
+    preferred = [c for c in candidates if os.path.basename(c.rstrip("/\\")) == prefer_name]
     if len(candidates) > 1:
-        print(f"[SETUP] {len(candidates)} candidate adapter dirs found under /kaggle/input: "
-              f"{candidates} -- ", end="", flush=True)
-        if not preferred:
+        print(f"[SETUP] {len(candidates)} candidate adapter dirs under /kaggle/input: "
+              f"{candidates}", flush=True)
+        if len(preferred) != 1:
             raise RuntimeError(
-                f"multiple adapter checkpoints present but none is named '{prefer_name}' -- "
-                f"refusing to guess which one to resume. Candidates: {candidates}")
-        print(f"using the one named '{prefer_name}': {preferred[0]}", flush=True)
+                f"multiple adapter checkpoints present but exactly one named "
+                f"'{prefer_name}' was expected (found {len(preferred)}) -- refusing to "
+                f"guess which to resume. Candidates: {candidates}")
+        print(f"[SETUP] using the one named '{prefer_name}': {preferred[0]}", flush=True)
     return preferred[0] if preferred else candidates[0]
 
 
@@ -566,6 +579,57 @@ class FridaCrossEncoderClassifier(nn.Module):
         return self.classifier(cls).view(-1).float()
 
 
+# The already-published dataset holding a verified merge + 3 trained
+# specialists (categories 07/10/14 -- confirmed by directly listing the
+# dataset's files, NOT by trusting the "8, 10, 14" recalled verbally;
+# the actual successful categories are 07/10/14). Its own internal
+# layout is frida_percat_lora/{merged_base, cat{NN}_best, cat{NN}_last}/,
+# i.e. a direct publish of an earlier run's own OUTPUT_DIR.
+EXTERNAL_CHECKPOINTS_HINT = (
+    "/kaggle/input/datasets/maxamsecret/"
+    "frida-with-merged-lora-and-8-10-14-cat-loras/frida_percat_lora"
+)
+
+
+def _find_external_checkpoints_root():
+    if os.path.isdir(EXTERNAL_CHECKPOINTS_HINT):
+        return EXTERNAL_CHECKPOINTS_HINT
+    if os.path.isdir("/kaggle/input"):
+        for root, dirs, _files in os.walk("/kaggle/input"):
+            if "merged_base" in dirs and any(d.endswith("_best") for d in dirs):
+                return root
+    return None
+
+
+def _find_external_merged_base_dir():
+    root = _find_external_checkpoints_root()
+    if root is None:
+        return None
+    candidate = os.path.join(root, "merged_base")
+    return candidate if os.path.isfile(os.path.join(candidate, "config.json")) else None
+
+
+def _find_external_category_checkpoint(cat_id):
+    """Returns the external dataset's cat{cat_id:02d}_best/ dir IF it has a
+    real (non-null) val_pr_auc in its own train_state.json, else None --
+    the same explicit-null-means-unvalidated convention save_checkpoint
+    itself uses, so a checkpoint that merely exists but never finished
+    validating (or was itself a NaN casualty saved under _last) can never
+    be mistaken for a good one."""
+    root = _find_external_checkpoints_root()
+    if root is None:
+        return None
+    cat_dir = os.path.join(root, f"cat{cat_id:02d}_best")
+    state_path = os.path.join(cat_dir, "train_state.json")
+    if not os.path.isfile(state_path):
+        return None
+    with open(state_path) as f:
+        state = json.load(f)
+    if state.get("val_pr_auc") is None:
+        return None
+    return cat_dir, state["val_pr_auc"]
+
+
 def merge_and_save_base(resume_dir):
     """Merges the validated general adapter into the base weights and writes
     the result to MERGED_BASE_DIR *before any training happens*.
@@ -575,10 +639,22 @@ def merge_and_save_base(resume_dir):
     session is cancelled or hard-capped, so a crash three hours into
     training still leaves these weights recoverable.
 
-    Idempotent -- a re-run that finds a finished merge reuses it."""
+    Idempotent -- a re-run that finds a finished merge reuses it. Also
+    reuses the merge already published in the EXTERNAL 8/10/14-checkpoint
+    dataset when present, per direct instruction ('Mergенные веса Frida...
+    будут использоваться') -- the merge is deterministic given the same
+    adapter, but copying ~15s of already-done work is still cheaper and
+    removes any chance of a subtly different re-merge."""
     marker = os.path.join(MERGED_BASE_DIR, "config.json")
     if os.path.isfile(marker):
         print(f"[{_elapsed():8.1f}s][MERGE] reusing existing merge at {MERGED_BASE_DIR}", flush=True)
+        return MERGED_BASE_DIR
+
+    external_merge_dir = _find_external_merged_base_dir()
+    if external_merge_dir is not None:
+        print(f"[{_elapsed():8.1f}s][MERGE] reusing already-published merge from "
+              f"{external_merge_dir} (not re-merging)", flush=True)
+        shutil.copytree(external_merge_dir, MERGED_BASE_DIR)
         return MERGED_BASE_DIR
 
     print(f"[{_elapsed():8.1f}s][MERGE] merging {resume_dir} into base weights ...", flush=True)
@@ -649,6 +725,21 @@ def build_specialist_model(device, rank, merged_dir):
     return model, hidden_dim
 
 
+class TrainingDivergedError(RuntimeError):
+    """Raised the moment a step's loss is non-finite. Deliberately a
+    DIFFERENT exception type than the generic ones the step-level
+    try/except already tolerates (a genuinely transient/recoverable
+    single-step glitch) -- see the training loop for how this is let
+    through instead of being silently caught and skipped like an ordinary
+    failed step. Per direct instruction: a NaN loss must fail loudly with
+    a clear error, not silently keep "training" on garbage for the rest
+    of that category's ~600 steps only to discover the problem at eval
+    time (average_precision_score raising on NaN predictions) -- which is
+    exactly what the previous version did, and it also wasted real TPU
+    wall-clock: every one of the 17 failing categories in the real run
+    burned its full step budget before failing."""
+
+
 def reset_specialist_(model, seed):
     """Returns the adapter + head to a fresh initialisation, in place.
 
@@ -680,18 +771,18 @@ def make_param_groups(model):
 
 
 def _make_head_lr_lambda(warmup_steps, total_steps, min_ratio):
-    """Head ramps to its (higher) peak over a SHORT warmup (HEAD_WARMUP_STEPS,
-    much shorter than the adapter's own warmup_steps), then holds that peak
-    flat until the adapter's warmup ends, then joins the same cosine decay.
+    """Head ramps to its (higher) peak over a SHORT warmup
+    (HEAD_WARMUP_STEPS, much shorter than the adapter's own warmup_steps),
+    then holds that peak flat until the adapter's own warmup ends, then
+    joins the same cosine decay.
 
-    NOT an instant jump to peak at step 0 -- that was tried first and
-    produced loss=nan from the very first logged step (50/600) on every
-    category, reproducibly. A step-0 jump to a 5x-multiplied LR on a
-    freshly-initialised linear head has no gradient history to scale
-    against; the first real gradient can be large relative to a random
-    init, and an un-ramped, unclipped LR that size is enough to blow the
-    logits up in one step. A short ramp (still much faster than the
-    adapter's) plus gradient clipping (see the training loop) fixed it."""
+    NOT an instant jump to peak at step 0 -- that was the shipped version
+    and produced loss=nan from the very first logged step on most
+    categories, reproducibly (see HEAD_LR_MULTIPLIER's own comment for the
+    real evidence). A step-0 jump to a multiplied LR on a freshly
+    -initialised linear head has no gradient history to scale against; a
+    short ramp (still much faster than the adapter's) plus gradient
+    clipping in the training loop fixes it."""
     head_warmup = max(1, min(HEAD_WARMUP_STEPS, warmup_steps))
 
     def lr_lambda(step):
@@ -1088,6 +1179,25 @@ def _mp_fn(index):
                                f"session -- skipping", force=True)
             continue
 
+        # Reuse an already-good checkpoint from the external dataset (per
+        # direct instruction: categories that already trained cleanly --
+        # 07/10/14 in the real run this fixes -- should be copied forward,
+        # not retrained). Trusted only if val_pr_auc is a real number, not
+        # the explicit null a NaN-failed category's own _last save would
+        # carry -- so a category that merely LOOKS present externally can
+        # never be silently treated as good.
+        external = _find_external_category_checkpoint(cat_id)
+        if external is not None and rank == 0:
+            ext_dir, ext_val = external
+            dest_dir = os.path.join(OUTPUT_DIR, f"{label_prefix}_best")
+            _log(rank, "REUSE", f"[{cat_id:02d}] {cat_name}: already trained externally "
+                                f"(val_pr_auc={ext_val:.4f}) -- copying forward instead of "
+                                f"retraining: {ext_dir} -> {dest_dir}", force=True)
+            shutil.copytree(ext_dir, dest_dir)
+            results[cat_name] = float(ext_val)
+        if external is not None:
+            continue
+
         train_frame, val_frame = train_by_cat[cat_id], val_by_cat[cat_id]
         n_train = len(train_frame["label"])
         if n_train < total_batch:
@@ -1142,17 +1252,38 @@ def _mp_fn(index):
                                     torch.full_like(per_sample, HUMAN_WEIGHT),
                                     torch.ones_like(per_sample))
                     loss = (per_sample * w).sum() / w.sum()
+                    # FAIL LOUD, not silently: BCEWithLogitsLoss does not
+                    # raise on NaN, so without this check a diverged run
+                    # would keep computing garbage for the rest of the
+                    # category's steps and only surface at eval time. This
+                    # check is cheap (one XLA scalar sync via .item(), same
+                    # cost class as the existing loss.item() logging below)
+                    # and catches it the moment it happens instead.
+                    if not torch.isfinite(loss).item():
+                        raise TrainingDivergedError(
+                            f"[{cat_id:02d}] {cat_name}: loss is {loss.item()} (non-finite) "
+                            f"at step {global_step + 1}/{total_steps}")
                     loss.backward()
-                    # Added after a real NaN: see HEAD_LR_MULTIPLIER's comment
-                    # and _make_head_lr_lambda's docstring for the full story.
-                    # Clips across BOTH param groups together (one global
-                    # norm), matching clip_grad_norm_'s own default behavior.
+                    # Added after the same real NaN: clips across BOTH param
+                    # groups together (one global norm), matching
+                    # clip_grad_norm_'s own default behavior.
                     torch.nn.utils.clip_grad_norm_(
                         [p for g in optimizer.param_groups for p in g["params"]],
                         GRAD_CLIP_NORM)
                     xm.optimizer_step(optimizer)
                     scheduler.step()
                     global_step += 1
+                except TrainingDivergedError:
+                    # Let this one through -- caught at the CATEGORY level
+                    # below, not swallowed here as "just another skipped
+                    # step". Cleans up the same way a skipped step would.
+                    try:
+                        del logits, per_sample, loss
+                    except NameError:
+                        pass
+                    optimizer.zero_grad(set_to_none=True)
+                    gc.collect()
+                    raise
                 except Exception as e:
                     _log(rank, "WARN", f"step failed and was skipped: {type(e).__name__}: {e}",
                          force=True)

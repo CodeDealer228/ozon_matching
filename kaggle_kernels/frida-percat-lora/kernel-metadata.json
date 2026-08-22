@@ -11,7 +11,8 @@
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
     "maxamsecret/frida-tokenize-items-v3",
-    "maximmarkovbb/frida-lora-llm-label-human-deep-head"
+    "maximmarkovbb/frida-lora-llm-label-human-deep-head",
+    "maxamsecret/frida-with-merged-lora-and-8-10-14-cat-loras"
   ],
   "competition_sources": [],
   "kernel_sources": [],
