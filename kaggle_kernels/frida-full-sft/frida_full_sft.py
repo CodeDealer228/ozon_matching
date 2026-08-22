@@ -136,6 +136,231 @@ kernel in this project)
     ends, same guarantee every other checkpoint in this project's history
     has leaned on.
 
+REAL CRASH (2026-08-21/22), AND WHAT ACTUALLY CAUSED IT
+===========================================================================
+A real run at PER_CORE_TRAIN_BATCH=48 died with "XLA:TPU compile permanent
+error. Ran out of memory in memory space hbm. Used 16.62G of 15.75G hbm.
+Exceeded hbm capacity by 888.03M." The traceback (see
+_mp_fn -> `for step, batch in enumerate(mp_loader)` -> torch_xla's OWN internal
+`torch_xla.sync()` call inside parallel_loader.py's next()) proves this was
+the FIRST TRAINING step's own forward+backward compile --
+NOT eval. Eval was never reached (do_full_checkpoint only runs at an epoch
+boundary, tens of minutes away). The "Largest program allocations" in the
+error were 20+ separate 216MB f32[1152,192,192] buffers, all XLA label
+`remat3`/`remat4` fusions -- the backward-pass gradient-checkpoint RECOMPUTE
+buffers, one cluster per encoder layer, which is exactly what
+`gradient_checkpointing_enable()` trades for. An earlier hypothesis (now
+corrected) assumed adding the second llm_val eval pass caused this
+regression; it did not -- the crash is upstream of any eval code, on plain
+training alone, at this batch/seq_len/attn_implementation combination.
+
+`attn_implementation="eager"` was deliberately kept (not switched to
+`sdpa`) despite being the obvious memory lever here: frida-nan-diagnose
+already tested "eager" as a NaN-bug hypothesis on this exact model family
+and it did NOT fix or cause the NaN bug either way (the real NaN fix was
+autocast-inside-forward, unrelated) -- so `eager` is inert leftover
+convention, not a validated-safe choice, and every other FRIDA training
+kernel in this project uses it too. Switching it for a memory win here
+would be the FIRST time this project runs T5EncoderModel training under
+sdpa on TPU -- an unvalidated change on a real quota-burning run, against
+this project's own "don't auto-probe / don't guess on TPU" rule. Left
+untouched; PER_CORE_TRAIN_BATCH lowered instead (a small, well-precedented,
+purely quantitative change -- see the constant's own comment for the exact
+scaling math from the real 888MB overage).
+
+SECOND REAL CRASH (v6, same day): batch=40 STILL OOM'd -- the smoke test
+caught it in ~6.5 minutes, exactly as designed, instead of hours into a
+real run. Different PJRT error shape this time ("RESOURCE_EXHAUSTED: Error
+loading program: Attempting to reserve 9.83G... There are 9.05G free"),
+surfacing at the smoke test's own `loss.item()` call rather than at
+`mark_step()` itself -- torch_xla's mark_step() enqueues device execution
+asynchronously and returns immediately; a device-side failure can only
+surface at the next call that blocks for a real value, which `.item()` is
+and `mark_step()` alone is not. The implied ~6.7G already resident at that
+point is roughly double the first crash's ~3.34G "fixed" estimate --
+consistent with full fine-tuning's per-parameter gradient buffers (one
+fp32 grad per fp32 weight, another ~3.3G) still being resident right after
+backward, a cost the first crash's proportional-scaling estimate did not
+isolate separately. Since two proportional estimates in a row (64->48,
+48->40) both still underestimated the real cost, PER_CORE_TRAIN_BATCH was
+halved outright this time (40->20) rather than re-deriving a third
+proportional guess from noisier data -- see the constant's own comment.
+
+THIRD REAL CRASH (v7, same day): NOT an OOM -- 2 of 8 replicas vanished,
+survivors got stuck permanently retrying a broken collective state
+===========================================================================
+batch=20 got well past the smoke test and into real training (the failure
+surfaced ~2500s in) -- but `kaggle kernels output`'s retained log for this
+run starts ONLY at that ~2500s mark: every earlier line (setup, smoke test,
+CONFIG, the first ~40 minutes of real training) is gone. The cause is the
+crash itself: from ~2500s onward, EVERY subsequent training step on every
+surviving replica failed identically with
+`AttributeError: module 'torch' has no attribute 'xla'` (raised inside
+`model()`'s own `torch.autocast("xla", ...)` call) -- and the existing
+per-step except-handler printed a "step failed and was skipped" line, on
+EVERY rank, for EVERY one of ~6,700 consecutive failed steps over the next
+~14 minutes, with no circuit breaker. That flood is almost certainly what
+evicted the earlier, actually-diagnostic log content from Kaggle's
+retention -- a real, self-inflicted loss of evidence, not just noise.
+
+What the surviving evidence DOES show: ranks 1 and 6 (of 8) never appear
+ANYWHERE in the log, not even once -- they were already gone by the time
+this failure mode started. `xm.optimizer_step` is a cross-core all-reduce;
+losing 2 of 8 participants would stall it on the remaining 6 until some
+internal PJRT/XLA recovery kicked in, which is a plausible mechanism for
+the survivors ending up in a broken-but-not-fully-dead state where
+`torch`'s `xla` binding (normally installed by `import torch_xla`'s own
+side effects) is no longer present. WHY ranks 1 and 6 died is NOT
+recoverable from this log -- whatever they printed, if anything, was in the
+portion the flood evicted. This is a real, currently-unresolved gap.
+
+Two changes, given what IS actionable:
+  1. The per-step failure log moved to rank==0-only (was `force=True`,
+     printing from every rank) and now reports a running
+     "N/MAX_CONSECUTIVE_STEP_FAILURES consecutive" count instead of a bare
+     message -- an 8x cut to the flood on its own, whatever the cause.
+  2. MAX_CONSECUTIVE_STEP_FAILURES=20: a step failure resets the counter to
+     0 on any LATER success, but N consecutive failures now raises loudly
+     instead of retrying for the rest of the session. A failure mode that
+     repeats identically 20 times in a row is not transient -- it is not
+     going to resolve itself on attempt 21, 200, or 6,700, and the cost of
+     being wrong (stopping a genuinely-recoverable run early) is a full,
+     clean traceback plus a relaunch, versus the cost of being right this
+     time: 14 minutes of pure waste and the evidence needed to ever
+     diagnose it destroyed in the process.
+`torch_xla.sync()` (this session's earlier replacement for the deprecated
+`xm.mark_step()`, done purely to silence a cosmetic DeprecationWarning) was
+reverted back to `xm.mark_step()` everywhere in this file as a precaution:
+it is provably NOT the raise site for this specific crash (every call site
+sits outside the try/except that caught it, and the ones inside functions
+that DID run first -- the smoke test, `evaluate()` -- either succeeded or
+were never reached), but it is also new, unproven code with zero track
+record in this project, while `xm.mark_step()` has an extensive one across
+many real successful TPU runs here. Removing an unproven variable during a
+hard-to-diagnose infra-level failure is cheap insurance, not a confirmed
+fix -- framed honestly as that, not as "found and fixed the root cause."
+
+FOURTH REAL CRASH (v8, same day): the circuit breaker worked -- and gave a
+full, clean, undamaged log for the first time, with the real answer in it
+===========================================================================
+v8's circuit breaker + rank-0-only logging did exactly their job: instead
+of ~6,700 duplicate lines evicting the evidence, the log stayed intact
+end-to-end, the run stopped itself after exactly 20 consecutive failures
+(~13s of wasted wall-clock, not 14 minutes), and the real traceback was
+sitting right there:
+
+    torch/utils/checkpoint.py:1499 _checkpoint_without_reentrant_generator
+      -> torch/utils/checkpoint.py:93 _get_device_module(device_type)
+      -> device_module = getattr(torch, device)   # device="xla"
+      -> AttributeError: module 'torch' has no attribute 'xla'
+
+This is PyTorch's own NON-reentrant checkpoint implementation (HF's
+`gradient_checkpointing_enable()` default) trying to fetch a per-device RNG
+helper via `torch.<device_type>` -- a pattern PyTorch core supports for its
+own backends (`torch.cuda`, `torch.mps`, ...) but that `torch_xla` never
+registers itself under (`torch.xla` genuinely does not exist on this
+image's stack). A real, previously-unknown incompatibility between this
+project's first-ever full-fine-tune-with-gradient-checkpointing attempt and
+this exact torch/torch_xla/transformers version triplet -- every other
+FRIDA kernel in this project trains via LoRA, where the base model is
+frozen and gradient checkpointing was never exercised the same way.
+
+Puzzling wrinkle, not fully explained: the smoke test's own train step (an
+IDENTICAL `model(...)` + `.backward()` call, same code, same device, run
+moments earlier) printed a real, distinct loss for all 8 ranks --
+`_get_device_module("xla")` did NOT raise there, only on the first REAL
+`mp_loader`-sourced batch immediately after. Whatever the exact trigger
+(some difference between a hand-built synthetic batch and an
+`MpDeviceLoader`-sourced one that the smoke test does not reproduce), the
+underlying bug and its standard fix do not depend on understanding it: pass
+`gradient_checkpointing_kwargs={"use_reentrant": True}` to
+`gradient_checkpointing_enable()`, which selects PyTorch's OLDER reentrant
+checkpoint implementation. That one manages RNG state via
+`torch.random.fork_rng`-style APIs instead of a per-backend device module
+lookup, so it never touches this code path at all. The one real constraint
+reentrant-mode checkpointing has -- at least one input to the checkpointed
+function must have `requires_grad=True`, or backward silently no-ops
+through it -- is already satisfied here: hidden_states flowing between
+layers inherit `requires_grad=True` from the (fully trainable, per this
+kernel's own full-FT design) embedding weights.
+
+FIFTH REAL CRASH (2026-08-22): the FOURTH crash's fix, and its own
+reasoning, were both wrong -- the IDENTICAL AttributeError recurred
+===========================================================================
+A real run on the "fixed" (use_reentrant=True) code crashed again with the
+exact same `AttributeError: module 'torch' has no attribute 'xla'`. This
+time the traceback proves reentrant mode WAS genuinely active when it
+happened -- it runs through `torch/utils/checkpoint.py:488 checkpoint()`
+-> `CheckpointFunction.apply` -> `CheckpointFunction.forward` (line 241)
+-> `_get_device_module(ctx.device_type)` -> `getattr(torch, "xla")`. The
+FOURTH crash's docstring claimed "[reentrant] manages RNG state without
+that device-module lookup, sidestepping the bug entirely" -- that claim
+was incorrect for this torch version: `_get_device_module` is called by
+BOTH the reentrant and non-reentrant checkpoint implementations whenever
+`preserve_rng_state=True`, which is the default in both, and
+`use_reentrant=True` alone never overrode it because it was never the
+active default in the first place -- the kwarg only selects WHICH
+implementation runs the RNG save/restore, not WHETHER it runs.
+
+The corrected fix, in two independent parts (either alone would likely
+have been sufficient; both are applied together as defense in depth
+rather than re-litigating which one "really" fixed it on a third
+quota-burning attempt):
+  1. `preserve_rng_state=False` added alongside `use_reentrant=True` --
+     removes the actual need for the device-module lookup in either mode,
+     since its only purpose is saving/restoring accelerator RNG state
+     across the checkpoint boundary, which this kernel does not depend on
+     (checkpointing's recompute-in-backward already tolerates dropout
+     drawing different values than the original forward pass -- that
+     tolerance is inherent to what checkpointing trades away for memory,
+     everywhere it is used at this project's scale).
+  2. `torch.xla = torch_xla` registered once at import time (see the
+     import block), so `getattr(torch, "xla")` succeeds regardless of
+     which code path calls it -- covers any OTHER place in this dependency
+     stack that might make the same assumption PyTorch's own
+     `torch.cuda`/`torch.mps` support, which this crash's root cause shows
+     `torch_xla` does not provide for itself.
+
+VALIDATION REWRITE: SHARDED ACROSS ALL 8 CORES, ONE FIXED SHAPE, all_gather
+===========================================================================
+The old `make_eval_loader`/`evaluate` (byte-identical copy from
+frida-llm-tpu-sft, see README.md's "Eval на TPU без шардинга" section) ran
+the FULL val set independently on all 8 cores (no DistributedSampler) and
+compiled a SECOND XLA shape for the ragged last ("remainder") batch. Fixed
+by `make_eval_shard`/`evaluate`:
+  - Each rank gets its own disjoint ~1/8 slice of val (contiguous block
+    partition), padded with wrapped-around duplicate rows so every rank
+    runs the exact SAME number of eval_batch-sized batches -- one shape,
+    one compile, for the whole run (no remainder loader at all).
+  - Padding rows are tracked in a `valid` mask and dropped again before
+    metrics are computed -- they never influence macro_pr_auc.
+  - `xm.all_gather` concatenates every rank's (logits, labels, categories,
+    valid) into an identical full-val tensor on every replica (this val
+    set is ~100K rows, a few MB even gathered 8x over -- not a real memory
+    concern), so `compute_metrics` runs ONCE, on the true full val set, not
+    approximated per-shard. Deterministic: every rank computes the same
+    macro_pr_auc independently; only rank 0's `save_checkpoint` persists.
+  - This also directly speeds up eval ~8x (each core now does 1/8 the
+    forward passes instead of all of them) and removes one whole cold
+    XLA compile (the old ragged remainder shape) from the first checkpoint.
+
+EARLY SMOKE TEST: catch an HBM-fit problem in ~1-2 minutes, not mid-run
+===========================================================================
+Right after the model/optimizer/scheduler are built (before touching any
+real data), `_smoke_test_train_step`/`_smoke_test_eval_step` run ONE
+synthetic batch through the EXACT same forward+backward (train) and
+forward-only (eval) path, at the real PER_CORE_TRAIN_BATCH/
+PER_CORE_EVAL_BATCH/PAIR_MAX_LENGTH shapes, then force `xm.mark_step()` to
+compile+execute immediately instead of lazily. The train smoke step calls
+`.backward()` then discards gradients via `zero_grad(set_to_none=True)`
+WITHOUT ever calling `xm.optimizer_step` -- backward() only populates
+`.grad` tensors, never mutates `.data`, so the model's real pretrained
+weights are provably bit-for-bit unchanged afterward; Adafactor's own state
+is never initialized by this (state only exists after a real .step() call).
+If either smoke step OOMs, the kernel dies loudly within ~1-2 minutes of
+launch, with a clear log line naming which constant to lower -- instead of
+hours into a real run (exactly what happened here).
+
 TPU LESSONS CARRIED FORWARD (all real, previously hit -- see
 frida-percat-lora / frida-llm-tpu-sft / berta-llm-tpu-sft docstrings for the
 original incidents)
@@ -150,6 +375,11 @@ original incidents)
   7. Eval wrapped in try/except that cannot kill the run.
   8. Checkpoint hygiene: own directory per save, explicit null val score,
      wall-clock (not epoch) checkpoint cadence.
+  9. Eval sharded across all replicas + all_gather'd, one fixed padded
+     shape -- never re-run the full val set redundantly per core.
+  10. A cheap synthetic smoke test at real batch/seq shapes, right after
+      model construction, before any real data -- fails an HBM-fit problem
+      in minutes, not hours.
 """
 import os
 import sys
@@ -179,6 +409,19 @@ import torch_xla
 import torch_xla.core.xla_model as xm
 from torch_xla import runtime as xr
 import torch_xla.distributed.parallel_loader as pl_xla
+
+# FIFTH REAL CRASH fix, part 1 of 2 -- see the module docstring's own
+# section for the full story. torch_xla never registers itself as a
+# `torch.xla` submodule (unlike torch.cuda/torch.mps), but
+# torch.utils.checkpoint._get_device_module() calls exactly
+# `getattr(torch, "xla")` to resolve it for RNG-state handling --
+# in BOTH the reentrant and non-reentrant checkpoint implementations
+# whenever preserve_rng_state=True (the default), contrary to what the
+# FOURTH REAL CRASH's fix assumed. Registering it here makes that lookup
+# succeed everywhere in the process, regardless of which code path calls
+# it -- a strict superset of the reentrant-only workaround.
+if not hasattr(torch, "xla"):
+    torch.xla = torch_xla
 
 
 # =====================================================================
@@ -238,15 +481,37 @@ LR_MIN_RATIO = 0.05
 HUMAN_WEIGHT = 2.0               # human rows count double vs LLM soft labels
 FOCAL_GAMMA = 2.0                # Lin et al. RetinaNet default; not tuned
 
-# MEASURED, not the original arithmetic estimate: a real push at 64/96
-# OOM'd at XLA COMPILE time (not even the first real step) --
-# "Used 19.05G of 15.75G hbm. Exceeded hbm capacity by 3.30G" -- 1.21x over.
-# 48/72 (64/72 scaled down by that ratio, rounded to a clean number with
-# real margin, not just barely under) is the corrected value. This died
-# cheaply: compile-time OOM costs ~seconds into the run, before touching any
-# real data, exactly the "fail cheap on TPU" property auto-probing would
-# have thrown away.
-PER_CORE_TRAIN_BATCH = 48
+# MEASURED, not the original arithmetic estimate, THREE times now -- each
+# via a real compile-time OOM, the last one caught by the early smoke test
+# in ~6.5 minutes instead of hours in:
+#   64/96: "Used 19.05G of 15.75G hbm. Exceeded by 3.30G" (1.21x over) ->
+#     scaled down to 48/72.
+#   48/72: OOM'd AGAIN, still at compile time, still on the very first real
+#     training step: "Used 16.62G of 15.75G hbm. Exceeded by 888.03M" (only
+#     1.056x over -- eval was never reached). Proportional scaling from
+#     this number gave 44 (exact) / 40 (with margin) -> tried 40.
+#   40/72: OOM'd a THIRD time, caught by the new smoke test at the
+#     `loss.item()` sync (mark_step()'s own device execution is async; the
+#     failure only surfaces at the next blocking read) -- a DIFFERENT PJRT
+#     error shape: "RESOURCE_EXHAUSTED: Error loading program: Attempting
+#     to reserve 9.83G... There are 9.05G free". The ~6.7G already resident
+#     at that point (15.75-9.05) is roughly double the previous crash's
+#     ~3.34G "fixed" estimate -- consistent with full-FT's per-parameter
+#     gradient buffers (another ~3.3G, same size as the params themselves)
+#     still being resident post-backward, which the earlier proportional
+#     estimate did not separately account for. Two proportional estimates
+#     in a row still underestimated the real cost, so this time: a flat
+#     halving (per this project's own "if it OOMs, halve it and relaunch"
+#     TPU policy, stated below) instead of another fragile proportional
+#     guess -- 40 -> 20. If 20 is still not enough, the smoke test will say
+#     so within minutes, at effectively zero quota cost, and this comment
+#     should record that fourth number too rather than being trusted as
+#     final. PER_CORE_EVAL_BATCH is unchanged: eval is forward-only (no
+#     backward, no grad-checkpoint recompute, no persistent gradient
+#     buffers), so it was never the actual cost driver in any of the three
+#     crashes above -- the smoke test's own eval-step check would catch it
+#     directly and separately if that assumption is ever wrong.
+PER_CORE_TRAIN_BATCH = 20
 PER_CORE_EVAL_BATCH = 72
 
 EPOCHS = 3
@@ -255,6 +520,16 @@ MAX_TRAIN_SECONDS = 30600       # 8.5h -- Kaggle's TPU session cap is 9h
 CHECKPOINT_EVERY_SECONDS = 18000  # 5h, weights+optimizer only, no eval (see
                                    # docstring's CHECKPOINT CONTRACT)
 LOG_EVERY_STEPS = 50
+# See docstring's "THIRD REAL CRASH": a real run hit an unrecoverable,
+# permanently-repeating step failure (2 of 8 replicas silently vanished,
+# the survivors' collective ops got stuck in a broken state) and spun
+# uselessly for 14 minutes, logging ~6,700 identical lines from every
+# surviving rank -- enough that Kaggle's own log retention evicted the
+# actually-useful setup/smoke-test/early-training output entirely. A run
+# that fails the SAME way this many times in a row is not going to recover;
+# stop it loudly instead of burning the rest of the session's wall-clock
+# budget on it.
+MAX_CONSECUTIVE_STEP_FAILURES = 20
 
 # 128 measured-and-scaled (see docstring) at seq=192, full-FT+grad-checkpoint
 # -- used ONLY to size the LR schedule's horizon, not as a promise.
@@ -485,21 +760,38 @@ def make_train_loader(frame, caches, pad_id, per_core_batch, num_replicas, rank,
     return loader, sampler
 
 
-def make_eval_loader(frame, caches, pad_id, eval_batch):
-    dataset = PairIndexDataset(frame["scope"], frame["row1"], frame["row2"],
-                               frame["label"], frame["category"])
+def make_eval_shard(frame, num_replicas, rank, eval_batch):
+    """This rank's disjoint ~1/num_replicas slice of `frame` (contiguous
+    block partition), padded with wrapped-around duplicate rows so every
+    replica runs the exact SAME number of eval_batch-sized batches -- one
+    fixed shape for the whole run, no ragged "remainder" batch, no
+    redundant full-val-set-per-core work (see docstring's "VALIDATION
+    REWRITE"). `valid` marks which rows in THIS rank's padded shard are
+    real (True) vs. wraparound padding (False); padding is dropped again
+    after all_gather, before any metric is computed."""
+    n = len(frame["label"])
+    per_replica_batches = max(1, math.ceil(n / (eval_batch * num_replicas)))
+    per_replica_n = per_replica_batches * eval_batch
+    padded_total = per_replica_n * num_replicas
+    idx = np.arange(n)
+    if padded_total > n:
+        pad = padded_total - n
+        idx = np.concatenate([idx, np.arange(pad) % n])
+    valid_full = np.concatenate([np.ones(n, dtype=np.bool_), np.zeros(padded_total - n, dtype=np.bool_)])
+    start, end = rank * per_replica_n, (rank + 1) * per_replica_n
+    shard_idx = idx[start:end]
+    shard = {k: v[shard_idx] for k, v in frame.items()}
+    return shard, valid_full[start:end]
+
+
+def make_eval_loader_sharded(frame, caches, pad_id, eval_batch, num_replicas, rank):
+    shard, shard_valid = make_eval_shard(frame, num_replicas, rank, eval_batch)
+    dataset = PairIndexDataset(shard["scope"], shard["row1"], shard["row2"],
+                               shard["label"], shard["category"])
     collate_fn = make_pair_collate_fn(caches, pad_id, PAIR_MAX_LENGTH)
-    n = len(dataset)
-    n_full = (n // eval_batch) * eval_batch
-    full_loader = DataLoader(torch.utils.data.Subset(dataset, list(range(n_full))),
-                             batch_size=eval_batch, shuffle=False, drop_last=True,
-                             collate_fn=collate_fn, num_workers=2)
-    remainder_loader = None
-    if n_full < n:
-        remainder_loader = DataLoader(torch.utils.data.Subset(dataset, list(range(n_full, n))),
-                                      batch_size=n - n_full, shuffle=False, drop_last=False,
-                                      collate_fn=collate_fn, num_workers=0)
-    return full_loader, remainder_loader
+    loader = DataLoader(dataset, batch_size=eval_batch, shuffle=False, drop_last=True,
+                        collate_fn=collate_fn, num_workers=2)
+    return loader, shard_valid
 
 
 # =====================================================================
@@ -550,7 +842,23 @@ def build_fresh_model(device, rank):
     kernel's batch size is sized against (see module docstring)."""
     model = T5EncoderModel.from_pretrained(MODEL_NAME, dtype=torch.float32,
                                            attn_implementation="eager")
-    model.gradient_checkpointing_enable()
+    # See docstring's "FIFTH REAL CRASH" -- the FOURTH crash's fix
+    # (use_reentrant=True alone) turned out NOT to sidestep
+    # _get_device_module("xla"): a real run crashed again with the
+    # IDENTICAL AttributeError, its traceback going through
+    # CheckpointFunction.apply (proving reentrant mode WAS active).
+    # preserve_rng_state=False removes the actual need for that lookup in
+    # either mode -- it exists purely to save/restore accelerator RNG state
+    # across the checkpoint boundary, which this kernel does not need
+    # (gradient checkpointing's recompute-in-backward already tolerates
+    # dropout drawing different values than the original forward; that is
+    # what checkpointing means everywhere it's used at this project's
+    # scale). Kept use_reentrant=True too and added the torch.xla
+    # registration at import time (see the import block) as defense in
+    # depth -- three independent reasons this exact AttributeError cannot
+    # recur, not reliance on any single one.
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": True, "preserve_rng_state": False})
     hidden_dim = model.config.d_model
     for p in model.parameters():
         p.requires_grad = True
@@ -630,25 +938,179 @@ def compute_metrics(probs, labels, categories, category_names):
     return macro, per_cat
 
 
-def evaluate(model, full_loader, remainder_loader, device, category_names):
+def evaluate(model, loader, valid_mask, device, category_names, world_size):
+    """Every replica runs its own disjoint shard (see make_eval_shard), then
+    xm.all_gather assembles the full padded val set identically on every
+    replica -- this is a COLLECTIVE op, so it must be called uniformly by
+    all ranks (it already is: do_full_checkpoint calls this unconditionally
+    on every rank, same as before). Metrics are computed once the padding
+    is dropped, giving the true macro_pr_auc over the whole val set, not an
+    average of 8 partial per-shard APs (which would be a different, wrong
+    number for a per-category metric with uneven category counts)."""
     model.eval()
     all_logits, all_labels, all_categories = [], [], []
     with torch.no_grad():
-        for loader in (full_loader, remainder_loader):
-            if loader is None:
-                continue
-            for input_ids, attention_mask, batch_labels, batch_categories, _scope in loader:
-                logits = model(input_ids=input_ids.to(device), attention_mask=attention_mask.to(device))
-                all_logits.append(logits.cpu())
-                all_labels.append(batch_labels)
-                all_categories.append(batch_categories)
+        for input_ids, attention_mask, batch_labels, batch_categories, _scope in loader:
+            logits = model(input_ids=input_ids.to(device), attention_mask=attention_mask.to(device))
+            all_logits.append(logits)
+            all_labels.append(batch_labels.to(device))
+            all_categories.append(torch.as_tensor(batch_categories, device=device, dtype=torch.float32))
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
-    categories = np.concatenate(all_categories, axis=0)
-    macro, per_cat = compute_metrics(torch.sigmoid(logits).numpy(), labels.numpy(),
-                                     categories, category_names)
+    categories = torch.cat(all_categories, dim=0)
+    valid = torch.as_tensor(valid_mask, dtype=torch.float32, device=device)
+
+    logits_g = xm.all_gather(logits, dim=0)
+    labels_g = xm.all_gather(labels, dim=0)
+    categories_g = xm.all_gather(categories, dim=0)
+    valid_g = xm.all_gather(valid, dim=0)
+    xm.mark_step()
+
+    keep = valid_g.cpu().numpy() > 0.5
+    probs = torch.sigmoid(logits_g).cpu().numpy()[keep]
+    labels_np = labels_g.cpu().numpy()[keep]
+    categories_np = categories_g.cpu().numpy().astype(np.int64)[keep]
+    macro, per_cat = compute_metrics(probs, labels_np, categories_np, category_names)
     model.train()
-    return {"macro_pr_auc": macro, "per_category": per_cat, "n": len(labels)}
+    return {"macro_pr_auc": macro, "per_category": per_cat, "n": int(keep.sum())}
+
+
+# =====================================================================
+# EARLY SMOKE TEST -- one synthetic batch through the real train and eval
+# paths, at the real shapes, right after the model is built and before any
+# real data is touched (see docstring's "EARLY SMOKE TEST" section). Turns
+# an HBM-fit problem into a ~1-2 minute failure instead of an hours-into-
+# the-run one.
+# =====================================================================
+
+def _make_synthetic_batch(batch_size, pair_max_length, pad_id, vocab_size, n_categories, device):
+    lengths = np.random.randint(pair_max_length // 4, pair_max_length + 1, size=batch_size)
+    input_ids = np.full((batch_size, pair_max_length), pad_id, dtype=np.int64)
+    attention_mask = np.zeros((batch_size, pair_max_length), dtype=np.int64)
+    for i, L in enumerate(lengths):
+        input_ids[i, :L] = np.random.randint(3, vocab_size, size=L)  # skip special ids 0/1/2
+        attention_mask[i, :L] = 1
+    labels = np.random.randint(0, 2, size=batch_size).astype(np.float32)
+    categories = np.random.randint(0, n_categories, size=batch_size).astype(np.int64)
+    scope = np.random.randint(0, 2, size=batch_size).astype(np.int64)
+    return (torch.from_numpy(input_ids).to(device), torch.from_numpy(attention_mask).to(device),
+            torch.from_numpy(labels).to(device), torch.from_numpy(categories).to(device),
+            torch.from_numpy(scope).to(device))
+
+
+def _smoke_test_train_step(model, optimizer, category_weight, device, pad_id, vocab_size,
+                           n_categories, rank):
+    _log(rank, "SMOKE", f"warm-up TRAIN step (batch={PER_CORE_TRAIN_BATCH} seq={PAIR_MAX_LENGTH}) "
+                        f"-- forcing the real forward+backward compile now, before any real data "
+                        f"or wall-clock budget is spent", force=True)
+    t0 = time.perf_counter()
+    input_ids, attention_mask, labels, categories, scope = _make_synthetic_batch(
+        PER_CORE_TRAIN_BATCH, PAIR_MAX_LENGTH, pad_id, vocab_size, n_categories, device)
+    loss = None
+    try:
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(input_ids=input_ids, attention_mask=attention_mask)
+        per_sample = focal_bce_per_sample(logits, labels, FOCAL_GAMMA)
+        w_cat = category_weight[categories]
+        w_human = torch.where(scope == 0, torch.full_like(per_sample, HUMAN_WEIGHT),
+                              torch.ones_like(per_sample))
+        w = w_cat * w_human
+        loss = (per_sample * w).sum() / w.sum()
+        loss.backward()
+        xm.mark_step()  # force compile+execution NOW, at the real memory cost
+    except Exception:
+        _log(rank, "SMOKE", "FAILED during warm-up TRAIN step -- this shape does not fit in HBM. "
+                            "Lower PER_CORE_TRAIN_BATCH (or PAIR_MAX_LENGTH) and relaunch. Nothing "
+                            "real was touched past this point.", force=True)
+        raise
+    finally:
+        # backward() only populates .grad, never mutates a parameter's .data;
+        # xm.optimizer_step was never called, so the model's real pretrained
+        # weights are bit-for-bit unchanged, and Adafactor's own per-tensor
+        # state (only created on its first real .step()) was never touched.
+        optimizer.zero_grad(set_to_none=True)
+    _log(rank, "SMOKE", f"warm-up TRAIN step OK ({time.perf_counter() - t0:.1f}s, "
+                        f"loss={loss.item():.4f}, discarded -- model weights unchanged)", force=True)
+
+
+def _smoke_test_real_loader_batch(model, optimizer, category_weight, device, caches, pad_id,
+                                  train_frame, world_size, rank):
+    """Closes a real, documented gap in the two synthetic smoke tests above:
+    the FIFTH REAL CRASH's own docstring section notes the synthetic train
+    smoke test did NOT reproduce the actual failure -- it succeeded on a
+    hand-built batch, then the identical-looking model call crashed on the
+    very first REAL MpDeviceLoader-sourced batch immediately after,
+    "some difference between a hand-built synthetic batch and an
+    MpDeviceLoader-sourced one" never fully explained. Whatever that
+    difference is, THIS check goes through the exact same
+    make_train_loader -> MpDeviceLoader -> next(iter(...)) path real
+    training uses, at the real batch/seq shape, so it would have caught
+    that specific crash before a single real training step -- instead of
+    ~40 minutes in, as actually happened once already.
+
+    Uses a THROWAWAY loader (epoch=0, never reused) so this cannot disturb
+    the real epoch-1 loader's own sampler state -- constructing a second,
+    independent loader is cheap; getting sampler/epoch bookkeeping subtly
+    wrong to avoid it is not worth the risk."""
+    _log(rank, "SMOKE", "warm-up REAL-LOADER batch -- same make_train_loader -> "
+                        "MpDeviceLoader path real training uses, not a synthetic batch "
+                        "(see docstring's FIFTH REAL CRASH: the synthetic smoke test alone "
+                        "did not catch that one)", force=True)
+    t0 = time.perf_counter()
+    throwaway_loader, _throwaway_sampler = make_train_loader(
+        train_frame, caches, pad_id, PER_CORE_TRAIN_BATCH, world_size, rank, SEED, epoch=0)
+    mp_throwaway = pl_xla.MpDeviceLoader(throwaway_loader, device)
+    loss = None
+    try:
+        input_ids, attention_mask, batch_labels, batch_cats, batch_scope = next(iter(mp_throwaway))
+        batch_labels = batch_labels.to(device)
+        batch_cats_t = torch.as_tensor(batch_cats, device=device)
+        batch_scope = batch_scope.to(device)
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(input_ids=input_ids, attention_mask=attention_mask)
+        per_sample = focal_bce_per_sample(logits, batch_labels, FOCAL_GAMMA)
+        w_cat = category_weight[batch_cats_t]
+        w_human = torch.where(batch_scope == 0, torch.full_like(per_sample, HUMAN_WEIGHT),
+                              torch.ones_like(per_sample))
+        w = w_cat * w_human
+        loss = (per_sample * w).sum() / w.sum()
+        loss.backward()
+        xm.mark_step()
+    except Exception:
+        _log(rank, "SMOKE", "FAILED during warm-up REAL-LOADER batch -- this is the exact "
+                            "path/shape real training uses, so this failure WOULD have "
+                            "recurred mid-run. Nothing beyond this point was touched.",
+             force=True)
+        raise
+    finally:
+        # Same guarantee as the synthetic smoke test: backward() only
+        # populates .grad, xm.optimizer_step was never called, so real
+        # pretrained weights are bit-for-bit unchanged.
+        optimizer.zero_grad(set_to_none=True)
+        del throwaway_loader, mp_throwaway
+        gc.collect()
+    _log(rank, "SMOKE", f"warm-up REAL-LOADER batch OK ({time.perf_counter() - t0:.1f}s, "
+                        f"loss={loss.item():.4f}, discarded -- model weights unchanged)",
+         force=True)
+
+
+def _smoke_test_eval_step(model, device, pad_id, vocab_size, n_categories, eval_batch, rank):
+    _log(rank, "SMOKE", f"warm-up EVAL step (batch={eval_batch} seq={PAIR_MAX_LENGTH})", force=True)
+    t0 = time.perf_counter()
+    input_ids, attention_mask, labels, categories, scope = _make_synthetic_batch(
+        eval_batch, PAIR_MAX_LENGTH, pad_id, vocab_size, n_categories, device)
+    model.eval()
+    try:
+        with torch.no_grad():
+            model(input_ids=input_ids, attention_mask=attention_mask)
+            xm.mark_step()
+    except Exception:
+        _log(rank, "SMOKE", "FAILED during warm-up EVAL step -- this shape does not fit in HBM. "
+                            "Lower PER_CORE_EVAL_BATCH and relaunch.", force=True)
+        raise
+    finally:
+        model.train()
+    _log(rank, "SMOKE", f"warm-up EVAL step OK ({time.perf_counter() - t0:.1f}s)", force=True)
 
 
 # =====================================================================
@@ -833,8 +1295,9 @@ def _mp_fn(index):
     model, hidden_dim = build_fresh_model(device, rank)
     total_batch = PER_CORE_TRAIN_BATCH * world_size
     _log(rank, "BATCH", f"per_core_train={PER_CORE_TRAIN_BATCH} per_core_eval={PER_CORE_EVAL_BATCH} "
-                        f"total_train_batch={total_batch} (arithmetic estimate, not measured -- "
-                        f"see module docstring)", force=True)
+                        f"total_train_batch={total_batch} (scaled from a real compile-time OOM at "
+                        f"batch=48, see module docstring's PER_CORE_TRAIN_BATCH comment -- verified "
+                        f"below by the smoke test before any real data is touched)", force=True)
 
     optimizer = Adafactor(make_param_groups(model), scale_parameter=False,
                           relative_step=False, warmup_init=False, weight_decay=WEIGHT_DECAY)
@@ -855,18 +1318,39 @@ def _mp_fn(index):
                         f"({100 * total_steps / max(epoch_steps, 1):.1f}% of {EPOCHS} epochs) "
                         f"warmup={warmup_steps}", force=True)
 
-    val_full_loader, val_remainder_loader = make_eval_loader(val_frame, caches, pad_id,
-                                                              PER_CORE_EVAL_BATCH)
+    # Early smoke test (see docstring's "EARLY SMOKE TEST") -- one real
+    # forward+backward and one real forward-only pass at the exact real
+    # shapes, forced to compile+execute NOW via xm.mark_step(), before any
+    # real data is loaded. Turns an HBM-fit problem into a ~1-2 minute
+    # failure instead of the hours-into-the-run one this kernel actually hit.
+    vocab_size = model.encoder.config.vocab_size
+    n_categories = len(category_vocab)
+    _smoke_test_train_step(model, optimizer, category_weight, device, pad_id, vocab_size,
+                           n_categories, rank)
+    _smoke_test_eval_step(model, device, pad_id, vocab_size, n_categories,
+                         PER_CORE_EVAL_BATCH, rank)
+    # See docstring's FIFTH REAL CRASH -- the two synthetic checks above did
+    # not catch that one; this one goes through the real data-loading path
+    # and would have.
+    _smoke_test_real_loader_batch(model, optimizer, category_weight, device, caches, pad_id,
+                                  train_frame, world_size, rank)
+
+    # Sharded across all `world_size` cores + all_gather'd inside evaluate()
+    # -- see docstring's "VALIDATION REWRITE". One fixed padded shape per
+    # frame, no ragged remainder loader.
+    val_loader, val_valid_mask = make_eval_loader_sharded(val_frame, caches, pad_id,
+                                                          PER_CORE_EVAL_BATCH, world_size, rank)
     # "Использовать llm-val не вместо human-val, а параллельно" -- a second,
     # independent loader/eval, never a replacement for the human one above.
-    llm_val_full_loader, llm_val_remainder_loader = make_eval_loader(
-        llm_val_frame, caches, pad_id, PER_CORE_EVAL_BATCH)
+    llm_val_loader, llm_val_valid_mask = make_eval_loader_sharded(
+        llm_val_frame, caches, pad_id, PER_CORE_EVAL_BATCH, world_size, rank)
 
     global_step = 0
     best_val = -1.0
     train_start = time.perf_counter()
     last_checkpoint_at = 0.0
     stopped = False
+    consecutive_step_failures = 0
 
     def do_quiet_save(reason, epoch_num):
         try:
@@ -880,7 +1364,14 @@ def _mp_fn(index):
     def do_full_checkpoint(epoch_num, label):
         nonlocal best_val
         try:
-            m = evaluate(model, val_full_loader, val_remainder_loader, device, category_vocab)
+            # evaluate() calls xm.all_gather -- a COLLECTIVE, so every rank
+            # must reach it. This is safe under the SAME conditions the
+            # early smoke test already validated (identical model, identical
+            # shapes, identical synthetic-proven memory budget on every
+            # rank) -- a genuine OOM here would hit all 8 ranks in lock-step,
+            # not just one, so there is no new partial-failure/hang mode
+            # beyond what the smoke test already ruled out.
+            m = evaluate(model, val_loader, val_valid_mask, device, category_vocab, world_size)
             improved = m["macro_pr_auc"] > best_val
             if improved:
                 best_val = m["macro_pr_auc"]
@@ -895,11 +1386,11 @@ def _mp_fn(index):
             # substitute for it (per direct instruction). Its own failure
             # must not take down the human-val checkpoint above, so it gets
             # its own try/except and a None fallback rather than sharing the
-            # outer one.
+            # outer one. (Same collective caveat as above applies here too.)
             llm_m = None
             try:
-                llm_m = evaluate(model, llm_val_full_loader, llm_val_remainder_loader, device,
-                                 category_vocab)
+                llm_m = evaluate(model, llm_val_loader, llm_val_valid_mask, device,
+                                 category_vocab, world_size)
                 _log(rank, "METRICS", f"{label}: llm_val_macro_pr_auc={llm_m['macro_pr_auc']:.4f} "
                                       f"n_llm_val={llm_m['n']}", force=True)
                 if rank == 0:
@@ -957,14 +1448,33 @@ def _mp_fn(index):
                 xm.optimizer_step(optimizer)
                 scheduler.step()
                 global_step += 1
+                consecutive_step_failures = 0
             except Exception as e:
-                _log(rank, "WARN", f"step failed and was skipped: {type(e).__name__}: {e}", force=True)
+                consecutive_step_failures += 1
+                # rank==0 only (not force=True): a permanently-repeating
+                # failure used to log identically from every surviving rank,
+                # on every single step -- see MAX_CONSECUTIVE_STEP_FAILURES'
+                # own comment for the real incident this caused (thousands
+                # of duplicate lines evicting the actually-useful log
+                # content). The circuit breaker below is what actually
+                # bounds this; rank-0-only just keeps a RECOVERABLE failure
+                # from being needlessly 8x-amplified in the meantime.
+                _log(rank, "WARN", f"step failed and was skipped "
+                                   f"({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES} "
+                                   f"consecutive): {type(e).__name__}: {e}")
                 try:
                     del logits, per_sample, loss
                 except NameError:
                     pass
                 optimizer.zero_grad(set_to_none=True)
                 gc.collect()
+                if consecutive_step_failures >= MAX_CONSECUTIVE_STEP_FAILURES:
+                    raise RuntimeError(
+                        f"[rank{rank}] {consecutive_step_failures} consecutive training steps "
+                        f"failed with the same class of error ({type(e).__name__}: {e}) -- this is "
+                        f"not a transient/recoverable failure, stopping instead of spinning for the "
+                        f"rest of the session's wall-clock budget. See docstring's THIRD REAL CRASH."
+                    ) from e
                 continue
 
             if global_step % LOG_EVERY_STEPS == 0:
