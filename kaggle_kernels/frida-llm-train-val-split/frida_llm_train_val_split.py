@@ -3,6 +3,19 @@ Builds a real, no-leak LLM-label train/val split, retroactively -- and
 publishes it as a Kaggle dataset so both LLM-training kernels
 (frida-percat-lora, frida-full-sft) can reference it going forward.
 
+v2 (per direct instruction): TRAIN NOW COVERS EVERY ROW NOT IN VAL, not
+just the reproduced 1,000,000-row subsample. frida-percat-lora's v6 trains
+each category's specialist on the WHOLE llm-train portion for that
+category, not a fixed subsample -- so "train" now means "everything not
+held out for val" (~11.09M rows), not "the original 1M". The stratification
+methodology for BOTH halves is UNCHANGED from v1 (see "STRATIFICATION"
+below) -- v2 only changes what happens to the rows that used to be
+discarded as "unused". Steps 1 and 2 (reproduce the exact 1M, then draw
+100K val exclusively from what's left) are untouched byte-for-byte, so the
+original 1M stays in train and val stays exactly what it already was --
+"чтобы не переобучать адаптеры" (so the adapters already trained on those
+exact rows are never retroactively leaked against).
+
 WHY RETROACTIVE
 ===========================================================================
 The original plan (per direct instruction) was: split matches_llm.parquet
@@ -319,28 +332,29 @@ def main():
     assert len(overlap) == 0, f"LEAK: {len(overlap)} rows appear in both train and val"
     _log("VERIFY", f"train/val overlap: {len(overlap)} (must be 0)")
 
-    # ---- verification report: positive rate, per category, train vs val
-    # vs the ORIGINAL full pool for that category (criteria 3+4 are
-    # consequences to VERIFY, not separate sampling knobs -- see docstring) ----
-    llm_pd["split"] = "unused"
-    llm_pd.loc[train_sel, "split"] = "train"
+    # ---- v2: split assignment -- val is EXACTLY the same 100K as v1; train
+    # is now EVERYTHING ELSE (not just the reproduced 1M). The original 1M's
+    # own row identities are untouched by this change -- is_train (from step
+    # 1) is a strict SUBSET of the new, larger train assignment, so every
+    # row that lands in train.orig also lands in train.v2, unconditionally.
+    llm_pd["split"] = "train"
     llm_pd.loc[val_sel, "split"] = "val"
     llm_pd["label"] = (llm_pd["target"] >= 0.5).astype(np.int8)
+    llm_pd["in_original_1m"] = is_train
 
     id_to_name = {i: n for i, n in enumerate(category_vocab)}
     per_cat_rows = []
     for c in range(len(category_vocab)):
         full_mask = cat_id == c
-        tr_mask = (cat_id == c) & is_train
-        va_mask = np.zeros(len(llm_pd), dtype=bool)
-        va_mask[val_sel] = True
-        va_mask &= (cat_id == c)
+        tr_mask = full_mask & (llm_pd["split"] == "train").to_numpy()
+        va_mask = full_mask & (llm_pd["split"] == "val").to_numpy()
         row = {
             "category": id_to_name[c],
             "pos_rate_full_pool": float(llm_pd.loc[full_mask, "label"].mean()) if full_mask.any() else None,
             "pos_rate_train": float(llm_pd.loc[tr_mask, "label"].mean()) if tr_mask.any() else None,
             "pos_rate_val": float(llm_pd.loc[va_mask, "label"].mean()) if va_mask.any() else None,
             "n_train": int(tr_mask.sum()), "n_val": int(va_mask.sum()),
+            "n_train_from_original_1m": int((tr_mask & is_train).sum()),
         }
         per_cat_rows.append(row)
     overall_pos_full = float(llm_pd["label"].mean())
@@ -352,14 +366,29 @@ def main():
                    f"val={overall_pos_val:.4f}")
     _log("VERIFY", f"max per-category |val - full_pool| pos_rate drift: {max_drift:.4f}")
 
+    # The one guarantee this whole v2 change exists to preserve, checked
+    # explicitly rather than assumed: every row of the original reproduced
+    # 1M is still in train, unconditionally.
+    n_orig_not_in_train = int((is_train & (llm_pd["split"] != "train").to_numpy()).sum())
+    assert n_orig_not_in_train == 0, (
+        f"{n_orig_not_in_train} rows from the original 1M training subsample are NOT in "
+        f"train under the new assignment -- this would leak against the adapters already "
+        f"trained on them. Must be 0.")
+    _log("VERIFY", f"original 1M subsample rows still in train: "
+                   f"{int(is_train.sum()) - n_orig_not_in_train:,}/{int(is_train.sum()):,} "
+                   f"(must be 100%)")
+
     val_fingerprint = hashlib.sha256(
         "\n".join(sorted(f"{a}-{b}" for a, b in
                          zip(llm_pd.loc[val_sel, "id1"], llm_pd.loc[val_sel, "id2"]))).encode()
     ).hexdigest()
 
-    out_cols = ["id1", "id2", "target", "label", "category", "split"]
+    out_cols = ["id1", "id2", "target", "label", "category", "split", "in_original_1m"]
     llm_pd["category"] = llm_pd["cat_id"].map(id_to_name)
-    out_df = llm_pd.loc[llm_pd["split"].isin(["train", "val"]), out_cols].reset_index(drop=True)
+    # v2: every row with a known category is now output (train or val) --
+    # v1 dropped everything outside the 1M+100K as "unused"; there is no
+    # "unused" bucket left to filter out.
+    out_df = llm_pd[out_cols].reset_index(drop=True)
     out_path = os.path.join(OUTPUT_DIR, "llm_train_val_split.parquet")
     out_df.to_parquet(out_path, index=False)
     _log("DONE", f"wrote {len(out_df):,} rows ({(out_df['split']=='train').sum():,} train + "
@@ -368,16 +397,22 @@ def main():
     with open(os.path.join(OUTPUT_DIR, "llm_split_report.json"), "w", encoding="utf-8") as f:
         json.dump({
             "seed": SEED,
+            "version": "v2 -- train = everything not in val (was: only the reproduced 1M)",
             "llm_rows_total": int(n_llm_total),
             "llm_rows_with_known_category": int(len(llm_pd)),
-            "train": {"rows": int(len(train_sel)), "rows_per_category": n_per_category_train,
-                      "policy": "REPRODUCTION of frida-full-sft's own stratified_llm_sample "
-                                "(category-balanced, stratified by target level)"},
+            "train": {"rows": int((llm_pd["split"] == "train").sum()),
+                      "rows_from_original_1m_subsample": int(is_train.sum()),
+                      "policy": "v2: ALL rows not held out for val. The original "
+                                f"{int(is_train.sum()):,}-row reproduction "
+                                "(category-balanced, stratified by target level) is a "
+                                "verified SUBSET, unconditionally -- see the "
+                                "'original 1M subsample rows still in train' check above."},
             "val": {"rows": int(len(val_sel)), "rows_per_category": n_per_category_val,
-                    "policy": "NEW, drawn only from rows excluded from train -- "
-                              "stratified by (category, target level, length tercile "
-                              "within category)"},
+                    "policy": "UNCHANGED from v1 -- drawn only from rows excluded from the "
+                              "original 1M subsample, stratified by (category, target level, "
+                              "length tercile within category)"},
             "train_val_overlap": int(len(overlap)),
+            "original_1m_rows_not_in_train": n_orig_not_in_train,
             "overall_pos_rate": {"full_pool": overall_pos_full, "train": overall_pos_train,
                                  "val": overall_pos_val},
             "max_per_category_pos_rate_drift_val_vs_full_pool": max_drift,

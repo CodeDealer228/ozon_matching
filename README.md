@@ -790,6 +790,21 @@ fallback-поиск по содержимому — сам датасет в hin
 **Статус на 2026-08-22**: `rays0n/frida-percat-lora` (v3, оба фикса — LR
 warmup/grad-clip и parent-dir-name — применены) и
 `rays0n/berta-tokenize-items-cpu` (v2) — `RUNNING`.
+
+**Обновление: BERTA-токенизация завершена и опубликована** —
+[`maxamsecret/berta-tokenized-items-v3`](https://www.kaggle.com/datasets/maxamsecret/berta-tokenized-items-v3)
+(пользователь опубликовал под новым именем/аккаунтом, не под изначально
+заданными в коде `rays0n/berta-item-tokens-v2-human`/`-llm`). Проверено по
+`cache_meta.json` внутри архива: **весь** LLM-scope без сэмплирования —
+12,384,610 items (не подвыборка), `human_scope` отдельно — 711,304, оба
+`ITEM_MAX_LENGTH=256`, char-бюджет **140/32/442** (та же точная формула, что
+и у FRIDA-кэша), v2-политика очистки атрибутов применена
+(`reordered_items=12,355,775`, демоций: long=1.41M, https=555.6K,
+oem=250.9K), `add_special_tokens=false` (BERTA-конвенция — CLS/SEP
+добавляются на этапе сборки пары, не в кэше). Это теперь актуальный
+BERTA item-token кэш для любого нового обучения — не `berta-tokenize-llm-256`
+(старый, урезанный 128/64/384 бюджет) и не `rays0n/berta-item-tokens-v2-*`
+(этот датасет-ID никогда фактически не публиковался под этим именем).
 `maxamsecret/frida-full-sft` — **`ERROR`**: добавление второго
 (`llm_val`) eval-прохода вытолкнуло пиковое HBM-потребление на компиляции
 обратно за бюджет (`Used 16.62G of 15.75G hbm. Exceeded by 888.03M`), хотя
