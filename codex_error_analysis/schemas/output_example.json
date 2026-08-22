@@ -1,0 +1,21 @@
+{
+  "audit_unit_id": "berta_FP_rank0007_row12345",
+  "primary_class": "critical_attribute_mismatch",
+  "secondary_subtype": "model_number",
+  "label_assessment": "likely_correct",
+  "model_failure_assessment": "real_failure",
+  "model_saw_critical_difference": "yes",
+  "truncation_relevance": "not_relevant",
+  "critical_difference": "Критически различается model number; оба значения видны focal-модели.",
+  "reason_ru": "Human target=0 выглядит согласованно с различием модели товара, однако focal-модель получила оба model number и всё равно дала высокий match score.",
+  "confidence": 0.94,
+  "evidence_original": [
+    "MODEL-A",
+    "MODEL-B"
+  ],
+  "evidence_model_input": [
+    "MODEL-A",
+    "MODEL-B"
+  ],
+  "notes_ru": null
+}

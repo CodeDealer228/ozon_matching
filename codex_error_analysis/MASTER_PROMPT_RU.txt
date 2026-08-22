@@ -1,0 +1,36 @@
+Выполни end-to-end аудит hard FP/FN BERTA и FRIDA в этом проекте.
+
+Сначала прочитай `AGENTS.md` и `TAXONOMY_RU.md` и строго им следуй.
+
+Нужный исходный artifact должен лежать в `artifacts/input/` под именем:
+`all_fp_fn_full_attributes_and_exact_inputs.parquet`
+или
+`all_fp_fn_full_attributes_and_exact_inputs.jsonl`.
+
+Если его нет — остановись и скажи мне, какой файл нужно положить. Не подменяй его
+`top_errors_*` артефактами.
+
+Если artifact есть:
+0. сделай preflight: если исходник parquet и pyarrow отсутствует, выполни
+   `python -m pip install -r requirements.txt`; JSONL можно обрабатывать без pyarrow.
+1. запусти `python scripts/prepare_audit.py`;
+2. запусти `python scripts/validate_audit_sample.py`;
+3. запусти `python scripts/make_batches.py`;
+4. после успешной валидации запускай subagents `error_auditor`, максимум 5 одновременно,
+   по одному batch directory на subagent;
+5. дождись всех batch outputs;
+6. запусти `python scripts/validate_batch_outputs.py`;
+7. исправь только невалидные batches, если такие есть;
+8. запусти `python scripts/aggregate_audit.py`;
+9. лично проведи required final review из `AGENTS.md`;
+10. дополни `outputs/FINAL_REPORT.md` короткими человеческими выводами:
+   - чем реально ошибается BERTA;
+   - чем реально ошибается FRIDA;
+   - сколько похоже на label/business-rule issues;
+   - насколько truncation действительно causal;
+   - подтверждается ли гипотеза, что чем дальше от top hard errors, тем меньше label issues;
+   - какие 5–10 recurring error subtypes выглядят наиболее полезными для следующих экспериментов.
+
+Не меняй исходные labels. Не обучай модели. Не генерируй synthetic pairs.
+Не используй веб/внешние сведения о товарах: если информации в artifact недостаточно,
+ставь ambiguous/missing_information.

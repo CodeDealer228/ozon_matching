@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hard error audit classification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "audit_unit_id",
+    "primary_class",
+    "secondary_subtype",
+    "label_assessment",
+    "model_failure_assessment",
+    "model_saw_critical_difference",
+    "truncation_relevance",
+    "critical_difference",
+    "reason_ru",
+    "confidence",
+    "evidence_original",
+    "evidence_model_input",
+    "notes_ru"
+  ],
+  "properties": {
+    "audit_unit_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "primary_class": {
+      "enum": [
+        "likely_label_issue",
+        "ambiguous_business_rule",
+        "truncation_related",
+        "critical_attribute_mismatch",
+        "product_type_confusion",
+        "semantic_or_alias_failure",
+        "variant_policy_failure",
+        "missing_information",
+        "other_model_error"
+      ]
+    },
+    "secondary_subtype": {
+      "type": "string",
+      "minLength": 1
+    },
+    "label_assessment": {
+      "enum": [
+        "likely_correct",
+        "likely_wrong",
+        "ambiguous"
+      ]
+    },
+    "model_failure_assessment": {
+      "enum": [
+        "real_failure",
+        "not_model_failure",
+        "unclear"
+      ]
+    },
+    "model_saw_critical_difference": {
+      "enum": [
+        "yes",
+        "no",
+        "unclear",
+        "not_applicable"
+      ]
+    },
+    "truncation_relevance": {
+      "enum": [
+        "causal",
+        "possible",
+        "not_relevant",
+        "unclear"
+      ]
+    },
+    "critical_difference": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason_ru": {
+      "type": "string",
+      "minLength": 20
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "evidence_original": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "evidence_model_input": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "notes_ru": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

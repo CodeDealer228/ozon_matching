@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.DS_Store
+outputs/*
+!outputs/.gitkeep
+artifacts/input/*
+!artifacts/input/.gitkeep
+artifacts/prepared/*
+!artifacts/prepared/.gitkeep
+audit_batches/batch_*/

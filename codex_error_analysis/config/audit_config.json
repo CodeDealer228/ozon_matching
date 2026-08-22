@@ -1,0 +1,47 @@
+{
+  "threshold": 0.5,
+  "random_seed": 20260821,
+  "sample_per_band": 25,
+  "batch_size": 20,
+  "severity_bands": [
+    {
+      "name": "ultra_hard_1_50",
+      "start_rank": 1,
+      "end_rank": 50
+    },
+    {
+      "name": "very_hard_51_150",
+      "start_rank": 51,
+      "end_rank": 150
+    },
+    {
+      "name": "hard_151_400",
+      "start_rank": 151,
+      "end_rank": 400
+    },
+    {
+      "name": "moderate_hard_401_1000",
+      "start_rank": 401,
+      "end_rank": 1000
+    }
+  ],
+  "groups": [
+    {
+      "model": "berta",
+      "error_type": "FP"
+    },
+    {
+      "model": "berta",
+      "error_type": "FN"
+    },
+    {
+      "model": "frida",
+      "error_type": "FP"
+    },
+    {
+      "model": "frida",
+      "error_type": "FN"
+    }
+  ],
+  "classification_confidence_review_threshold": 0.7
+}
