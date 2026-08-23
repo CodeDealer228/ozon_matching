@@ -14,6 +14,30 @@ already done by organizers — this repo is only the pairwise re-ranking stage.
 Container competition: submit a Docker image + code archive, judged offline
 on hidden test data.
 
+### Разметка: уточнение от организаторов (Q&A, 2026-08-23)
+
+Alex Natekin (эксперт-организатор соревнования), в ответ на вопрос тиммейта
+Максима — "На ozon есть функция 'переключения' параметров (размер, цвет и
+т.д.) внутри одной карточки. Все 'переключения' — это различные товары или
+один и тот же?":
+
+> Эксперты подсказывают, что все параметры считаются за различные товары 🙂
+>
+> К тому же, продавцы умудряются в другой цвет зашивать вообще другие
+> товары 🤷‍♀️ Типа монитор 32 дюйма это черно-серо-зеленый цвет, а 27
+> дюймов это черно-черно-серый цвет и т.д.
+
+**Значение для разметки/синтетики**: любое "переключение" параметра
+(размер, цвет и т. п.) внутри одной родительской карточки Ozon по умолчанию
+считается организаторами РАЗНЫМ товаром (non-match), даже при идентичных
+названии и бренде — это не эвристика, а прямая позиция организаторов о том,
+что такое "дубликат" в этой задаче. Дополнительный риск, на который явно
+указал Alex: продавцы иногда используют переключение цвета/размера как
+витрину для подмены совершенно другого товара (пример — 32" монитор под
+видом другого "цвета" карточки 27" монитора) — то есть за столь невинным на
+вид различием может стоять расхождение и в других, более существенных
+характеристиках, не только в заявленном параметре переключения.
+
 ## Data
 
 Kaggle dataset **`maxamsecret/ozon-ecup-2026-matching`** (private). Local
@@ -266,8 +290,8 @@ FRIDA inference specifically:
   to what `frida-lora-sft-*` kernels train against, detailed in
   `kaggle_kernels/frida-lora-sft-human-only-10-epochs/README.md`.
 
-Now tracked as `submits/frida/lora_v2_epoch/` (epoch-1-lineage checkpoint,
-test 0.386) and `submits/frida/tpu_human_256_epoch4/` (the newer
+Now tracked as `submits/frida/lora/lora_v2_epoch/` (epoch-1-lineage checkpoint,
+test 0.386) and `submits/frida/lora/tpu_human_256_epoch4/` (the newer
 `PAIR_MAX_LENGTH=256` checkpoint, val 0.7660, test not yet passed -- see its
 own README.md for the Check-stage timing investigation).
 
@@ -283,6 +307,7 @@ macro PR-AUC on our val split vs. the contest leaderboard's Mean PR-AUC:
 | FRIDA epoch 2 (not submitted) | 0.675 | ? |
 | BERTA (not submitted) | 0.711 | ? |
 | Qwen3 bi-encoder + LoRA + MLP head (teammate `grigoriyyy`, `bi-encoder` branch, not submitted, **different val split** — see caveat below) | 0.726 | ? |
+| **FRIDA full fine-tune (no LoRA, all 823M params trainable), served at `PAIR_MAX_LENGTH=180`** | 0.7582 | **0.481 (project best)** |
 
 A least-squares fit on the three *confirmed* points (all cross-encoders on
 the same seed-42 val split) — `leaderboard ≈ 0.763 × val − 0.146` (R²≈0.996
@@ -295,6 +320,16 @@ a private item-disjoint 5-fold split, not the seed-42 one the other rows
 share — see `kaggle_kernels/qwen3-bi-encoder-lora-sft/README.md` on the
 `bi-encoder` branch). A real second data point from a non-cross-encoder
 submission would be worth far more than refining this fit further.
+
+The FRIDA full fine-tune row is excluded from that 3-point fit for the same
+kind of reason the Qwen3 row is: it's on the NEW item-disjoint 70/30 split
+(`data/splits/matches_item_disjoint_70_30_seed42.parquet`), not the shared
+seed-42 pair-level split every fit point uses, and it's a genuinely
+different training recipe (full-FT + Adafactor + focal loss, not LoRA +
+BCEWithLogitsLoss) — not a controlled comparison. For what it's worth, the
+fit would have predicted leaderboard≈0.432 at val=0.7582; the real score
+(0.481) beat that by ~0.05 — one data point in favor of full-FT
+transferring at least as well as LoRA at comparable val, not proof of it.
 
 ## Repo layout
 
