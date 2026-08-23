@@ -405,6 +405,11 @@ def run_tpu_inference(
     import numpy as np
     import torch_xla
 
+    # Kaggle pre-sets these for a different TPU topology.  They conflict
+    # with torch_xla.launch(), which establishes its own 8-worker PJRT setup.
+    os.environ.pop("TPU_PROCESS_ADDRESSES", None)
+    os.environ.pop("CLOUD_TPU_TASK_ID", None)
+
     _TPU_SHARED.update(
         submission_root=str(submission_root),
         input_ids_path=str(input_ids_path),
