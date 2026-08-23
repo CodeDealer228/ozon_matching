@@ -17,10 +17,10 @@ Validation-only kernel для этапов 0–1 из
 
 ## Перед запуском
 
-В `kernel-metadata.json` указан владелец `maxamsecret`, потому что это FRIDA
-lineage. Перед `kaggle kernels push` владелец должен быть явно подтверждён и
-CLI credentials должны быть проверены read-only. Само наличие этого metadata
-файла не означает разрешение на запуск.
+Kernel запускается владельцем `rvitvitskii`. Исходный human dataset остаётся
+публичным `maxamsecret/ozon-ecup-2026-matching`, а canonical split подключён
+из приватной byte-identical копии
+`rvitvitskii/frida-item-disjoint-split-seed42`.
 
 Ожидаемые persistent outputs:
 

@@ -1,5 +1,5 @@
 {
-  "id": "maxamsecret/frida-full-sft-error-analysis",
+  "id": "rvitvitskii/frida-full-sft-error-analysis",
   "title": "FRIDA Full-SFT Baseline and Error Analysis",
   "code_file": "frida_full_sft_error_analysis.py",
   "language": "python",
@@ -11,7 +11,7 @@
   "keywords": [],
   "dataset_sources": [
     "maxamsecret/ozon-ecup-2026-matching",
-    "maxamsecret/frida-item-disjoint-split"
+    "rvitvitskii/frida-item-disjoint-split-seed42"
   ],
   "competition_sources": [],
   "kernel_sources": [],
