@@ -1,5 +1,5 @@
 {
-  "id": "rvitvitskii/frida-full-sft-error-analysis",
+  "id": "rvitvitskii/frida-full-sft-baseline-and-error-analysis",
   "title": "FRIDA Full-SFT Baseline and Error Analysis",
   "code_file": "frida_full_sft_error_analysis.py",
   "language": "python",
