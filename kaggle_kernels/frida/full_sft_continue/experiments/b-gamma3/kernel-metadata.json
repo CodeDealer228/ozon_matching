@@ -1,0 +1,21 @@
+{
+  "id": "rays0n/frida-full-sft-continue-b-gamma3",
+  "title": "Frida Full Sft Continue B Gamma3",
+  "code_file": "frida_full_sft_continue_b_gamma3.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenize-items-v3",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split",
+    "maxamsecret/frida-full-sft-w"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

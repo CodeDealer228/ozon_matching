@@ -1,0 +1,19 @@
+{
+  "id": "maximmarkovbb/frida-percat-lora-nan-diagnose",
+  "title": "Frida Percat Lora Nan Diagnose",
+  "code_file": "frida_percat_lora_nan_diagnose.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenize-items-v3",
+    "maxamsecret/frida-with-merged-lora-and-8-10-14-cat-loras"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

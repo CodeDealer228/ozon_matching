@@ -1,0 +1,21 @@
+{
+  "id": "maximmarkovbb/frida-percat-lora-olora",
+  "title": "Frida Percat Lora Olora",
+  "code_file": "frida_percat_lora_olora.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenize-items-v3",
+    "maximmarkovbb/frida-lora-llm-label-human-deep-head",
+    "maxamsecret/frida-with-merged-lora-and-8-10-14-cat-loras",
+    "maxamsecret/frida-llm-train-val-split"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

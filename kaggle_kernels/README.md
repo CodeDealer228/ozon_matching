@@ -37,14 +37,14 @@ kaggle kernels output <owner>/<slug> -p kaggle_kernels/<name>/output   # заб�
 
 | Кернел | Суть | GPU | Итог |
 |---|---|---|---|
-| [cross-encoder-sft-pipline](cross-encoder-sft-pipline) | базовое LoRA SFT дообучение | 2×T4 | **0.5282** val / 0.265 LB (epoch 7) |
-| [merge-lora](merge-lora) | мёрж адаптера в базу (без `peft` на инференсе) | CPU | датасет `ozon-lora-merged-minilm` |
-| [validate-baseline-vs-lora](validate-baseline-vs-lora) | честное сравнение на одном val-сплите | 1×T4 | baseline 0.3710 vs LoRA **0.5282** (Δ+0.157) |
-| [lora-timing-dryrun](lora-timing-dryrun) | оффлайн-замер времени сабмита | 1×T4 | 950.6с / 384.7 пар/с — в лимит проходит |
-| [val-per-category-metrics](val-per-category-metrics) | разбивка метрики по 20 категориям | CPU | готово, см. `reports/val_per_category_lora.md` |
-| [lora-llm-continue-train](lora-llm-continue-train) | дообучение на 11.19M мягких меток + human-mix | 2×T4 | новый best **0.53229** (упёрлись в 12ч лимит) |
-| [publish-token-cache](publish-token-cache) | публикация ~9GB токен-кэша как датасета | CPU | датасет `ozon-lora-llm-token-cache` (−9.5ч токенизации) |
-| [item-length-analysis](item-length-analysis) | распределение длин полей / доля обрезки | CPU | `attributes` режется у **47%** товаров |
+| [cross-encoder-sft-pipline](minilm/cross-encoder-sft-pipline) | базовое LoRA SFT дообучение | 2×T4 | **0.5282** val / 0.265 LB (epoch 7) |
+| [merge-lora](minilm/merge-lora) | мёрж адаптера в базу (без `peft` на инференсе) | CPU | датасет `ozon-lora-merged-minilm` |
+| [validate-baseline-vs-lora](minilm/validate-baseline-vs-lora) | честное сравнение на одном val-сплите | 1×T4 | baseline 0.3710 vs LoRA **0.5282** (Δ+0.157) |
+| [lora-timing-dryrun](minilm/lora-timing-dryrun) | оффлайн-замер времени сабмита | 1×T4 | 950.6с / 384.7 пар/с — в лимит проходит |
+| [val-per-category-metrics](shared_utils/val-per-category-metrics) | разбивка метрики по 20 категориям | CPU | готово, см. `reports/val_per_category_lora.md` |
+| [lora-llm-continue-train](minilm/lora-llm-continue-train) | дообучение на 11.19M мягких меток + human-mix | 2×T4 | новый best **0.53229** (упёрлись в 12ч лимит) |
+| [publish-token-cache](shared_utils/publish-token-cache) | публикация ~9GB токен-кэша как датасета | CPU | датасет `ozon-lora-llm-token-cache` (−9.5ч токенизации) |
+| [item-length-analysis](shared_utils/item-length-analysis) | распределение длин полей / доля обрезки | CPU | `attributes` режется у **47%** товаров |
 
 ## BERTA (`sergeyzh/BERTA`, 128.3M, дистиллят FRIDA в BERT-форме)
 
@@ -56,22 +56,22 @@ weak-category), attribute augmentation, две классификационны�
 
 | Кернел | Суть | GPU/TPU | Итог |
 |---|---|---|---|
-| [berta-lora-sft-human-only-20-epochs](berta-lora-sft-human-only-20-epochs) | исходный LoRA SFT, план 20 эпох | 1×T4 (`rays0n`) | **0.7111** val @ 22% плана (лимит сессии) |
-| [berta-lora-sft-continue-5epoch](berta-lora-sft-continue-5epoch) | резюм с 0.7111, ещё 5 эпох | 2×T4 (`rays0n`) | **0.7246** val (epoch 7) / 0.7229 на факт. сохранённой epoch 9 |
-| [berta-merge-lora](berta-merge-lora) | мёрж лучшего адаптера (`rays0n/berta-llm-continue-train`, 0.7255) в базу | CPU | смёрженные веса, без `peft` на инференсе |
-| [berta-tokenize-llm-256](berta-tokenize-llm-256) | item-token-кэш на `matches_llm.parquet` + human, `max_length=256`, prefix проверен реально (а не по метаданным) | TPU | датасеты `llm_scope`/`human_scope` (12.38M / 711K items) |
-| [berta-llm-continue-prep](berta-llm-continue-prep) | сэмплирует фикс. подмножество `matches_llm.parquet` под GPU-прогон Experiment A | TPU (prep) | prep-кернел, без обучения |
-| [berta-llm-continue-train](berta-llm-continue-train) | continue-SFT на LLM-метках + human-mix | 2×T4 | **0.7255** val — на тот момент новый лучший результат проекта |
-| [berta-llm-cache-probe](berta-llm-cache-probe) | дешёвая CPU-проверка: реально ли в LLM-scope кэше зашит prefix (метаданные врали) | CPU | подтвердил расхождение, привёл к перетокенизации |
-| [berta-hardneg-balanced](berta-hardneg-balanced) | continue-train + mined hard negatives, пропорционально размеру категории | 2×T4 (`rays0n`) | эксперимент B, сравнивается с uniform-вариантом |
-| [berta-hardneg-uniform](berta-hardneg-uniform) | то же, но плоское число негативов на категорию | 2×T4 | эксперимент C |
-| [berta-weakcat-llm-prep](berta-weakcat-llm-prep) | фильтрует `matches_llm.parquet` до 10 самых слабых по val-PR-AUC категорий, сэмплирует 1M пар | TPU (prep) | prep-кернел под weakcat-эксперимент |
-| [berta-weakcat-llm-train](berta-weakcat-llm-train) | continue-train на weak-category сэмпле + полный human-mix | 2×T4 (`rays0n`) | целевой фикс худших категорий |
-| [berta-attr-augment](berta-attr-augment) | continue-train с рандомизацией порядка ключей в JSON `attributes` (shuffle/sorted/original) | 2×T4 (`rays0n`) | 2 эпохи на полном human train |
-| [berta-embed-extract](berta-embed-extract) | извлекает pooled pair-эмбеддинги (до Linear-головы) лучшего чекпоинта (0.7255) для train+val | 2×T4 | питает CatBoost-трек ниже |
-| [berta-catboost-noleak](berta-catboost-noleak) | CatBoost поверх эмбеддингов, train/val строго внутри канонического val-сплита | CPU | **реальный кандидат на сабмит** — см. `submits/berta/catboost` |
-| [berta-catboost-leak](berta-catboost-leak) | тот же CatBoost, но train = human-сплит BERTA (заведомая утечка) — количественная оценка завышения | CPU | контрольный эксперимент, не для сабмита |
-| [berta-llm-tpu-sft](berta-llm-tpu-sft) | полномасштабный SFT на **всём** `matches_llm.parquet` (без сэмплирования) + human-mix, `PAIR_MAX_LENGTH=256`, TPU v5e-8 | TPU v5e-8 | реальный прогон дошёл до **0.7087** (step 11211) до `BrokenProcessPool`-краша; краш пофикшен (см. ниже) |
+| [berta-lora-sft-human-only-20-epochs](berta/training/sft/lora-sft-human-only-20-epochs) | исходный LoRA SFT, план 20 эпох | 1×T4 (`rays0n`) | **0.7111** val @ 22% плана (лимит сессии) |
+| [berta-lora-sft-continue-5epoch](berta/training/sft/lora-sft-continue-5epoch) | резюм с 0.7111, ещё 5 эпох | 2×T4 (`rays0n`) | **0.7246** val (epoch 7) / 0.7229 на факт. сохранённой epoch 9 |
+| [berta-merge-lora](berta/training/misc/merge-lora) | мёрж лучшего адаптера (`rays0n/berta-llm-continue-train`, 0.7255) в базу | CPU | смёрженные веса, без `peft` на инференсе |
+| [berta-tokenize-llm-256](berta/training/tokenize/tokenize-llm-256) | item-token-кэш на `matches_llm.parquet` + human, `max_length=256`, prefix проверен реально (а не по метаданным) | TPU | датасеты `llm_scope`/`human_scope` (12.38M / 711K items) |
+| [berta-llm-continue-prep](berta/training/tokenize/llm-continue-prep) | сэмплирует фикс. подмножество `matches_llm.parquet` под GPU-прогон Experiment A | TPU (prep) | prep-кернел, без обучения |
+| [berta-llm-continue-train](berta/training/sft/llm-continue-train) | continue-SFT на LLM-метках + human-mix | 2×T4 | **0.7255** val — на тот момент новый лучший результат проекта |
+| [berta-llm-cache-probe](berta/training/tokenize/llm-cache-probe) | дешёвая CPU-проверка: реально ли в LLM-scope кэше зашит prefix (метаданные врали) | CPU | подтвердил расхождение, привёл к перетокенизации |
+| [berta-hardneg-balanced](berta/training/hardneg/hardneg-balanced) | continue-train + mined hard negatives, пропорционально размеру категории | 2×T4 (`rays0n`) | эксперимент B, сравнивается с uniform-вариантом |
+| [berta-hardneg-uniform](berta/training/hardneg/hardneg-uniform) | то же, но плоское число негативов на категорию | 2×T4 | эксперимент C |
+| [berta-weakcat-llm-prep](berta/training/tokenize/weakcat-llm-prep) | фильтрует `matches_llm.parquet` до 10 самых слабых по val-PR-AUC категорий, сэмплирует 1M пар | TPU (prep) | prep-кернел под weakcat-эксперимент |
+| [berta-weakcat-llm-train](berta/training/sft/weakcat-llm-train) | continue-train на weak-category сэмпле + полный human-mix | 2×T4 (`rays0n`) | целевой фикс худших категорий |
+| [berta-attr-augment](berta/training/misc/attr-augment) | continue-train с рандомизацией порядка ключей в JSON `attributes` (shuffle/sorted/original) | 2×T4 (`rays0n`) | 2 эпохи на полном human train |
+| [berta-embed-extract](berta/training/embeddings/embed-extract) | извлекает pooled pair-эмбеддинги (до Linear-головы) лучшего чекпоинта (0.7255) для train+val | 2×T4 | питает CatBoost-трек ниже |
+| [berta-catboost-noleak](berta/catboost/catboost-noleak) | CatBoost поверх эмбеддингов, train/val строго внутри канонического val-сплита | CPU | **реальный кандидат на сабмит** — см. `submits/berta/catboost` |
+| [berta-catboost-leak](berta/catboost/catboost-leak) | тот же CatBoost, но train = human-сплит BERTA (заведомая утечка) — количественная оценка завышения | CPU | контрольный эксперимент, не для сабмита |
+| [berta-llm-tpu-sft](berta/training/sft/llm-tpu-sft) | полномасштабный SFT на **всём** `matches_llm.parquet` (без сэмплирования) + human-mix, `PAIR_MAX_LENGTH=256`, TPU v5e-8 | TPU v5e-8 | реальный прогон дошёл до **0.7087** (step 11211) до `BrokenProcessPool`-краша; краш пофикшен (см. ниже) |
 
 `berta-llm-tpu-sft` — первый в проекте настоящий тренировочный (не только
 токенизационный) прогон на TPU через `torch_xla`. Крашился несколько раз по
@@ -87,12 +87,12 @@ copy-on-write; обучение теперь останавливается ро
 
 | Кернел | Суть | GPU/TPU | Итог |
 |---|---|---|---|
-| [berta-tpu-human-continue-384](berta-tpu-human-continue-384) | резюм топ-чекпоинта, **только** human-разметка (без `matches_llm.parquet`), `PAIR_MAX_LENGTH=384`, 10 эпох, чекпоинт+валидация каждую эпоху | TPU v5e-8 | все 10 эпох прошли; val **монотонно падал** после эпохи 1 (0.7551→0.7501→...→0.7217) — реальное переобучение на маленьком (292K) train; лучший чекпоинт — эпоха 1 |
-| [berta-top-embed-extract](berta-top-embed-extract) | эмбеддинг + скор классификатора топ-чекпоинта на val-сплите (73,131 пар, без лика) | 1×T4 | датасет-выход для catboost-трека ниже |
-| [tfidf-category-index-fit](tfidf-category-index-fit) | по TF-IDF-индексу на категорию, fit на полном каталоге, хранятся только маленькие fitted-векторайзеры (не per-item векторы) | CPU | ~20 файлов по 5-15МБ, датасет-выход |
-| [berta-catboost-top-final](berta-catboost-top-final) | CatBoost на [768 сырых эмбеддингов + classifier_score + tfidf_score + category] | 2×GPU | val **0.7467** (лучше классификатора!), но тест **0.457** — хуже классификатора (0.47); `get_feature_importance()`: 96.11% на эмбеддингах, classifier_score — 1.9%; переобучение на 58,504 строках / 771 фиче |
-| `submits/berta/catboost_pca32` (локальный переобуч, кернела нет) | то же, но PCA(32) вместо сырых эмбеддингов + сильнее регуляризация (`depth` 8→6, `l2_leaf_reg` 15→30) | CPU (локально) | val 0.7419, тест **0.469** — почти закрыл разрыв, но всё ещё чуть ниже классификатора; importance classifier_score выросла до 19.3% |
-| [berta-embed-cache-all-human](berta-embed-cache-all-human) | кэш эмбеддинга+скора на **всех** 365,654 human-парах (train+val) чекпоинтом `berta-tpu-human-continue-384` — готовит данные под будущую многослойную голову (~5× больше данных без лика, чем нынешний val-срез) | 1-2×T4 (auto-probe batch) | **подготовлено, НЕ запущено** — ждём подтверждения качества `berta-tpu-human-continue-384` на тесте |
+| [berta-tpu-human-continue-384](berta/training/sft/tpu-human-continue-384) | резюм топ-чекпоинта, **только** human-разметка (без `matches_llm.parquet`), `PAIR_MAX_LENGTH=384`, 10 эпох, чекпоинт+валидация каждую эпоху | TPU v5e-8 | все 10 эпох прошли; val **монотонно падал** после эпохи 1 (0.7551→0.7501→...→0.7217) — реальное переобучение на маленьком (292K) train; лучший чекпоинт — эпоха 1 |
+| [berta-top-embed-extract](berta/training/embeddings/top-embed-extract) | эмбеддинг + скор классификатора топ-чекпоинта на val-сплите (73,131 пар, без лика) | 1×T4 | датасет-выход для catboost-трека ниже |
+| [tfidf-category-index-fit](retrieval_probes/tfidf-category-index-fit) | по TF-IDF-индексу на категорию, fit на полном каталоге, хранятся только маленькие fitted-векторайзеры (не per-item векторы) | CPU | ~20 файлов по 5-15МБ, датасет-выход |
+| [berta-catboost-top-final](berta/catboost/catboost-top-final) | CatBoost на [768 сырых эмбеддингов + classifier_score + tfidf_score + category] | 2×GPU | val **0.7467** (лучше классификатора!), но тест **0.457** — хуже классификатора (0.47); `get_feature_importance()`: 96.11% на эмбеддингах, classifier_score — 1.9%; переобучение на 58,504 строках / 771 фиче |
+| `submits/berta/catboost/catboost_pca32` (локальный переобуч, кернела нет) | то же, но PCA(32) вместо сырых эмбеддингов + сильнее регуляризация (`depth` 8→6, `l2_leaf_reg` 15→30) | CPU (локально) | val 0.7419, тест **0.469** — почти закрыл разрыв, но всё ещё чуть ниже классификатора; importance classifier_score выросла до 19.3% |
+| [berta-embed-cache-all-human](berta/training/embeddings/embed-cache-all-human) | кэш эмбеддинга+скора на **всех** 365,654 human-парах (train+val) чекпоинтом `berta-tpu-human-continue-384` — готовит данные под будущую многослойную голову (~5× больше данных без лика, чем нынешний val-срез) | 1-2×T4 (auto-probe batch) | **подготовлено, НЕ запущено** — ждём подтверждения качества `berta-tpu-human-continue-384` на тесте |
 
 ## FRIDA (`ai-forever/FRIDA`, 823M, T5-энкодер)
 
@@ -101,19 +101,19 @@ pair-truncation, которую нужно было бы воспроизвод�
 
 | Кернел | Суть | GPU | Итог |
 |---|---|---|---|
-| [frida-tokenize-items](frida-tokenize-items) | исходная item-токенизация (human + llm scope), prefix `"paraphrase: "` | CPU | ранняя версия, superseded ниже |
-| [frida-tokenize-items-human](frida-tokenize-items-human) | item-кэш, human-scope (711,304 items), `max_length=256` | CPU | датасет `frida-tokenized-items-human` |
-| [frida-tokenize-items-llm](frida-tokenize-items-llm) | item-кэш, llm-scope (12,384,610 items) | TPU (ради RAM + отдельная квота) | датасет `frida-tokenized-items-llm` |
-| [frida-lora-sft-human-only-10-epochs](frida-lora-sft-human-only-10-epochs) | FRIDA LoRA SFT, эпоха 1 (human-only) | 1×T4 | **0.652** val @ 60% эпохи → источник сабмита `frida_lora_adapter` |
-| [frida-batch-probe](frida-batch-probe) | быстрый preflight: макс. micro-batch без реальных данных/обучения | 1×T4 | preflight, минуты вместо часов |
-| [frida-nan-diagnose](frida-nan-diagnose) | точечная диагностика NaN-лосса под fp16/DataParallel | 2×T4 | root cause: autocast не пробрасывается в потоки DataParallel-реплик |
-| [frida-lora-sft-epoch2](frida-lora-sft-epoch2) | продолжение SFT, эпоха 2 | 1×T4 (`rays0n`) | **0.674** val @ 40% эпохи (лимит сессии) |
-| [frida-lora-sft-epoch3](frida-lora-sft-epoch3) | продолжение epoch2 с фиксом eval (сабсэмпл 25%, реже чекпоинты) | 1×T4 (`rays0n`) | подготовлено |
-| [frida-lora-continue-2ep](frida-lora-continue-2ep) | дообучение на 2 полные эпохи, best-only чекпоинты с optimizer-state | 1×T4 | дошло до **0.69377** (25% прогресса) до отмены; чекпоинт опубликован как `maximmarkovbb/frida-lora-checkpoint-v1-best` |
-| [frida-tokenize-items-v2](frida-tokenize-items-v2) | новая политика упорядочивания `attributes` (демоушен длинных/https/oem-значений в конец + 5% shuffle), два готовых варианта под zero-overhead аугментацию | CPU | датасет `frida-tokenize-items-v2-cache` |
-| [frida-lora-v2-epoch](frida-lora-v2-epoch) | текущая версия обучения: 4 метрики в output, time-aware "тихие" чекпоинты (без eval после 11ч), устойчивость к OOM на каждом шаге, eval только в конце эпохи, липкий chunk_size для eval (фикс повторяющегося `eval OOM`-варнинга), новая attribute-policy без оверхеда | 1×T4 (`maximmarkovbb`) | отменено на 10.5ч, step 1127/1143 (98.6% эпохи). Единственный чекпоинт — "тихий" save **без eval**, лог кернела пустой (0 байт, потерян при отмене) → реальное качество неизвестно. Опубликован как `maximmarkovbb/frida-lora-v2-epoch-last` с честной `PROVENANCE.md` |
-| [frida-validate-checkpoint](frida-validate-checkpoint) | автономный валидатор любого FRIDA LoRA-чекпоинта: macro PR-AUC на канонической val (73,131 пара), адаптер ищется в `/kaggle/input` по содержимому (`adapter_config.json`), а не по имени датасета. **Считает один и тот же чекпоинт на каждом примонтированном item-кэше** (поддерживает обе раскладки: плоскую v1 и v2 с `variant_base/`) — разрыв между строками и есть цена рассинхрона порядка атрибутов train/serve | 1×T4 (`maximmarkovbb`) | прогон 1 — против `v1-best` (само-проверка валидатора: должен воспроизвести 0.69377). Прогон 2 — против `frida-lora-v2-epoch-last` на обоих кэшах сразу |
-| [frida-tpu-human-sft](frida-tpu-human-sft) | FRIDA на TPU v5e-8, human-only, **`PAIR_MAX_LENGTH` 128 → 256** (единственное реальное изменение — 128 обрезал ~94% пар), 4 эпохи, чекпоинты **каждый час** по wall-clock, eval в try/except который не может уронить обучение | TPU v5e-8 (`maxamsecret`) | **COMPLETE, все 4 эпохи.** val: 0.7437 → 0.7602 → 0.7657 → **0.7660** — новый лучший val проекта (прежний 0.7551 у BERTA-384). Замеренная скорость ~120 строк/с — единственная реальная точка отсчёта throughput'а FRIDA на TPU |
+| [frida-tokenize-items](frida/tokenize/tokenize-items) | исходная item-токенизация (human + llm scope), prefix `"paraphrase: "` | CPU | ранняя версия, superseded ниже |
+| [frida-tokenize-items-human](frida/tokenize/tokenize-items-human) | item-кэш, human-scope (711,304 items), `max_length=256` | CPU | датасет `frida-tokenized-items-human` |
+| [frida-tokenize-items-llm](frida/tokenize/tokenize-items-llm) | item-кэш, llm-scope (12,384,610 items) | TPU (ради RAM + отдельная квота) | датасет `frida-tokenized-items-llm` |
+| [frida-lora-sft-human-only-10-epochs](frida/lora/lora-sft-human-only-10-epochs) | FRIDA LoRA SFT, эпоха 1 (human-only) | 1×T4 | **0.652** val @ 60% эпохи → источник сабмита `frida_lora_adapter` |
+| [frida-batch-probe](frida/probes/batch-probe) | быстрый preflight: макс. micro-batch без реальных данных/обучения | 1×T4 | preflight, минуты вместо часов |
+| [frida-nan-diagnose](frida/probes/nan-diagnose) | точечная диагностика NaN-лосса под fp16/DataParallel | 2×T4 | root cause: autocast не пробрасывается в потоки DataParallel-реплик |
+| [frida-lora-sft-epoch2](frida/lora/lora-sft-epoch2) | продолжение SFT, эпоха 2 | 1×T4 (`rays0n`) | **0.674** val @ 40% эпохи (лимит сессии) |
+| [frida-lora-sft-epoch3](frida/lora/lora-sft-epoch3) | продолжение epoch2 с фиксом eval (сабсэмпл 25%, реже чекпоинты) | 1×T4 (`rays0n`) | подготовлено |
+| [frida-lora-continue-2ep](frida/lora/continue/lora-continue-2ep) | дообучение на 2 полные эпохи, best-only чекпоинты с optimizer-state | 1×T4 | дошло до **0.69377** (25% прогресса) до отмены; чекпоинт опубликован как `maximmarkovbb/frida-lora-checkpoint-v1-best` |
+| [frida-tokenize-items-v2](frida/tokenize/tokenize-items-v2) | новая политика упорядочивания `attributes` (демоушен длинных/https/oem-значений в конец + 5% shuffle), два готовых варианта под zero-overhead аугментацию | CPU | датасет `frida-tokenize-items-v2-cache` |
+| [frida-lora-v2-epoch](frida/lora/lora-v2-epoch) | текущая версия обучения: 4 метрики в output, time-aware "тихие" чекпоинты (без eval после 11ч), устойчивость к OOM на каждом шаге, eval только в конце эпохи, липкий chunk_size для eval (фикс повторяющегося `eval OOM`-варнинга), новая attribute-policy без оверхеда | 1×T4 (`maximmarkovbb`) | отменено на 10.5ч, step 1127/1143 (98.6% эпохи). Единственный чекпоинт — "тихий" save **без eval**, лог кернела пустой (0 байт, потерян при отмене) → реальное качество неизвестно. Опубликован как `maximmarkovbb/frida-lora-v2-epoch-last` с честной `PROVENANCE.md` |
+| [frida-validate-checkpoint](frida/probes/validate-checkpoint) | автономный валидатор любого FRIDA LoRA-чекпоинта: macro PR-AUC на канонической val (73,131 пара), адаптер ищется в `/kaggle/input` по содержимому (`adapter_config.json`), а не по имени датасета. **Считает один и тот же чекпоинт на каждом примонтированном item-кэше** (поддерживает обе раскладки: плоскую v1 и v2 с `variant_base/`) — разрыв между строками и есть цена рассинхрона порядка атрибутов train/serve | 1×T4 (`maximmarkovbb`) | прогон 1 — против `v1-best` (само-проверка валидатора: должен воспроизвести 0.69377). Прогон 2 — против `frida-lora-v2-epoch-last` на обоих кэшах сразу |
+| [frida-tpu-human-sft](frida/lora/tpu-human-sft) | FRIDA на TPU v5e-8, human-only, **`PAIR_MAX_LENGTH` 128 → 256** (единственное реальное изменение — 128 обрезал ~94% пар), 4 эпохи, чекпоинты **каждый час** по wall-clock, eval в try/except который не может уронить обучение | TPU v5e-8 (`maxamsecret`) | **COMPLETE, все 4 эпохи.** val: 0.7437 → 0.7602 → 0.7657 → **0.7660** — новый лучший val проекта (прежний 0.7551 у BERTA-384). Замеренная скорость ~120 строк/с — единственная реальная точка отсчёта throughput'а FRIDA на TPU |
 
 Про эти 4 эпохи стоит сказать отдельно, потому что они выглядят как контрпример
 к выводу «human-only эпохи портят тест», а на самом деле не являются им. У
@@ -124,8 +124,8 @@ BERTA-384 val **падал** с каждой эпохой (0.7551→0.7217), з�
 данным. Поэтому вывод BERTA не опровергнут — просто здесь менялась не только
 одна ось. Что из этого выйдет на тесте, покажут два сабмита ниже.
 
-Чекпоинты эпох 4 и 2 упакованы в `submits/frida/tpu_human_256_epoch4` и
-`submits/frida/tpu_human_256_epoch2`. Их `src/utils.py` **нельзя** брать у
+Чекпоинты эпох 4 и 2 упакованы в `submits/frida/lora/length_256/tpu_human_256_epoch4` и
+`submits/frida/lora/length_256/tpu_human_256_epoch2`. Их `src/utils.py` **нельзя** брать у
 предыдущего FRIDA-сабмита как есть: там `PAIR_MAX_LENGTH=128` и сырая нарезка
 атрибутов, а этот чекпоинт учился на 256 и на v2-порядке атрибутов. Обе правки
 внесены и проверены сравнением с исходником `frida-tokenize-items-v2` на 20,000
@@ -149,9 +149,9 @@ BERTA-384 val **падал** с каждой эпохой (0.7551→0.7217), з�
 
 | Кернел | Суть | GPU/TPU | Статус |
 |---|---|---|---|
-| [frida-tpu-embed-cache-human](frida-tpu-embed-cache-human) | кэш pooled pair-эмбеддингов (CLS, до головы) + логита собственного классификатора чекпоинта по **всем** 365,654 human-парам; `split` **наследует** канонический seed-42 сплит обучения LoRA, в `cache_meta.json` пишется `val_fingerprint`. Шардится по 8 ядрам на непересекающиеся куски одного memmap'а, хвост добивается паддингом до той же статической формы (ни одна строка не теряется), инкрементальный flush + `progress_rank{N}.json` | TPU v5e-8 | **запущено** против `maximmarkovbb/frida-tpu-human-256-epoch4` (val 0.7660, лучший чекпоинт проекта — 4 эпохи human-only, `PAIR_MAX_LENGTH=256`) |
-| [frida-head-train](frida-head-train) | обучает и сравнивает **5 архитектур** `MultiLayerHead` (`linear_plus` (256,), `shallow_wide` (512,128), `wide` (1024,256), `deep` (768,384,128), `deep_narrow` (512,256,128,64) — dropout зафиксирован одинаковым у всех, чтобы сравнение изолировало именно форму сети) поверх кэша. Каждая учится на `split==0`, метрика — на чистом `split==1`, отбор по ней с early stopping; побеждает архитектура с лучшим val. Победитель кладётся как `head.pt` в корень датасета (там его подхватывает `frida-llm-tpu-sft`), остальные 4 — в `architectures/<name>/` для сравнения. Плюс `val_features.npy` на победителе (128 признаков под CatBoost вместо 1536 сырых — ровно та причина, по которой переобучился `berta_catboost_top_final`) | 1×T4 | подготовлено, ждёт выхода кэша (входной датасет ещё не существует) |
-| [frida-llm-tpu-sft](frida-llm-tpu-sft) | **рецепт BERTA, перенесённый на FRIDA**: **весь** `matches_llm.parquet` (11.19M, без сэмплирования) + полный human train вперемешку, `PAIR_MAX_LENGTH=256`, `LR=2e-4`, `WARMUP_RATIO=0.10`, **1 эпоха** (сколько успеет), многослойная голова с warm-start из предыдущего шага | TPU v5e-8 | подготовлено |
+| [frida-tpu-embed-cache-human](frida/probes/tpu-embed-cache-human) | кэш pooled pair-эмбеддингов (CLS, до головы) + логита собственного классификатора чекпоинта по **всем** 365,654 human-парам; `split` **наследует** канонический seed-42 сплит обучения LoRA, в `cache_meta.json` пишется `val_fingerprint`. Шардится по 8 ядрам на непересекающиеся куски одного memmap'а, хвост добивается паддингом до той же статической формы (ни одна строка не теряется), инкрементальный flush + `progress_rank{N}.json` | TPU v5e-8 | **запущено** против `maximmarkovbb/frida-tpu-human-256-epoch4` (val 0.7660, лучший чекпоинт проекта — 4 эпохи human-only, `PAIR_MAX_LENGTH=256`) |
+| [frida-head-train](frida/probes/head-train) | обучает и сравнивает **5 архитектур** `MultiLayerHead` (`linear_plus` (256,), `shallow_wide` (512,128), `wide` (1024,256), `deep` (768,384,128), `deep_narrow` (512,256,128,64) — dropout зафиксирован одинаковым у всех, чтобы сравнение изолировало именно форму сети) поверх кэша. Каждая учится на `split==0`, метрика — на чистом `split==1`, отбор по ней с early stopping; побеждает архитектура с лучшим val. Победитель кладётся как `head.pt` в корень датасета (там его подхватывает `frida-llm-tpu-sft`), остальные 4 — в `architectures/<name>/` для сравнения. Плюс `val_features.npy` на победителе (128 признаков под CatBoost вместо 1536 сырых — ровно та причина, по которой переобучился `berta_catboost_top_final`) | 1×T4 | подготовлено, ждёт выхода кэша (входной датасет ещё не существует) |
+| [frida-llm-tpu-sft](frida/lora/continue/llm-tpu-sft) | **рецепт BERTA, перенесённый на FRIDA**: **весь** `matches_llm.parquet` (11.19M, без сэмплирования) + полный human train вперемешку, `PAIR_MAX_LENGTH=256`, `LR=2e-4`, `WARMUP_RATIO=0.10`, **1 эпоха** (сколько успеет), многослойная голова с warm-start из предыдущего шага | TPU v5e-8 | подготовлено |
 
 Почему именно так: единственная конфигурация, давшая лучший тест-скор проекта
 (0.47), — это BERTA на `matches_llm`+human вперемешку при `PAIR_MAX_LENGTH=256`.
@@ -203,9 +203,9 @@ Zero-shot cosine similarity уже бьёт обученный baseline, но п
 
 | Кернел | Суть | GPU | Итог |
 |---|---|---|---|
-| [giga3b-quantize-benchmark](giga3b-quantize-benchmark) | корректность/качество/скорость + int8-квантизация | T4/P100 | zero-shot 0.4004 val (> обученного baseline), int8 почти бесплатен (0.3973) |
-| [giga3b-4bit-validate](giga3b-4bit-validate) | первый реальный GPU-тест переписанного `submits/probes/giga3b` с готовым 4bit-nf4 чекпоинтом и новым batch-size probe | GPU | валидация пайплайна |
-| [giga3b-crossencoder-classifier-fit](giga3b-crossencoder-classifier-fit) | дообучает `classifier.joblib` на РЕАЛЬНЫХ int8-эмбеддингах (не синтетических, как раньше — локально нет CUDA под bitsandbytes) | GPU | заменяет synthetic-stub классификатор в сабмите |
+| [giga3b-quantize-benchmark](encoder_probes/giga3b/quantize-benchmark) | корректность/качество/скорость + int8-квантизация | T4/P100 | zero-shot 0.4004 val (> обученного baseline), int8 почти бесплатен (0.3973) |
+| [giga3b-4bit-validate](encoder_probes/giga3b/4bit-validate) | первый реальный GPU-тест переписанного `submits/probes/giga3b` с готовым 4bit-nf4 чекпоинтом и новым batch-size probe | GPU | валидация пайплайна |
+| [giga3b-crossencoder-classifier-fit](encoder_probes/giga3b/crossencoder-classifier-fit) | дообучает `classifier.joblib` на РЕАЛЬНЫХ int8-эмбеддингах (не синтетических, как раньше — локально нет CUDA под bitsandbytes) | GPU | заменяет synthetic-stub классификатор в сабмите |
 
 ## Голова поверх кэша + майнинг негативов
 
@@ -217,14 +217,14 @@ hard negatives по построению.
 
 | Кернел | Суть | GPU | Итог |
 |---|---|---|---|
-| [berta-lora-pair-cache](berta-lora-pair-cache) | кэш pooled-представлений (768-мерных) по всем 365,654 парам | 2×T4 | отменено пользователем на v4 (после OOM-фикса токенизации) |
-| [fasttext-category-similarity-probe](fasttext-category-similarity-probe) | дешёвый лексический сигнал (fastText/TF-IDF) внутри категории Аптека, без модели | CPU | TF-IDF (AP 0.166) обыграл fastText (AP 0.150), оба слабые |
-| [retrieval-recall-hard-negative-mining](retrieval-recall-hard-negative-mining) | recall@k TF-IDF-ретривала против размеченных пар, все 20 категорий | CPU | recall@10 от 0.015 до 0.35 — далеко от цели ~0.9 |
-| [rubert-mini-frida-tokenize](rubert-mini-frida-tokenize) | токенизация 711,304 товаров под `rubert-mini-frida`, TPU (ради RAM) | TPU v5e-8 | датасет `rubert-mini-frida-item-tokenized` |
-| [rubert-mini-frida-item-embeddings](rubert-mini-frida-item-embeddings) | per-item bi-encoder эмбеддинги на generic `sergeyzh/rubert-mini-frida` | 2×T4 | датасет `rubert-mini-frida-item-embeddings` |
-| [rubert-mini-frida-recall-mining](rubert-mini-frida-recall-mining) | тот же recall@k, но на реальных эмбеддингах вместо TF-IDF | CPU | macro recall@10 **0.276** — лучше TF-IDF, всё ещё далеко от цели |
-| [berta-lora-item-embeddings](berta-lora-item-embeddings) | то же, но task-tuned BERTA+LoRA (0.7111) вместо generic модели | 2×T4 | подготовлено |
-| [negative-pattern-sampling](negative-pattern-sampling) | генерирует по-категорийный набор hard-negative паттернов/пар | CPU | датасет → `negative_patterns/` в репо, 20 категорий |
+| [berta-lora-pair-cache](berta/training/embeddings/lora-pair-cache) | кэш pooled-представлений (768-мерных) по всем 365,654 парам | 2×T4 | отменено пользователем на v4 (после OOM-фикса токенизации) |
+| [fasttext-category-similarity-probe](retrieval_probes/fasttext-category-similarity-probe) | дешёвый лексический сигнал (fastText/TF-IDF) внутри категории Аптека, без модели | CPU | TF-IDF (AP 0.166) обыграл fastText (AP 0.150), оба слабые |
+| [retrieval-recall-hard-negative-mining](retrieval_probes/retrieval-recall-hard-negative-mining) | recall@k TF-IDF-ретривала против размеченных пар, все 20 категорий | CPU | recall@10 от 0.015 до 0.35 — далеко от цели ~0.9 |
+| [rubert-mini-frida-tokenize](encoder_probes/rubert_mini_frida/tokenize) | токенизация 711,304 товаров под `rubert-mini-frida`, TPU (ради RAM) | TPU v5e-8 | датасет `rubert-mini-frida-item-tokenized` |
+| [rubert-mini-frida-item-embeddings](encoder_probes/rubert_mini_frida/item-embeddings) | per-item bi-encoder эмбеддинги на generic `sergeyzh/rubert-mini-frida` | 2×T4 | датасет `rubert-mini-frida-item-embeddings` |
+| [rubert-mini-frida-recall-mining](encoder_probes/rubert_mini_frida/recall-mining) | тот же recall@k, но на реальных эмбеддингах вместо TF-IDF | CPU | macro recall@10 **0.276** — лучше TF-IDF, всё ещё далеко от цели |
+| [berta-lora-item-embeddings](berta/training/embeddings/lora-item-embeddings) | то же, но task-tuned BERTA+LoRA (0.7111) вместо generic модели | 2×T4 | подготовлено |
+| [negative-pattern-sampling](retrieval_probes/negative-pattern-sampling) | генерирует по-категорийный набор hard-negative паттернов/пар | CPU | датасет → `negative_patterns/` в репо, 20 категорий |
 
 ## Qwen3-Embedding-0.6B bi-encoder — второй результат после BERTA
 
@@ -252,7 +252,7 @@ hard negatives по построению.
 - `maximmarkovbb/frida-tokenize-items-v2-cache` — item-token-кэш FRIDA с новой attribute-policy (два варианта: base/shuffled).
 - `maxamsecret/frida-lora-sft-epoch2-40` — чекпоинт FRIDA после эпохи 2 (0.67397).
 - `maximmarkovbb/frida-lora-checkpoint-v1-best` — чекпоинт FRIDA после отменённого continue-2ep прогона (0.69377, с optimizer-state) — точка резюма для `frida-lora-v2-epoch` и `frida-tpu-human-sft`.
-- `maximmarkovbb/frida-tpu-human-256-epoch4` — адаптер+классификатор чекпоинта `frida-tpu-human-sft` epoch4 (val 0.7660, лучший val проекта), опубликован специально как вход для `frida-tpu-embed-cache-human` (раньше жил только локально + в `submits/frida/tpu_human_256_epoch4`).
+- `maximmarkovbb/frida-tpu-human-256-epoch4` — адаптер+классификатор чекпоинта `frida-tpu-human-sft` epoch4 (val 0.7660, лучший val проекта), опубликован специально как вход для `frida-tpu-embed-cache-human` (раньше жил только локально + в `submits/frida/lora/length_256/tpu_human_256_epoch4`).
 - `maximmarkovbb/frida-pair-embed-cache-human` — кэш pooled pair-эмбеддингов + classifier-логита FRIDA по всем 365,654 human-парам (выход `frida-tpu-embed-cache-human`, вход `frida-head-train`). Кернел запущен, датасета пока нет.
 - `maximmarkovbb/frida-multilayer-head` — победитель 5-архитектурного перебора голов (выход `frida-head-train`, вход `frida-llm-tpu-sft`). Ещё не создан.
-- `maximmarkovbb/frida-lora-v2-epoch-last` — **это ровно те веса, что дали 0.386 на тесте**: с сабмитом `submits/frida/lora_v2_epoch` совпадают побайтово обе половины модели — `adapter_model.safetensors` (sha256 `6914cbb181b9c014…`) и `classifier.pt` (`75b4ce886c67555a…`). Чекпоинт FRIDA после `frida-lora-v2-epoch` (98.6% эпохи, с optimizer/scheduler-state). **Не провалидирован**: "тихий" save без eval, `train_state.json: best_macro_pr_auc` — унаследованное 0.69377 с предыдущего чекпоинта, а не метрика этих весов (ровно та ловушка со stale-метрикой, что разбиралась в `reports/berta_tpu_lora_provenance/`). Внутри лежит `PROVENANCE.md` с этим предупреждением.
+- `maximmarkovbb/frida-lora-v2-epoch-last` — **это ровно те веса, что дали 0.386 на тесте**: с сабмитом `submits/frida/lora/early/lora_v2_epoch` совпадают побайтово обе половины модели — `adapter_model.safetensors` (sha256 `6914cbb181b9c014…`) и `classifier.pt` (`75b4ce886c67555a…`). Чекпоинт FRIDA после `frida-lora-v2-epoch` (98.6% эпохи, с optimizer/scheduler-state). **Не провалидирован**: "тихий" save без eval, `train_state.json: best_macro_pr_auc` — унаследованное 0.69377 с предыдущего чекпоинта, а не метрика этих весов (ровно та ловушка со stale-метрикой, что разбиралась в `reports/berta_tpu_lora_provenance/`). Внутри лежит `PROVENANCE.md` с этим предупреждением.

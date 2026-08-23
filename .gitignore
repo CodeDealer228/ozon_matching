@@ -84,3 +84,9 @@ Thumbs.db
 # project's Kaggle skill).
 .claude/settings.local.json
 .claude/*.lock
+
+# Personal local tooling (multi-account Kaggle quota checker), not part of
+# this project -- lives under the shared kaggle skill for discoverability
+# but is per-machine, not shared project config. The rest of
+# .claude/skills/kaggle/ IS tracked (see above).
+.claude/skills/kaggle/modules/setup/scripts/check_all_quotas.py

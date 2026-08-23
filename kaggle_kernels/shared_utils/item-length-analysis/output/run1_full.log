@@ -1,0 +1,75 @@
+[{"stream_name":"stdout","time":1.461352513,"data":"[DEBUG] /kaggle/input -\u003e dirs=['datasets'] files=[]\n"}
+,{"stream_name":"stdout","time":1.461408673,"data":"[DEBUG] /kaggle/input/datasets -\u003e dirs=['maxamsecret'] files=[]\n"}
+,{"stream_name":"stdout","time":1.461412453,"data":"[DEBUG] /kaggle/input/datasets/maxamsecret -\u003e dirs=['ozon-ecup-2026-matching'] files=[]\n"}
+,{"stream_name":"stdout","time":1.466265224,"data":"[DEBUG] /kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching -\u003e dirs=[] files=['matches.parquet', 'matches_llm.parquet', 'items.parquet', 'items_human.parquet']\n"}
+,{"stream_name":"stdout","time":1.466301583,"data":"[DATA] Scanning items.parquet for field lengths (lazy, streaming, no full-text materialization) ...\n"}
+,{"stream_name":"stdout","time":18.269350282,"data":"[DATA] items scanned: 13,397,761\n"}
+,{"stream_name":"stdout","time":19.491393597,"data":"\n"}
+,{"stream_name":"stdout","time":19.491429997,"data":"==============================================================================\n"}
+,{"stream_name":"stdout","time":19.538030492,"data":"[name_len]  current_limit=128 chars  |  mean=55.3  std=30.9  max=4200  |  fraction_truncated=3.03%\n"}
+,{"stream_name":"stdout","time":19.538072722,"data":"==============================================================================\n"}
+,{"stream_name":"stdout","time":19.538077442,"data":"  p  0 =     0.0 chars\n"}
+,{"stream_name":"stdout","time":19.538083622,"data":"  p 10 =    19.0 chars\n"}
+,{"stream_name":"stdout","time":19.538088312,"data":"  p 20 =    30.0 chars\n"}
+,{"stream_name":"stdout","time":19.538093172,"data":"  p 30 =    39.0 chars\n"}
+,{"stream_name":"stdout","time":19.538097932,"data":"  p 40 =    45.0 chars\n"}
+,{"stream_name":"stdout","time":19.538103022,"data":"  p 50 =    52.0 chars\n"}
+,{"stream_name":"stdout","time":19.538108282,"data":"  p 60 =    58.0 chars\n"}
+,{"stream_name":"stdout","time":19.538113152,"data":"  p 70 =    65.0 chars\n"}
+,{"stream_name":"stdout","time":19.538117312,"data":"  p 80 =    75.0 chars\n"}
+,{"stream_name":"stdout","time":19.538124852,"data":"  p 90 =    94.0 chars\n"}
+,{"stream_name":"stdout","time":19.538129222,"data":"  p100 =  4200.0 chars  \u003c-- current limit\n"}
+,{"stream_name":"stdout","time":20.136268713,"data":"\n"}
+,{"stream_name":"stdout","time":20.136304533,"data":"==============================================================================\n"}
+,{"stream_name":"stdout","time":20.183119189,"data":"[category_len]  current_limit=64 chars  |  mean=13.7  std=5.7  max=23  |  fraction_truncated=0.00%\n"}
+,{"stream_name":"stdout","time":20.183154009,"data":"==============================================================================\n"}
+,{"stream_name":"stdout","time":20.183160219,"data":"  p  0 =     5.0 chars\n"}
+,{"stream_name":"stdout","time":20.183165199,"data":"  p 10 =     6.0 chars\n"}
+,{"stream_name":"stdout","time":20.183215779,"data":"  p 20 =     6.0 chars\n"}
+,{"stream_name":"stdout","time":20.183223259,"data":"  p 30 =    10.0 chars\n"}
+,{"stream_name":"stdout","time":20.183228049,"data":"  p 40 =    11.0 chars\n"}
+,{"stream_name":"stdout","time":20.183232629,"data":"  p 50 =    14.0 chars\n"}
+,{"stream_name":"stdout","time":20.183235599,"data":"  p 60 =    16.0 chars\n"}
+,{"stream_name":"stdout","time":20.183238399,"data":"  p 70 =    17.0 chars\n"}
+,{"stream_name":"stdout","time":20.183241249,"data":"  p 80 =    19.0 chars\n"}
+,{"stream_name":"stdout","time":20.183244029,"data":"  p 90 =    22.0 chars\n"}
+,{"stream_name":"stdout","time":20.183246879,"data":"  p100 =    23.0 chars\n"}
+,{"stream_name":"stdout","time":21.598833256,"data":"\n"}
+,{"stream_name":"stdout","time":21.598899726,"data":"==============================================================================\n"}
+,{"stream_name":"stdout","time":21.648935102,"data":"[attributes_len]  current_limit=384 chars  |  mean=439.8  std=511.5  max=186322  |  fraction_truncated=47.38%\n"}
+,{"stream_name":"stdout","time":21.648974122,"data":"==============================================================================\n"}
+,{"stream_name":"stdout","time":21.648979482,"data":"  p  0 =     2.0 chars\n"}
+,{"stream_name":"stdout","time":21.648983202,"data":"  p 10 =   104.0 chars\n"}
+,{"stream_name":"stdout","time":21.648986472,"data":"  p 20 =   165.0 chars\n"}
+,{"stream_name":"stdout","time":21.648990072,"data":"  p 30 =   231.0 chars\n"}
+,{"stream_name":"stdout","time":21.648993462,"data":"  p 40 =   298.0 chars\n"}
+,{"stream_name":"stdout","time":21.648997312,"data":"  p 50 =   366.0 chars\n"}
+,{"stream_name":"stdout","time":21.649001052,"data":"  p 60 =   440.0 chars  \u003c-- current limit\n"}
+,{"stream_name":"stdout","time":21.649005412,"data":"  p 70 =   527.0 chars\n"}
+,{"stream_name":"stdout","time":21.649009052,"data":"  p 80 =   628.0 chars\n"}
+,{"stream_name":"stdout","time":21.649012492,"data":"  p 90 =   819.0 chars\n"}
+,{"stream_name":"stdout","time":21.649015972,"data":"  p100 = 186322.0 chars\n"}
+,{"stream_name":"stdout","time":22.893584329,"data":"\n"}
+,{"stream_name":"stdout","time":22.893622769,"data":"==============================================================================\n"}
+,{"stream_name":"stdout","time":22.939318455,"data":"[combined_len]  current_limit=640 chars  |  mean=538.7  std=514.7  max=186475  |  fraction_truncated=28.45%\n"}
+,{"stream_name":"stdout","time":22.939352745,"data":"==============================================================================\n"}
+,{"stream_name":"stdout","time":22.939356745,"data":"  p  0 =    43.0 chars\n"}
+,{"stream_name":"stdout","time":22.939359945,"data":"  p 10 =   197.0 chars\n"}
+,{"stream_name":"stdout","time":22.939363245,"data":"  p 20 =   262.0 chars\n"}
+,{"stream_name":"stdout","time":22.939366185,"data":"  p 30 =   328.0 chars\n"}
+,{"stream_name":"stdout","time":22.939369145,"data":"  p 40 =   394.0 chars\n"}
+,{"stream_name":"stdout","time":22.939372435,"data":"  p 50 =   463.0 chars\n"}
+,{"stream_name":"stdout","time":22.939374565,"data":"  p 60 =   538.0 chars\n"}
+,{"stream_name":"stdout","time":22.939376485,"data":"  p 70 =   626.0 chars\n"}
+,{"stream_name":"stdout","time":22.939378345,"data":"  p 80 =   728.0 chars  \u003c-- current limit\n"}
+,{"stream_name":"stdout","time":22.939381615,"data":"  p 90 =   923.0 chars\n"}
+,{"stream_name":"stdout","time":22.939384785,"data":"  p100 = 186475.0 chars\n"}
+,{"stream_name":"stdout","time":22.939682995,"data":"\n"}
+,{"stream_name":"stdout","time":22.939699095,"data":"[DONE] report saved to /kaggle/working/item_length_report.json\n"}
+,{"stream_name":"stderr","time":25.452442823,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":25.452507392,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":25.701363532,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":25.701386052,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":26.810488943,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":27.895718111,"data":"[NbConvertApp] Writing 291795 bytes to __results__.html\n"}
+]

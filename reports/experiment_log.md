@@ -10,7 +10,7 @@ ideas below. Organized in the same order `CLAUDE.md` references it.
 
 Full write-up: `reports/val_per_category_lora.md`, numbers in
 `reports/val_per_category_lora.csv`. Produced by
-`kaggle_kernels/val-per-category-metrics/` (CPU, ~85 min, 14.4 pairs/sec) —
+`kaggle_kernels/shared_utils/val-per-category-metrics/` (CPU, ~85 min, 14.4 pairs/sec) —
 it re-derives the seed-42 val split and **hard-asserts** its fingerprint
 `efddb3def997f87b`, and dumps per-pair scores to `val_scores.parquet` so any
 further slicing costs no forward pass. Reproduced macro exactly: 0.52826.
@@ -56,8 +56,8 @@ pairs (fed to `BCEWithLogitsLoss` as continuous targets, no threshold). Goal:
 close the val→leaderboard generalization gap via wider catalog coverage,
 without regressing the human-tuned signal.
 
-Code: `kaggle_kernels/lora-llm-continue-train/` (script kernel, run via
-`kaggle kernels push -p kaggle_kernels/lora-llm-continue-train --accelerator
+Code: `kaggle_kernels/minilm/lora-llm-continue-train/` (script kernel, run via
+`kaggle kernels push -p kaggle_kernels/minilm/lora-llm-continue-train --accelerator
 NvidiaTeslaT4`, monitor via `kaggle kernels status/logs
 maxamsecret/lora-llm-continue-train`).
 
@@ -126,7 +126,7 @@ current baseline (0.5282 val / 0.265 leaderboard) and was successfully
 recovered via `kaggle kernels output` (Kaggle does persist `/kaggle/working`
 as kernel output even on a hard-cap cancellation, not just on a clean
 finish) — sitting at
-`kaggle_kernels/lora-llm-continue-train/output/run7_output/lora_llm_continue_train/best/`
+`kaggle_kernels/minilm/lora-llm-continue-train/output/run7_output/lora_llm_continue_train/best/`
 locally, and has since been **published** as the new
 `maxamsecret/ozon-lora-minilm-finetuned` best (confirmed via the dataset's
 own "updated" timestamp + the presence of `train_log_steps.csv`, an artifact
@@ -158,7 +158,7 @@ smaller scale before trusting it on another multi-hour attempt.
 
 ## Bi-encoder probe: `ai-sage/Giga-Embeddings-instruct` (3.45B) — good quality, too slow
 
-Ran `kaggle_kernels/giga3b-quantize-benchmark/` (1xT4, ~2.8h) to gate the
+Ran `kaggle_kernels/encoder_probes/giga3b/quantize-benchmark/` (1xT4, ~2.8h) to gate the
 "bi-encoder lets us afford a much bigger model" idea before investing in
 hard-negative mining. Scored raw (un-fine-tuned) cosine similarity of both
 items encoded as documents, on a stratified (category x label) 8,000-pair
@@ -264,7 +264,7 @@ mean=126.6, std=40.4, p99=202.0, p99.9=223.0, true max=272. 256 covers
 
 **Two separate kernels, not one combined script** — `kaggle_kernels/
 frida-tokenize-items-human/` (`items_human.parquet`, ~711K items, plain CPU
-session, no queue) and `kaggle_kernels/frida-tokenize-items-llm/`
+session, no queue) and `kaggle_kernels/frida/tokenize/tokenize-items-llm/`
 (`items.parquet` semi-joined to `matches_llm.parquet`'s ids, ~12.38M items,
 TPU session for the larger RAM allocation — no TPU compute is actually used,
 this is pure CPU tokenization, but TPU quota is a separate 20h/week pool
@@ -382,7 +382,7 @@ Final state: both `maxamsecret/frida-tokenized-items-human` (711,304 items)
 and `maxamsecret/frida-tokenized-items-llm` (12,384,610 items) are published
 and ready — `ids.bin`/`input_ids.bin`/`attention_mask.bin` memmaps +
 `cache_meta.json` each, `max_length=256`, `paraphrase: ` prefix. The earlier
-combined-script attempt (`kaggle_kernels/frida-tokenize-items/`, one
+combined-script attempt (`kaggle_kernels/frida/tokenize/tokenize-items/`, one
 script doing both scopes sequentially) is superseded by the split and
 already confirmed `ERROR` on Kaggle (gotcha 1) — no quota lost beyond that
 one failed attempt.
@@ -395,7 +395,7 @@ cosine similarity) — out of scope until the tokenization caches exist.
 
 Two things checked in response to a direct request to verify — not just
 code-read — the currently deployed FRIDA submission
-(`submits/frida/tpu_human_192_epoch4_5120_batch`).
+(`submits/frida/lora/length_180_192/tpu_human_192_epoch4_5120_batch`).
 
 **1) Does exactly 192 tokens reach CUDA, and is `inference_mode` really
 active?** Ran the submission's own `_load_needed_item_texts` →
@@ -417,19 +417,19 @@ over byte-for-byte (one kernel's own comment said `byte-matches CLAUDE.md`)
 into every FRIDA kernel targeting `max_length=256`, without ever being
 rescaled:
 
-- `kaggle_kernels/frida-tokenize-items-v2` — built
+- `kaggle_kernels/frida/tokenize/tokenize-items-v2` — built
   `maximmarkovbb/frida-tokenize-items-v2-cache`, the cache the **currently
   best checkpoint** (val 0.7660) was trained on.
-- `kaggle_kernels/frida-tokenize-items-human` and `-llm` — built the v1
+- `kaggle_kernels/frida/tokenize/tokenize-items-human` and `-llm` — built the v1
   caches (`frida-tokenized-items-human`/`-llm`) that
-  `kaggle_kernels/frida-llm-tpu-sft` depends on. That kernel was confirmed
+  `kaggle_kernels/frida/lora/continue/llm-tpu-sft` depends on. That kernel was confirmed
   `RUNNING` (`kaggle kernels status maximmarkovbb/frida-llm-tpu-sft`) at
   the moment this bug was found — actively resuming the 0.7660 checkpoint
   on top of the same under-scaled cache.
-- `kaggle_kernels/frida-tokenize-items` (the earlier, superseded
+- `kaggle_kernels/frida/tokenize/tokenize-items` (the earlier, superseded
   combined-script attempt) had the identical constants too.
 
-Quantified from `kaggle_kernels/frida-char-token-ratio`'s real per-field
+Quantified from `kaggle_kernels/frida/probes/char-token-ratio`'s real per-field
 chars/token ratios (name 2.83, category 2.34, attributes 2.96, combined
 3.12): `category`'s 64-char budget covers ~27 tokens against a real
 observed max of only 8 — 3× wasted headroom that produces zero benefit,
@@ -557,3 +557,63 @@ uncorrected `128/64/384` bug, never touched by the earlier fix because it
 hadn't been located yet. Now `140/32/442` (BERTA's own ratios). Same scope
 boundary as before: source-only, no rebuild triggered, no training or
 deployed-submission contract touched.
+
+## `frida-full-sft`'s sixth real crash: eval's bare DataLoader deferred an entire val shard into one XLA graph (2026-08-22)
+
+A run that survived all five previously-documented `frida-full-sft` crashes
+(see the kernel's own module docstring for the full blow-by-blow of
+1-5 — OOM tuning, a broken-collective replica loss, and the
+`torch.xla`/gradient-checkpointing `AttributeError`) died at the very
+first real evaluation: epoch 1 finished cleanly at step 7850/23550 (loss
+trending down normally, no NaN, no warning), then ~200s of total log
+silence, then an external `SIGTERM` to all 8 TPU processes, surfacing at
+the top level as `concurrent.futures.process.BrokenProcessPool`. No Python
+traceback — the kill came from outside the process, not from an exception
+inside it.
+
+**Root cause**: `make_eval_loader_sharded` builds a bare
+`torch.utils.data.DataLoader`, never wrapped in
+`pl_xla.MpDeviceLoader` the way every *training* loader in this kernel is.
+`evaluate()`'s per-batch loop moves tensors to device by hand
+(`input_ids.to(device)`, ...) but nothing in that loop forces XLA to
+materialize the graph — `torch.no_grad()` only skips gradient tracking, it
+is not a sync point. Training never needed this fix because
+`xm.optimizer_step()` is a real per-step sync (this project's own
+`frida-full-sft` docstring had already traced a training-side OOM back to
+"torch_xla's OWN internal `torch_xla.sync()` call inside
+`parallel_loader.py`'s `next()`" — i.e. `MpDeviceLoader` syncs every batch
+on its own; that is exactly the mechanism eval was missing). With no
+per-batch sync, all ~191 forward passes in one rank's shard (human
+val=109,648 rows / 8 replicas / `eval_batch=72`) piled up as ONE
+undeferred XLA program, not materialized until the existing explicit
+`xm.mark_step()` right after `xm.all_gather` — a graph roughly two orders
+of magnitude larger than any single program this kernel had compiled
+before, either hanging past whatever liveness window Kaggle's
+infrastructure allows, or genuinely exhausting memory during that one
+giant compile+execute. The kernel's own "VALIDATION REWRITE" docstring
+section (the sharded-eval redesign that predates this bug) had reasoned
+carefully about the *gathered* data size ("a few MB even gathered 8x
+over — not a real memory concern") and never considered the *ungathered,
+undeferred graph* size before the first sync point — a genuinely
+different cost that the earlier analysis simply didn't cover.
+
+**Fix**: wrap `loader` in `pl_xla.MpDeviceLoader(loader, device)` inside
+`evaluate()` itself (one line + docstring, no call-site changes needed) —
+every batch now syncs, and is device-placed, as it's produced, bounding
+each compiled program to one batch instead of the whole shard. The
+existing `.to(device)` calls inside the loop become no-ops but were left
+in place rather than removed, matching this file's own established style
+(the training loop keeps an explicit `batch_labels.to(device)` even under
+`MpDeviceLoader` too).
+
+**Checkpoint cadence, fixed alongside** (per direct instruction):
+`CHECKPOINT_EVERY_SECONDS` was `18000` (5h) — changed to `3600` (1h). This
+does **not** create a new-disk-space problem: `do_quiet_save` already
+writes to a single fixed label (`"last"`), overwritten in place every
+time, unlike `frida-llm-tpu-sft`'s own unrelated `checkpoint_hourNN`
+convention which genuinely does accumulate a new directory per hour. One
+quiet checkpoint (~1.5-2GB: full fp32 encoder + Adafactor factored state)
+now costs the same total output regardless of how many times the hourly
+cadence fires in an 8.5h session.
+
+Pushed as `maxamsecret/frida-full-sft` v11.

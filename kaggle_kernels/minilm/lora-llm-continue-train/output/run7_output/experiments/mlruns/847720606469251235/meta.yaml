@@ -1,0 +1,9 @@
+artifact_location: file:///kaggle/working/experiments/mlruns/847720606469251235
+creation_time: 1786492801158
+effective_trace_archival_retention: null
+experiment_id: '847720606469251235'
+last_update_time: 1786492801158
+lifecycle_stage: active
+name: ozon-matching
+trace_location: null
+workspace: default

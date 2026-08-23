@@ -10,7 +10,7 @@
 Три отдельных прогона, все на `items_human.parquet` (711,304 items,
 `seed=42`):
 
-1. `kaggle_kernels/frida-char-token-ratio` v1 — 1000 items, только
+1. `kaggle_kernels/frida/probes/char-token-ratio` v1 — 1000 items, только
    комбинированный текст (`Name: … Category: … Attributes: …` + префикс
    `paraphrase: `).
 2. То же кернел, v2 — 10,000 items, разбивка по полям (`name`/`category`/
@@ -84,7 +84,7 @@ Combined воспроизводит v1 (126.9 vs. ожидаемых ~126.6 из
 
 ## Кернелы/скрипты
 
-- `kaggle_kernels/frida-char-token-ratio/` — Kaggle CPU-кернел (токены,
+- `kaggle_kernels/frida/probes/char-token-ratio/` — Kaggle CPU-кернел (токены,
   оба прогона, v1 и v2 в истории версий).
 - Сырой char-анализ (раздел 3) посчитан локально, без Kaggle — код см. в
   истории сессии, использует только `polars` + `data/items_human.parquet`.

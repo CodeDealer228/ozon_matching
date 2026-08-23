@@ -1,0 +1,21 @@
+{
+  "id": "kirpich682/frida-full-sft-continue-e-llmfull-w2",
+  "title": "Frida Full Sft Continue E Llmfull W2",
+  "code_file": "frida_full_sft_continue_e_llmfull_w2.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenize-items-v3",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split",
+    "maxamsecret/frida-full-sft-w"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

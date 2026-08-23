@@ -8,8 +8,9 @@
 через LoRA-дообучение к нескольким параллельно исследуемым направлениям —
 более крупные энкодеры (BERTA, FRIDA, Giga-3B) и bi-encoder на
 Qwen3-Embedding. Актуальный лучший результат на реальном тестовом стенде —
-у BERTA cross-encoder + LoRA, дообученной на TPU с `PAIR_MAX_LENGTH=256`
-(см. таблицу ниже).
+у **продолжения** полного (не LoRA) файнтюна FRIDA (823M, все параметры
+обучаемые) с увеличенной LLM-подвыборкой (3M), обслуженного на
+`PAIR_MAX_LENGTH=188` (см. таблицу ниже).
 
 Подробности (точная формула препроцессинга, определение метрики, особенности
 железа, полная история экспериментов) — в **[CLAUDE.md](CLAUDE.md)**: этот
@@ -25,7 +26,10 @@ README — быстрый старт и карта репозитория, CLAUD
 
 | Сабмит (`submits/<dir>`) | Тест-скор | Val-скор | Архитектура |
 |---|---|---|---|
-| **`matching-berta_tpu_lora-submit`** (`submits/berta/tpu_lora`) | **0.47 (лучший)** | 0.7087 | BERTA (128.3M) cross-encoder + LoRA, TPU SFT на `matches_llm.parquet`+human, `PAIR_MAX_LENGTH=256` — чекпоинт восстановлен из упавшего рана на 50% эпохи, подробный разбор происхождения в `reports/berta_tpu_lora_provenance/` |
+| **`matching-frida_continue_c_llm3m_188-submit`** (`submits/frida/sft_continue/continue_c_llm3m`) | **0.487 (лучший)** | 0.7595 | FRIDA (823M), **продолжение** обучения `full_sft` full-SFT чекпоинта (0.7582) — LLM-подвыборка увеличена до 3M (было 1M), `HUMAN_WEIGHT=5.86` (пересчитан под баланс градиентов human:llm≈1:2 при новом объёме), epoch 1/2 (эксперимент прерван до конца, но чекпоинт валиден). Обслужен на `PAIR_MAX_LENGTH=188` (обучение — 192) — **новый стандарт для всех continue-сабмитов**, укладывается в тайминг (~16-19 мин на frida+head при этом батч-сайзе на реальном стенде). Обошёл `full_sft` (0.481) при более высоком val (0.7595 против 0.7582) |
+| `matching-frida_continue_a_baseline-submit` (`submits/frida/sft_continue/continue_a_baseline`, `PAIR_MAX_LENGTH=180`) | 0.478 | 0.7555 | тот же `continue`-рецепт, но без изменения LLM-подвыборки/весов (база для сравнения с (c)) — epoch 3/3 (`checkpoint_epoch03`), 16/20 мин на тест-стенде |
+| **`matching-frida_full_sft-submit`** (`submits/frida/full_sft/full_sft_180_256_5248`) | 0.481 | 0.7582 | FRIDA (823M) cross-encoder, **полный файнтюн** (все параметры, не LoRA — впервые в проекте), Adafactor + category-weighted focal loss, обучен на human item-disjoint 70/30 + LLM no-leak 1M-подвыборка, `PAIR_MAX_LENGTH=192` (обучение) / 180 (сервинг). Полный конфиг — `submits/frida/full_sft/full_sft_180_256_5248/README.md` |
+| `matching-berta_tpu_lora-submit` (`submits/berta/lora/tpu_lora`) | 0.47 | 0.7087 | BERTA (128.3M) cross-encoder + LoRA, TPU SFT на `matches_llm.parquet`+human, `PAIR_MAX_LENGTH=256` — чекпоинт восстановлен из упавшего рана на 50% эпохи, подробный разбор происхождения в `reports/berta_tpu_lora_provenance/` |
 | `berta_catboost_pca32` | 0.469 | 0.7419 | топ-чекпоинт + PCA(32) на эмбеддинге + classifier_score + tf-idf + category → CatBoost — фикс переобучения `berta_catboost_top_final` (см. ниже), почти закрыл разрыв, но всё ещё чуть ниже чистого классификатора |
 | **`tpu_human_llm_best_176_5120`** | **0.469** | 0.7060 | FRIDA + LoRA, `frida-llm-tpu-sft` continue-SFT (human+LLM вперемешку, резюмировано с epoch4/0.7660), самый ранний почасовой чекпоинт (`global_step=5177`, пик val этого прогона), обслужен на `PAIR_MAX_LENGTH=176` (обучен на 256) — **новый лучший FRIDA-результат на тесте**, обошёл все `berta_catboost`-варианты и вплотную подошёл к лучшему BERTA (0.47). Обгоняет сиблинга `tpu_human_llm_hour08_176_5120` и по val, и по тесту — обычная корреляция, не qwen-style инверсия |
 | `berta_tpu_lora_after_llm` | 0.466 | ~0.697 | тот же тренировочный кернел, чекпоинт на 100% эпохи (после фикса краша) — val у него реально **ниже** (против 0.7087 у 50%-чекпоинта, не просто устаревшая метрика в `train_state.json`) — согласуется с просадкой на тесте |
@@ -49,7 +53,7 @@ README — быстрый старт и карта репозитория, CLAUD
 понять, монотонна ли связь val↔тест на этом прогоне (три точки вместо двух)
 или `best`/0.469 — счастливое исключение. **Мердж-источник для
 `frida-percat-lora` держится на паузе** (см.
-`kaggle_kernels/frida-percat-lora/kernel-metadata.json`, сейчас всё ещё
+`kaggle_kernels/frida/percat/percat-lora/kernel-metadata.json`, сейчас всё ещё
 указывает на человеко-only epoch4/0.7660) — теперь, когда `best` дал 0.469
 (вплотную к лучшему BERTA 0.47), решение о переключении можно принимать не
 вслепую, но сама переключение — не то, что делается по умолчанию без
@@ -103,6 +107,17 @@ README — быстрый старт и карта репозитория, CLAUD
   `Frida Lora V2 Epoch`: val ≈0.69 → тест **0.386**. Val отличается на ~0.02,
   тест — на 0.084.
 
+  **Обновление 2: полный файнтюн (не LoRA) обошёл BERTA и превысил
+  линейную экстраполяцию.** `matching-frida_full_sft-submit`: val
+  **0.7582** → тест **0.481** — новый лучший результат проекта, впервые не
+  BERTA. CLAUDE.md's линейный fit `leaderboard ≈ 0.763×val − 0.146`
+  (построен по трём LoRA/cross-encoder точкам, экстраполяция) предсказал
+  бы для val=0.7582 тест ≈0.432 — реальный результат выше на ~0.05. Не
+  доказывает, что full-FT переносится на тест systematически лучше LoRA
+  при равном val (один чекпоинт, а не контролируемый A/B при
+  зафиксированной архитектуре) — но это первая точка данных для
+  full-FT-семейства, и она пробивает fit, построенный только по LoRA.
+
   **Важная оговорка про «val ≈0.69» у этого сабмита: это число никогда не
   измерялось на его весах.** В `train_state.json` чекпоинта лежит
   `{"global_step": 1127, "best_macro_pr_auc": 0.6937681383971788}`, а
@@ -111,7 +126,7 @@ README — быстрый старт и карта репозитория, CLAUD
   унаследованный running-best вместо метрики собственных весов, а лог кернела
   вернулся нулевого размера — та же ловушка со stale-метрикой, что разобрана в
   `reports/berta_tpu_lora_provenance/`. Реальный val меряется в
-  `kaggle_kernels/frida-validate-checkpoint`; веса сабмита и датасета
+  `kaggle_kernels/frida/probes/validate-checkpoint`; веса сабмита и датасета
   `maximmarkovbb/frida-lora-v2-epoch-last` совпадают побайтово по **обеим**
   половинам модели — `adapter_model.safetensors` (sha256 `6914cbb181b9c014…`)
   и `classifier.pt` (`75b4ce886c67555a…`), так что мерить есть что и ничего
@@ -121,7 +136,7 @@ README — быстрый старт и карта репозитория, CLAUD
   train/inference.** `frida-lora-v2-epoch` обучался на кэше
   `frida-tokenize-items-v2-cache`, чья политика парсит JSON атрибутов и
   выносит длинные/https/oem-значения в конец **до** обрезки по 384 символам.
-  Сабмит так не делает: `submits/frida/lora_v2_epoch/frida_lora/src/utils.py`
+  Сабмит так не делает: `submits/frida/lora/early/lora_v2_epoch/frida_lora/src/utils.py`
   режет сырую нераспарсенную строку атрибутов, то есть подаёт v1-порядок. До
   модели доезжают буквально другие символы. Это не рассуждение о
   генерализации, а измеримая величина — валидатор теперь считает один и тот же
@@ -459,7 +474,7 @@ non-zero exit code`) не тратит дневной лимит сабмито�
 
 ### `frida-llm-tpu-sft` (LLM+human, рецепт BERTA): val просел после первого часа и не восстановился
 
-`kaggle_kernels/frida-llm-tpu-sft` резюмировал лучший human-only чекпоинт
+`kaggle_kernels/frida/lora/continue/llm-tpu-sft` резюмировал лучший human-only чекпоинт
 (0.7660) и обучался на `matches_llm.parquet`+human вперемешку,
 `PAIR_MAX_LENGTH=256`, с новой `MultiLayerHead` (1024, 256) вместо
 одиночного `nn.Linear`. Сессия дошла до `CANCEL_ACKNOWLEDGED` на ~8 часах
@@ -502,8 +517,8 @@ Val резко просел сразу после первого часа и **�
 дополнительную причину просадки, не изолирован от эффекта самого LLM-микса.
 
 Оба крайних чекпоинта (`best`, `hour08`) собраны как сабмиты
-(`submits/frida/tpu_human_llm_best_176_5120`,
-`submits/frida/tpu_human_llm_hour08_176_5120`) на уже проверенном
+(`submits/frida/lora/length_176/tpu_human_llm_best_176_5120`,
+`submits/frida/lora/length_176/tpu_human_llm_hour08_176_5120`) на уже проверенном
 `PAIR_MAX_LENGTH=176`/`BATCH_SIZE_FIXED=5120` (реально прошедшем ODS на
 human-only линии, тест 0.4087) — та же логика «best vs last», что уже
 применялась для BERTA/Qwen: непонятно заранее, снижает ли качество
@@ -512,7 +527,7 @@ train/serve-рассинхрон v1/v2-кэша и незавершённый LR
 крайних точек пришли монотонными с val**: `best` (val 0.7060) → тест 0.469;
 `hour08` (val 0.6754) → тест 0.448 — обычная корреляция, не qwen-style
 инверсия. `hour02` (val 0.7004, между ними) собран третьим сабмитом
-(`submits/frida/tpu_human_llm_hour02_176_5120`), чтобы увидеть, монотонна
+(`submits/frida/lora/length_176/tpu_human_llm_hour02_176_5120`), чтобы увидеть, монотонна
 ли связь по всей траектории или `best`/`hour08` — просто две крайние точки
 случайно совпавшего направления.
 
@@ -520,7 +535,7 @@ train/serve-рассинхрон v1/v2-кэша и незавершённый LR
 
 **Самый очевидный рычаг — переключить `attn_implementation` на `"sdpa"` —
 уже пробовали и отклонили по веской причине.** В истории проекта
-(`kaggle_kernels/frida-lora-sft-human-only-10-epochs`) `sdpa` дал **100%
+(`kaggle_kernels/frida/lora/lora-sft-human-only-10-epochs`) `sdpa` дал **100%
 шагов NaN** на этой же модели: fused CUDA-кернелы
 `scaled_dot_product_attention` имеют задокументированные NaN-баги с
 padding-масками на bf16/fp16, особенно (но не только) на более старых
@@ -844,11 +859,11 @@ classifier_score + tf-idf + category) вышел **хуже** чистого к�
 **Следующий шаг (в проработке)**: закэшировать эмбеддинги на **всей**
 человеческой разметке (все 365,654 пар, не только val-срез), используя
 чекпоинт, который для этих конкретных пар не участвовал в обучении —
-кандидат: `kaggle_kernels/berta-tpu-human-continue-384` (дообучен уже
+кандидат: `kaggle_kernels/berta/training/sft/tpu-human-continue-384` (дообучен уже
 после топ-чекпоинта на human-only данных). Дальше — многослойная голова
 поверх зафиксированных эмбеддингов (архитектура ещё не выбрана), с
 промежуточным слоем как потенциальной фичей для CatBoost. Кэширующий
-кернел под это уже подготовлен (`kaggle_kernels/berta-embed-cache-all-human`),
+кернел под это уже подготовлен (`kaggle_kernels/berta/training/embeddings/embed-cache-all-human`),
 но пока не запущен — ждём подтверждения, что `berta-tpu-human-continue-384`
 действительно даёт прирост качества.
 
@@ -871,18 +886,18 @@ classifier_score + tf-idf + category) вышел **хуже** чистого к�
   (33M) + LoRA SFT на `matches.parquet`. Отправная точка проекта.
 - **BERTA** (`sergeyzh/BERTA`, 128.3M, дистиллят FRIDA в BERT-форме) —
   LoRA-дообученный cross-encoder, с несколькими вариантами головы: линейная
-  (`submits/probes/berta`, `submits/berta/tpu_lora`) и CatBoost поверх
-  эмбеддингов (`submits/berta/catboost`, `submits/berta/catboost_256_len`).
+  (`submits/probes/berta`, `submits/berta/lora/tpu_lora`) и CatBoost поверх
+  эмбеддингов (`submits/berta/catboost`, `submits/berta/catboost/catboost_256_len`).
   Обучающие кернелы: `kaggle_kernels/berta-lora-sft*`, `berta-merge-lora`,
   `berta-catboost-*`, `berta-llm-tpu-sft` (полномасштабный SFT на TPU
   v5e-8 поверх `matches_llm.parquet`).
 - **FRIDA** (`ai-forever/FRIDA`, 823M, T5-энкодер) — bi-encoder,
   LoRA-дообученный. Выбран как более дешёвая альтернатива для
   пере-токенизации (item-level кэш вместо per-pair). Кернелы:
-  `kaggle_kernels/frida-tokenize-items*`, `frida-lora-sft*`,
+  `kaggle_kernels/frida/tokenize/tokenize-items*`, `frida-lora-sft*`,
   `frida-lora-continue-2ep`, `frida-lora-v2-epoch` (актуальная версия —
   тайм-аут-устойчивые чекпоинты, новая политика упорядочивания атрибутов).
-  Сабмит: `submits/frida/lora_v2_epoch`, `submits/frida/tpu_human_256_epoch4`,
+  Сабмит: `submits/frida/lora/early/lora_v2_epoch`, `submits/frida/lora/length_256/tpu_human_256_epoch4`,
   `submits/probes/frida`.
 - **Giga-Embeddings-instruct** (3.45B, `giga3b_probe`) — проба
   bi-encoder-подхода на ещё большем энкодере; zero-shot cosine similarity
@@ -969,7 +984,7 @@ scripts/                     локальные dev-скрипты (сплит, 
 data/                        локальные копии parquet-файлов выше (в .gitignore)
 data/splits/                 канонический train/val сплит (маленький, в git — см. CLAUDE.md)
 negative_patterns/            по-категорийный набор hard-negative пар + описание паттернов
-                              (20 категорий, генерируется kaggle_kernels/negative-pattern-sampling)
+                              (20 категорий, генерируется kaggle_kernels/retrieval_probes/negative-pattern-sampling)
 reports/                     письменные находки: experiment_log.md (полная хронология),
                               per-category val-метрики, анализ пересечения LLM-меток
 submits/                     все сабмиты, по семействам моделей (2 уровня: <семейство>/<вариант>)

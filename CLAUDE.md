@@ -136,7 +136,7 @@ ruled out (monotonically hurts). Full derivation and raw numbers:
 Second-stage SFT on the epoch-7 checkpoint, mixing the human 80% train split
 with `matches_llm.parquet` (11.19M LLM soft-labeled pairs, continuous
 targets via `BCEWithLogitsLoss`, no threshold). Code:
-`kaggle_kernels/lora-llm-continue-train/`.
+`kaggle_kernels/minilm/lora-llm-continue-train/`.
 
 - `LR=4e-4` LLM-only regressed val_macro_pr_auc below the 0.5282 starting
   point and never recovered. Fix: `LR=2e-4` (the original run's own peak),
@@ -220,9 +220,9 @@ per-checkpoint numbers.
   pair↔items rejoin that cost continue-train ~9.5h/12h). `PAIR_MAX_LENGTH=128`
   (cost/quota choice, not the 384 near-lossless budget). Two sessions so
   far, each hit the 12h Kaggle wall before finishing one epoch: epoch 1
-  (`kaggle_kernels/frida-lora-sft-human-only-10-epochs`, account
+  (`kaggle_kernels/frida/lora/lora-sft-human-only-10-epochs`, account
   `maxamsecret`) reached val macro PR-AUC **0.652** @ 60% of 1 epoch;
-  epoch 2 (`kaggle_kernels/frida-lora-sft-epoch2`, account `rays0n`,
+  epoch 2 (`kaggle_kernels/frida/lora/lora-sft-epoch2`, account `rays0n`,
   resumes epoch 1's checkpoint) reached **0.674** @ 40% of its epoch. Both
   already beat the shipped MiniLM checkpoint (0.5282).
 - **BERTA** (`sergeyzh/BERTA`, BertModel, 128.3M, a FRIDA distillation) —
@@ -230,14 +230,14 @@ per-checkpoint numbers.
   `token_type_ids`), **mean pooling** (not CLS — BERTA's own model card
   calls this out as the one deliberate change from FRIDA),
   `target_modules=["query","key","value","dense"]`.
-  `kaggle_kernels/berta-lora-sft-human-only-20-epochs` (account `rays0n`)
+  `kaggle_kernels/berta/training/sft/lora-sft-human-only-20-epochs` (account `rays0n`)
   planned 20 epochs; hit the 12h wall at just 22% of that (global_step
   5016/22840), already at val macro PR-AUC **0.7111** — the best number in
   this project to date, still trending up, nowhere near converged.
 
 Debugging note carried by both: fp16 (and bf16 under `nn.DataParallel`)
 produced NaN from a specific layer onward — root-caused in
-`kaggle_kernels/frida-nan-diagnose` to `torch.autocast` opened in the
+`kaggle_kernels/frida/probes/nan-diagnose` to `torch.autocast` opened in the
 calling thread not propagating into `DataParallel`'s per-replica `forward()`
 threads (documented PyTorch behavior, not a bug in this code). Fix: open
 autocast **inside** the model's own `forward()`, not around the outer call.
@@ -254,8 +254,8 @@ for FRIDA, `rays0n/berta-lora-sft-checkpoint` for BERTA, which was never
 actually created) -- `kaggle datasets version` returned `Incompatible
 Dataset Type` for every `-r` mode tried (skip/zip/tar) against
 `frida-lora`, uploading real bandwidth each time without ever committing;
-the older datasets are unchanged. `kaggle_kernels/frida-lora-sft-epoch3`
-and `kaggle_kernels/berta-lora-sft-human-only-20-epochs`'s
+the older datasets are unchanged. `kaggle_kernels/frida/lora/lora-sft-epoch3`
+and `kaggle_kernels/berta/training/sft/lora-sft-human-only-20-epochs`'s
 `kernel-metadata.json` both point `dataset_sources` at the actual new
 dataset names now (not the old ones) -- if a checkpoint ever needs to move
 again, only `dataset_sources` needs updating, since the resume code
@@ -288,10 +288,10 @@ FRIDA inference specifically:
   tokenization with special tokens, `Category:` span excision (zero
   discriminative signal, proven), fair-share truncation to 128 — byte-match
   to what `frida-lora-sft-*` kernels train against, detailed in
-  `kaggle_kernels/frida-lora-sft-human-only-10-epochs/README.md`.
+  `kaggle_kernels/frida/lora/lora-sft-human-only-10-epochs/README.md`.
 
-Now tracked as `submits/frida/lora/lora_v2_epoch/` (epoch-1-lineage checkpoint,
-test 0.386) and `submits/frida/lora/tpu_human_256_epoch4/` (the newer
+Now tracked as `submits/frida/lora/early/lora_v2_epoch/` (epoch-1-lineage checkpoint,
+test 0.386) and `submits/frida/lora/length_256/tpu_human_256_epoch4/` (the newer
 `PAIR_MAX_LENGTH=256` checkpoint, val 0.7660, test not yet passed -- see its
 own README.md for the Check-stage timing investigation).
 
@@ -307,7 +307,9 @@ macro PR-AUC on our val split vs. the contest leaderboard's Mean PR-AUC:
 | FRIDA epoch 2 (not submitted) | 0.675 | ? |
 | BERTA (not submitted) | 0.711 | ? |
 | Qwen3 bi-encoder + LoRA + MLP head (teammate `grigoriyyy`, `bi-encoder` branch, not submitted, **different val split** — see caveat below) | 0.726 | ? |
-| **FRIDA full fine-tune (no LoRA, all 823M params trainable), served at `PAIR_MAX_LENGTH=180`** | 0.7582 | **0.481 (project best)** |
+| FRIDA full fine-tune (no LoRA, all 823M params trainable), served at `PAIR_MAX_LENGTH=180` | 0.7582 | 0.481 |
+| FRIDA `continue_a_baseline_3ep` (full-FT continued, same LLM-subsample size as the base full-SFT run, epoch 3/3), served at `PAIR_MAX_LENGTH=180` | 0.7555 | 0.478 |
+| **FRIDA `continue_c_llm3m_2ep` (full-FT continued, LLM-subsample raised 1M→3M, `HUMAN_WEIGHT=5.86` rebalanced, epoch 1/2), served at `PAIR_MAX_LENGTH=188`** | 0.7595 | **0.487 (project best)** |
 
 A least-squares fit on the three *confirmed* points (all cross-encoders on
 the same seed-42 val split) — `leaderboard ≈ 0.763 × val − 0.146` (R²≈0.996
@@ -321,29 +323,51 @@ share — see `kaggle_kernels/qwen3-bi-encoder-lora-sft/README.md` on the
 `bi-encoder` branch). A real second data point from a non-cross-encoder
 submission would be worth far more than refining this fit further.
 
-The FRIDA full fine-tune row is excluded from that 3-point fit for the same
-kind of reason the Qwen3 row is: it's on the NEW item-disjoint 70/30 split
+The FRIDA full fine-tune row (and its two `continue`-lineage descendants
+below it) are excluded from that 3-point fit for the same kind of reason
+the Qwen3 row is: they're on the NEW item-disjoint 70/30 split
 (`data/splits/matches_item_disjoint_70_30_seed42.parquet`), not the shared
 seed-42 pair-level split every fit point uses, and it's a genuinely
 different training recipe (full-FT + Adafactor + focal loss, not LoRA +
 BCEWithLogitsLoss) — not a controlled comparison. For what it's worth, the
-fit would have predicted leaderboard≈0.432 at val=0.7582; the real score
-(0.481) beat that by ~0.05 — one data point in favor of full-FT
-transferring at least as well as LoRA at comparable val, not proof of it.
+fit would have predicted leaderboard≈0.432 at val=0.7582 (the base
+full-SFT row); the real score (0.481) beat that by ~0.05 — one data point
+in favor of full-FT transferring at least as well as LoRA at comparable
+val, not proof of it.
+
+**`continue_c_llm3m_2ep` is the current project-best submission (test
+0.487)** — a `continue`-lineage full-FT run resumed from the base
+full-SFT checkpoint (val 0.7582, test 0.481) with the LLM subsample raised
+1M→3M and `HUMAN_WEIGHT` rebalanced to 5.86 (keeps the human:llm gradient
+mix at ≈1:2, the same ratio the base run's own 2.0/1M combination
+happened to land on). Only 1 of its planned 2 epochs finished before the
+run was interrupted, yet it already both out-vals (0.7595) and out-tests
+(0.487) the fully-finished base run — the plainest same-experiment
+sibling, `continue_a_baseline_3ep` (identical recipe, no LLM-subsample
+change, full 3/3 epochs), scored LOWER on both (0.7555 val / 0.478 test)
+despite training longer, isolating the 3M-subsample+rebalance change
+itself (not just "more `continue`-stage training") as what's actually
+driving the improvement. `PAIR_MAX_LENGTH=188` (up from 180) is now the
+project's serving-length default for every `continue` submission going
+forward — confirmed on the real stand to both score higher AND still fit
+the time budget (frida+head forward pass alone measured ~16-19 min at
+this length/`BATCH_SIZE_FIXED=5248`); `continue_a_baseline_3ep`'s own
+180-length run separately confirmed 16/20 min at the shorter length, so
+188 still has real margin.
 
 ## Repo layout
 
 ```
 notebooks/                                       training notebook (Kaggle, 2xT4, LoRA SFT)
-kaggle_kernels/validate-baseline-vs-lora/         baseline vs LoRA val comparison (script, 1xT4)
-kaggle_kernels/merge-lora/                        LoRA adapter -> merged weights
-kaggle_kernels/lora-timing-dryrun/                full-scale offline GPU timing dry-run
-kaggle_kernels/lora-llm-continue-train/           continued SFT on matches_llm.parquet
-kaggle_kernels/item-length-analysis/              untruncated field-length deciles over the 13M catalog
-kaggle_kernels/val-per-category-metrics/          per-category val PR-AUC of the merged LoRA (CPU)
-kaggle_kernels/giga3b-quantize-benchmark/         Giga-3B bi-encoder probe: raw quality + int8 save + throughput
-kaggle_kernels/frida-tokenize-items-human/        FRIDA per-item tokenization cache, human scope (~711K items, CPU)
-kaggle_kernels/frida-tokenize-items-llm/          FRIDA per-item tokenization cache, LLM scope (~12.38M items, TPU)
+kaggle_kernels/minilm/validate-baseline-vs-lora/         baseline vs LoRA val comparison (script, 1xT4)
+kaggle_kernels/minilm/merge-lora/                        LoRA adapter -> merged weights
+kaggle_kernels/minilm/lora-timing-dryrun/                full-scale offline GPU timing dry-run
+kaggle_kernels/minilm/lora-llm-continue-train/           continued SFT on matches_llm.parquet
+kaggle_kernels/shared_utils/item-length-analysis/              untruncated field-length deciles over the 13M catalog
+kaggle_kernels/shared_utils/val-per-category-metrics/          per-category val PR-AUC of the merged LoRA (CPU)
+kaggle_kernels/encoder_probes/giga3b/quantize-benchmark/         Giga-3B bi-encoder probe: raw quality + int8 save + throughput
+kaggle_kernels/frida/tokenize/tokenize-items-human/        FRIDA per-item tokenization cache, human scope (~711K items, CPU)
+kaggle_kernels/frida/tokenize/tokenize-items-llm/          FRIDA per-item tokenization cache, LLM scope (~12.38M items, TPU)
 scripts/make_canonical_split.py                   regenerates data/splits/*.parquet
 scripts/analyze_per_category.py                   offline post-analysis of saved val scores
 scripts/merge_lora.py, build_submission_zip.py, test_submission.py   submission build/test pipeline
@@ -408,7 +432,7 @@ Always also extract the actual built zip to a clean dir and test *that*
     files`). All BERTA kernels/datasets are namespaced `rays0n/berta-*`, not
     `maxamsecret/...`.
   - `maximmarkovbb` — third account, added for the FRIDA v2 continue-train
-    (`kaggle_kernels/frida-lora-v2-epoch`) with a clean, unused GPU quota.
+    (`kaggle_kernels/frida/lora/lora-v2-epoch`) with a clean, unused GPU quota.
     Also has read access to `maxamsecret/ozon-ecup-2026-matching`. Kernels/
     datasets under this account are namespaced `maximmarkovbb/...` and, per
     its own convention, always public.
@@ -514,7 +538,7 @@ Always also extract the actual built zip to a clean dir and test *that*
     training (~50 GPU-hours already sunk into those checkpoints) — only
     re-fit/re-derive the CatBoost head on non-leaking features. The
     project already has one relevant precedent to build on:
-    `kaggle_kernels/berta-catboost-leak` vs. `berta-catboost-noleak`
+    `kaggle_kernels/berta/catboost/catboost-leak` vs. `berta-catboost-noleak`
     (explicit train/val leakage A/B for a BERTA-only CatBoost head, see
     `kaggle_kernels/README.md`) — extend that same leak-vs-noleak
     methodology to the combined qwen+berta feature set rather than

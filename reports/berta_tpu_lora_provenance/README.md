@@ -20,7 +20,7 @@
 1. **`rays0n/berta-llm-continue-train`** (уже существовавший чекпоинт, часть
    более ранней линии BERTA — см. `kaggle_kernels/README.md`) → PEFT-адаптер,
    `global_step=2002`, `val_macro_pr_auc=0.7254629058736792`.
-2. **`kaggle_kernels/berta-merge-lora`** (`maxamsecret/berta-merge-lora`) —
+2. **`kaggle_kernels/berta/training/misc/merge-lora`** (`maxamsecret/berta-merge-lora`) —
    загружает базу `sergeyzh/BERTA` + адаптер из (1), `merge_and_unload()`.
    На выходе: `merged_encoder/` (обычный `BertModel`, `peft` не нужен) +
    `classifier.pt` (СТАРАЯ голова классификатора из (1), на этом шаге
@@ -29,14 +29,14 @@
    `{'base_model': 'sergeyzh/BERTA', 'hidden_dim': 768, 'source_checkpoint':
    'rays0n/berta-llm-continue-train', 'source_global_step': 2002,
    'source_val_macro_pr_auc': 0.7254629058736792}`.
-3. **`kaggle_kernels/berta-tokenize-llm-256`**
+3. **`kaggle_kernels/berta/training/tokenize/tokenize-llm-256`**
    (`maxamsecret/berta-tokenize-llm-256`) — TPU-кэш токенов по товарам,
    `human_scope` (711,304 товаров) + `llm_scope` (12,384,610 товаров),
    `ITEM_MAX_LENGTH=256`, `PREFIX="paraphrase: "`. (Этот кернел раньше в
    проекте перезапускался один раз из-за бага с prefix — здесь
    использован именно исправленный ран, что подтверждается путём монтирования
    в логе тренировки.)
-4. **`kaggle_kernels/berta-llm-tpu-sft`** (`maxamsecret/berta-llm-tpu-sft`)
+4. **`kaggle_kernels/berta/training/sft/llm-tpu-sft`** (`maxamsecret/berta-llm-tpu-sft`)
    — TPU v5e-8, `torch_xla`. Строит **свежую** LoRA (`get_peft_model`, не
    резюм) поверх мёрженной базы из (2); классификатор **warm-started** от
    `classifier.pt` из (2) (дальше дообучается, не заморожен). Обучен на

@@ -4,7 +4,7 @@
 (это ровно то, что лежит в `submits/lora/`, т.е. текущее сабмит-решение).
 **Данные:** канонический val-сплит `data/splits/matches_split_seed42.parquet` —
 73 131 пара, 18 778 позитивов (25.7 %), fingerprint `efddb3def997f87b`.
-**Как посчитано:** `kaggle_kernels/val-per-category-metrics/` (Kaggle CPU, 85 мин,
+**Как посчитано:** `kaggle_kernels/shared_utils/val-per-category-metrics/` (Kaggle CPU, 85 мин,
 14.4 пар/с), затем `scripts/analyze_per_category.py` поверх сохранённых скоров.
 
 ```
@@ -78,7 +78,7 @@ macro **0.5283 → 0.5725 (+0.044)**; до верхнего квартиля →
 
 ### 3. Почему они падают: разметка на уровне вариантов, а не моделей
 
-Разбор худших ошибок (`kaggle_kernels/val-per-category-metrics/output/error_samples.txt`)
+Разбор худших ошибок (`kaggle_kernels/shared_utils/val-per-category-metrics/output/error_samples.txt`)
 даёт симметричную картину:
 
 - **False positives** — один и тот же товар, отличается размером / цветом / артикулом,
@@ -149,12 +149,12 @@ macro **0.5283 → 0.5725 (+0.044)**; до верхнего квартиля →
 ## Воспроизведение
 
 ```bash
-kaggle kernels push -p kaggle_kernels/val-per-category-metrics          # Kaggle CPU, ~85 мин
+kaggle kernels push -p kaggle_kernels/shared_utils/val-per-category-metrics          # Kaggle CPU, ~85 мин
 kaggle kernels output maxamsecret/ozon-val-per-category-pr-auc-lora \
-    -p kaggle_kernels/val-per-category-metrics/output
+    -p kaggle_kernels/shared_utils/val-per-category-metrics/output
 python scripts/analyze_per_category.py \
-    --scores kaggle_kernels/val-per-category-metrics/output/val_scores.parquet \
-    --out-dir kaggle_kernels/val-per-category-metrics/output
+    --scores kaggle_kernels/shared_utils/val-per-category-metrics/output/val_scores.parquet \
+    --out-dir kaggle_kernels/shared_utils/val-per-category-metrics/output
 ```
 
 `val_scores.parquet` (id1, id2, label, category, prob, naive_jaccard — 73 131 строка)

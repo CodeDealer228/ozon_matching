@@ -1,0 +1,15 @@
+{
+  "baseline_no_lora": {
+    "macro_pr_auc": 0.37102762490987395,
+    "overall_ap": 0.4496939699214474,
+    "n_categories_evaluated": 20
+  },
+  "lora_finetuned": {
+    "macro_pr_auc": 0.5281597000614994,
+    "overall_ap": 0.6149594287140935,
+    "n_categories_evaluated": 20
+  },
+  "delta_macro_pr_auc": 0.15713207515162542,
+  "val_pairs": 73131,
+  "val_unique_categories": 20
+}

@@ -1,0 +1,21 @@
+{
+  "id": "ovosh789/frida-full-sft-continue-d-llmfull-rebal",
+  "title": "Frida Full Sft Continue D Llmfull Rebal",
+  "code_file": "frida_full_sft_continue_d_llmfull_rebal.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenize-items-v3",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split",
+    "maxamsecret/frida-full-sft-w"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

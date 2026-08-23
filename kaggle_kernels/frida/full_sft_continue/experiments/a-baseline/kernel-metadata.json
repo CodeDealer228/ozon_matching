@@ -1,0 +1,21 @@
+{
+  "id": "maxamsecret/frida-full-sft-continue-a-baseline",
+  "title": "Frida Full Sft Continue A Baseline",
+  "code_file": "frida_full_sft_continue_a_baseline.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-tokenize-items-v3",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split",
+    "maxamsecret/frida-full-sft-w"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
