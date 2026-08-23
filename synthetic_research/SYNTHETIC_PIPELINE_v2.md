@@ -15,10 +15,31 @@
 
 Предыдущий список слабых категорий (`Обувь`, `Ювелирные изделия`, `Одежда`, `Автотовары`) остается полезной отправной точкой, но перед генерацией Codex должен пересчитать текущий baseline Frida и подтвердить, какие категории действительно являются худшими сейчас.
 
-Датасет ошибок validation содержит как scores/errors моделей, так и точные model inputs:
+Актуальная лучшая Frida обучалась и проверялась на другом split, чем модель из предыдущего анализа ошибок. Canonical split для нового research:
+
+```text
+data/splits/matches_item_disjoint_70_30_seed42.parquet
+seed = 42
+train pairs = 256006
+validation pairs = 109648
+shared train/validation items = 0
+file size = 6192178 bytes
+file SHA-256 = 1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e
+validation fingerprint = 847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8
+```
+
+Reference submission актуальной Frida:
+
+```text
+https://storage.yandexcloud.net/ds-ods/files/submissions/0d0183cf-8864-4331-88be-f78da0c68dd2/8d18ca15/matching-frida_continue_c_llm3m_188-submit.zip
+```
+
+Существующий датасет ошибок содержит scores/errors моделей и точные model inputs:
 
 - `all_fp_fn_full_attributes_and_exact_inputs.jsonl`
 - внешняя копия: https://www.kaggle.com/datasets/grigoriyyy/all-fp-and-fn-on-validation
+
+Но этот artifact нельзя считать актуальным для новой Frida без строгой проверки identity модели и split. Если identity не совпадает, predictions и FP/FN dump нужно пересоздать на canonical split выше. В частности, гипотезу `critical_attribute_mismatch` нужно повторно проверить глазами на ошибках новой Frida и подтвердить, что она по-прежнему является одним из основных failure modes.
 
 Validation используется только для понимания **failure modes**. Synthetic training examples создаются только из **human train**.
 
@@ -82,11 +103,13 @@ Validation используется только для понимания **fai
 Перед новым исследованием и генерацией:
 
 1. Определить точный текущий checkpoint/config Frida, который команда считает актуальным.
-2. Пересчитать per-category AP на canonical untouched validation split.
-3. Сохранить macro AP и AP по всем категориям.
-4. Подтвердить целевые категории для synthetic-эксперимента.
-5. Построить/прочитать Frida FP/FN subset для этих категорий.
-6. Убедиться, что для analysis доступны exact Frida input и truncation diagnostics.
+2. Проверить canonical split byte-for-byte по размеру и SHA-256, указанным в разделе 0; не продолжать при несовпадении.
+3. Пересчитать predictions и per-category AP актуальной Frida на validation из этого split.
+4. Сохранить macro AP и AP по всем категориям.
+5. Подтвердить целевые категории для synthetic-эксперимента.
+6. Построить новый Frida FP/FN subset для этих категорий.
+7. Вручную проверить, что `critical_attribute_mismatch` остается актуальным систематическим failure mode новой Frida.
+8. Убедиться, что для analysis доступны exact Frida input и truncation diagnostics.
 
 Не использовать старый рейтинг категорий BERTA как неявный источник истины, если актуальная Frida дает другую картину.
 
@@ -118,7 +141,9 @@ Frida prediction/score = match-like
 - product subtype;
 - другие category-specific характеристики.
 
-Нельзя заранее считать, что color, size, material и т. п. являются identity-critical.
+По разъяснению организаторов, каждое значение параметра, доступное через переключатель внутри карточки Ozon (размер, цвет и т. п.), считается отдельным товаром. Поэтому такие variant dimensions можно рассматривать как источник корректных negatives.
+
+Однако это разъяснение не превращает любое поле `color`, `size`, `material` и т. п. в безусловное глобальное правило мутации: продавцы могут зашивать в переключатели вообще другие товары, а human labels и заполнение attributes могут быть шумными. Для генерации по-прежнему нужен подтвержденный train-контекст или надежно определенная variant family; противоречащие human-positive примеры делают правило неоднозначным для текущего датасета.
 
 ### 3.2. FN/positive cases — контрпримеры
 
@@ -197,6 +222,14 @@ verdict
 2. заново подтвердить паттерн на train;
 3. на train evidence построить source pools для A2/C;
 4. не копировать validation item IDs, конкретные пары или значения в synthetic train только потому, что они были замечены на validation.
+
+Перед построением source pools обязательна защита от утечки:
+
+- загрузить только строки `split == train` из exact canonical split;
+- проверить размер и SHA-256 parquet byte-for-byte;
+- проверить `shared train/validation items == 0`; при item-disjoint split это также гарантирует отсутствие общих unordered pairs;
+- сохранить в generation manifest путь split, SHA-256, validation fingerprint и `seed = 42`;
+- не передавать генератору validation items, IDs, пары или конкретные значения из validation examples.
 
 Правильная схема:
 
@@ -467,6 +500,12 @@ new_value = 70Ah
 
 Qwen возвращает synthetic item, где изменился только этот semantic dimension.
 
+До запуска pilot нужно собрать и вручную проверить `3–10` максимально качественных и разнообразных few-shot examples. Они должны покрывать разные product families, формы записи units и случаи, когда одна characteristic встречается одновременно в `name` и `attributes`. Few-shot pack хранится как отдельный версионируемый artifact; в generation manifest записываются его путь и SHA-256.
+
+Generation model пока не фиксируется: команда отдельно сравнит доступные варианты. Реальный бюджет планирования — две T4, которые можно запускать параллельно, примерно `7 × 30` GPU-часов квоты; TPU v5e-8 доступна существенно меньше. Pilot не должен зависеть от большого TPU-бюджета.
+
+Для воспроизводимости сохраняются exact model ID/revision, prompt template, few-shot pack, decoding parameters и seed каждого generation shard. Разнообразие создается заранее зафиксированным набором seeds и source items, а не незафиксированной случайностью.
+
 ---
 
 ## 14. Обязательная синхронизация name ↔ attributes в C
@@ -501,6 +540,8 @@ attributes.capacity = "70 А·ч"
 
 Synthetic item должен оставаться внутренне согласованным.
 
+Пример с `60Ah -> 70Ah` намеренно схематичный и строгий. Для первого pilot это принимается как guardrail, удерживающий Qwen в рамках одной semantic mutation; расширять свободу rewrite можно только после анализа accepted/rejected examples.
+
 ---
 
 ## 15. Валидация C
@@ -517,7 +558,9 @@ Generation rejected, если выполняется хотя бы одно:
 - synthetic является duplicate;
 - correctness нельзя достаточно надежно подтвердить.
 
-При сомнении — reject и regenerate.
+При сомнении — reject и перейти к следующему source example. Повторно генерировать тот же rejected example нельзя: отсутствие или ненадежное распознавание critical attribute является допустимой причиной пропуска, а regeneration увеличивает риск неконтролируемой мутации.
+
+Для каждого отказа сохраняется `reject_reason`. Отдельный бинарный классификатор `critical attribute present / absent` можно исследовать позднее, но он не является обязательной частью первого pilot.
 
 ---
 
@@ -550,12 +593,13 @@ train + SYN_A2 + SYN_C
 Сначала:
 
 1. завершить Frida error taxonomy;
-2. сгенерировать примерно `50–100` A2 candidates на выбранную категорию;
-3. сгенерировать примерно `50–100` C candidates на выбранную категорию;
-4. вручную посмотреть accepted/rejected examples;
-5. проанализировать A2 `hardening_delta`;
-6. проверить distribution C по critical dimensions и replacement values;
-7. измерить rejection rate и source-item concentration.
+2. собрать и утвердить `3–10` diverse few-shot examples;
+3. сгенерировать примерно `50–100` A2 candidates на выбранную категорию;
+4. сгенерировать примерно `50–100` C candidates на выбранную категорию;
+5. вручную посмотреть accepted/rejected examples;
+6. проанализировать A2 `hardening_delta`;
+7. проверить distribution C по critical dimensions и replacement values;
+8. измерить rejection rate, reject reasons и source-item concentration.
 
 Только после quality review масштабировать генерацию, например до `1000` accepted synthetics на целевую категорию.
 
@@ -567,11 +611,14 @@ train + SYN_A2 + SYN_C
 
 Фиксировать:
 
-- human train split;
-- untouched human validation split;
+- canonical split path, file size, SHA-256 и validation fingerprint;
+- human train rows из этого split;
+- untouched human validation rows из этого же split;
 - training hyperparameters;
-- seed, где это возможно;
+- split seed, generation seeds и training seed;
 - evaluation code.
+
+Перед каждым сравнительным запуском split должен совпасть byte-for-byte с зафиксированным parquet. Проверка только filename, row count или логического состава недостаточна.
 
 Отчет должен содержать:
 

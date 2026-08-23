@@ -105,6 +105,10 @@ uncertain
 
 Это создало бы noisy labels.
 
+Позднее организаторы уточнили product definition: каждое значение параметра, доступное через переключатель внутри карточки Ozon (размер, цвет и т. п.), считается отдельным товаром. Это позволяет использовать variant dimensions как источник negatives и снимает прежнее опасение, что переключаемый вариант обязательно сохраняет identity.
+
+При этом результат `pipeline_v1` не отменяется. Он проверял, можно ли вывести надежное **глобальное** правило только из `category + attribute`, а не является ли конкретный переключаемый вариант отдельным товаром по правилам соревнования. Human labels, attributes и seller-created variant groups могут быть шумными; продавец способен связать переключателем вообще разные товары. Поэтому новое разъяснение повышает приоритет variant dimensions для C, но не разрешает слепую мутацию любого одноименного поля без train-supported context.
+
 ---
 
 ## 4. Важное ограничение: semantic characteristic ≠ одно поле
@@ -364,6 +368,8 @@ critical_dimension = capacity_Ah
 
 а не запоминает конкретно `60` и `70`.
 
+Разъяснение организаторов дополнительно подтверждает, что controlled mutation переключаемого параметра может давать корректный negative. Но pipeline должен либо надежно определить variant family, либо подтвердить dimension на human train: название поля само по себе все еще недостаточно.
+
 ---
 
 # 10. Validation-error dataset
@@ -387,7 +393,9 @@ https://www.kaggle.com/datasets/grigoriyyy/all-fp-and-fn-on-validation
 - exact model-visible inputs;
 - truncation diagnostics.
 
-Этот artifact меняет research strategy: теперь можно анализировать **реальные model failure modes**, а не только общие attribute statistics.
+Этот artifact изменил research strategy: стало можно анализировать **реальные model failure modes**, а не только общие attribute statistics.
+
+Однако он был построен для предыдущей модели/split и теперь является историческим, пока не доказано строгое совпадение identity. Его нельзя автоматически использовать как FP/FN актуальной Frida.
 
 ---
 
@@ -405,6 +413,27 @@ https://www.kaggle.com/datasets/grigoriyyy/all-fp-and-fn-on-validation
 BERTA может использоваться только как исторический/reference comparison.
 
 Целевые weak categories также нужно заново определить по актуальным Frida validation metrics.
+
+После следующего review зафиксирован canonical split актуальной лучшей Frida:
+
+```text
+data/splits/matches_item_disjoint_70_30_seed42.parquet
+seed = 42
+train pairs = 256006
+validation pairs = 109648
+shared train/validation items = 0
+file size = 6192178 bytes
+file SHA-256 = 1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e
+validation fingerprint = 847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8
+```
+
+Reference submission актуальной Frida:
+
+```text
+https://storage.yandexcloud.net/ds-ods/files/submissions/0d0183cf-8864-4331-88be-f78da0c68dd2/8d18ca15/matching-frida_continue_c_llm3m_188-submit.zip
+```
+
+Решение: predictions, per-category metrics и FP/FN нужно пересчитать именно на этом split. После пересчета требуется вручную подтвердить, что `critical_attribute_mismatch` остается одним из основных систематических failure modes новой Frida.
 
 ---
 
@@ -439,6 +468,16 @@ failure-mode hypothesis
     ↓
 генерировать только из human train
 ```
+
+После review защита от leakage усилена техническим identity-контрактом:
+
+- split фиксируется byte-for-byte по file size и SHA-256;
+- сохраняются `seed = 42` и validation fingerprint;
+- проверяется нулевой overlap items между train и validation;
+- generation manifest связывает каждый synthetic artifact с exact split hash;
+- validation IDs, пары и конкретные значения не передаются генератору.
+
+Проверки только filename или row count недостаточно: другой parquet с тем же названием/числом строк считается другим split.
 
 ---
 
@@ -525,7 +564,29 @@ A2 и C сначала должны оставаться отдельными, �
 
 ---
 
-# 16. Что уже принято, а что еще гипотеза
+# 16. Дополнительные generation guardrails после review
+
+## Compute budget
+
+Generation должна планироваться под две T4 с возможностью параллельного запуска и суммарной квотой порядка `7 × 30` GPU-часов. TPU v5e-8 доступна существенно меньше, поэтому pilot не должен зависеть от большого TPU-бюджета. Конкретную generation model команда выберет отдельно после оценки доступных вариантов.
+
+## Few-shot quality
+
+До pilot нужно собрать и вручную утвердить `3–10` максимально качественных и разнообразных few-shot examples. Они становятся отдельным версионируемым artifact с SHA-256. Без готового few-shot pack массовая generation не начинается.
+
+## Reproducibility и diversity
+
+В generation manifest сохраняются exact model ID/revision, prompt template, few-shot hash, decoding parameters, source IDs и seed каждого shard. Разнообразие обеспечивается заранее зафиксированным набором seeds и source items.
+
+## Reject policy
+
+Если critical attribute отсутствует или Qwen не смог надежно применить одну controlled mutation, example отклоняется и source пропускается. Regeneration того же rejected source не выполняется. Возможный бинарный классификатор наличия critical attribute остается отдельной research hypothesis.
+
+Строгая синхронизация всех representations (`name` и `attributes`) остается намеренным guardrail первого pilot, даже если схематический пример `60Ah -> 70Ah` выглядит искусственно строгим.
+
+---
+
+# 17. Что уже принято, а что еще гипотеза
 
 ## Принято
 
@@ -536,6 +597,11 @@ A2 и C сначала должны оставаться отдельными, �
 - A2 обязан сохранять identity товара.
 - C меняет одну semantic characteristic и синхронизирует все representations.
 - C может генерировать несколько replacements по одному train-supported critical dimension.
+- Переключаемые параметры Ozon считаются разными товарами, но глобальное правило только по имени attribute все еще недопустимо.
+- Актуальный Frida research использует exact item-disjoint split seed 42 и проверяет его byte-for-byte.
+- Старый FP/FN artifact нельзя использовать без строгого совпадения model/split identity.
+- После reject source example пропускается без regeneration.
+- До generation утверждаются `3–10` diverse few-shot examples.
 - A2 и C сначала обучаются отдельно.
 - Сначала pilot, потом scale.
 
@@ -550,7 +616,7 @@ A2 и C сначала должны оставаться отдельными, �
 
 ---
 
-# 17. Связь документов
+# 18. Связь документов
 
 Этот файл — история решений и rationale.
 
