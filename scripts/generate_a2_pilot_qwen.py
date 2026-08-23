@@ -73,6 +73,28 @@ def identifier_like_tokens(value: object, helpers) -> set[str]:
     return result
 
 
+def token_supported_by_item2(token: str, evidence_tokens: set[str]) -> bool:
+    if token in evidence_tokens:
+        return True
+    # Russian adjective/noun inflections often change only the ending:
+    # ``красное`` -> ``красного``, ``проба`` -> ``пробы``.  A sufficiently
+    # long common stem is evidence, while short codes/brands still require an
+    # exact match.
+    if not re.fullmatch(r"[а-я]+", token) or len(token) < 5:
+        return False
+    for evidence in evidence_tokens:
+        if not re.fullmatch(r"[а-я]+", evidence) or len(evidence) < 5:
+            continue
+        common = 0
+        for left, right in zip(token, evidence):
+            if left != right:
+                break
+            common += 1
+        if common >= 4 and common / min(len(token), len(evidence)) >= 0.70:
+            return True
+    return False
+
+
 def build_messages(pack: dict[str, object], row: object) -> list[dict[str, str]]:
     system = (
         "Ты делаешь A2 hardening для product matching. Есть два разных товара A и B из "
@@ -164,7 +186,9 @@ def validate_rewrite(row: object, rewritten: str, helpers) -> tuple[bool, list[s
     copied_item1_only = sorted(
         token
         for token in added_tokens & (item1_tokens - item2_tokens)
-        if token not in attrs2_tokens and token not in COMMON_SURFACE_WORDS and len(token) >= 3
+        if not token_supported_by_item2(token, attrs2_tokens)
+        and token not in COMMON_SURFACE_WORDS
+        and len(token) >= 3
     )
     if copied_item1_only:
         reasons.append("copied_unsupported_fact_from_item1")
@@ -177,6 +201,8 @@ def validate_rewrite(row: object, rewritten: str, helpers) -> tuple[bool, list[s
 
     old_similarity = helpers.name_similarity(row.name1, row.name2)[0]
     new_similarity = helpers.name_similarity(row.name1, rewritten)[0] if rewritten else 0.0
+    if new_similarity <= old_similarity and "trivial_normalization" not in reasons:
+        reasons.append("not_harder_by_name_similarity")
     diagnostics = {
         "old_name_similarity": old_similarity,
         "new_name_similarity": new_similarity,
@@ -368,7 +394,25 @@ def main() -> None:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
         print(f"[{position}/{len(planned)}] {row.category}: {record['request_status']}", flush=True)
 
-    records = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    raw_records = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    pool_by_hash = pool.set_index("source_pair_sha256")
+    records: list[dict[str, object]] = []
+    for raw_record in raw_records:
+        record = dict(raw_record)
+        if record.get("request_status") == "complete" and record.get("rewritten_name2"):
+            source_hash = str(record["source_pair_sha256"])
+            if source_hash not in pool_by_hash.index:
+                raise RuntimeError(f"Raw response source is absent from the current pool: {source_hash}")
+            source_row = pool_by_hash.loc[source_hash]
+            accepted, reasons, diagnostics = validate_rewrite(
+                source_row,
+                str(record["rewritten_name2"]),
+                helpers,
+            )
+            record["accepted_by_deterministic_validator"] = accepted
+            record["reject_reasons"] = reasons
+            record["diagnostics"] = diagnostics
+        records.append(record)
     results = pd.DataFrame(records)
     results_path = args.output_dir / "a2_pilot_results.parquet"
     results.to_parquet(results_path, index=False)
