@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "branch": "A2",
+  "purpose": "identity-preserving name-only hardening of real human-train negatives",
+  "source_scope": "canonical_human_train_only",
+  "validation_examples_used": false,
+  "canonical_split_sha256": "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e",
+  "validation_fingerprint": "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8",
+  "a2_source_pool_sha256": "2dee9a0b5b2ef54c4210b07b114346057bddc45effe728e2e43056f42505dd28",
+  "rules": [
+    "Rewrite only name2; attributes2 and category are immutable.",
+    "Preserve every fact already present in name2 and attributes2.",
+    "Do not copy a brand, model, article, number, size, color, quantity, compatibility, or other fact from name1 unless it already exists in item2.",
+    "Make the wording and ordering more similar to name1 while keeping item2 a different product.",
+    "Return only the rewritten name2."
+  ],
+  "examples": [
+    {
+      "category": "Автотовары",
+      "id1": 627065249498,
+      "id2": 163208795462,
+      "source_pair_sha256": "07ddab90dff7cb95beb3265ae7a39f8d2093e5303f8cd4eb2274672f09c6ae5b",
+      "name1": "kiwix / штрих корректор/ маркер 2в1 renault trucks 3667 gris 20 мл",
+      "name2": "штрих корректор/ маркер 2в1 renault trucks 2682 gris 20 мл",
+      "rewritten_name2": "Kiwix / штрих корректор/маркер 2в1 Renault Trucks 2682 Gris, 20 мл"
+    },
+    {
+      "category": "Автотовары",
+      "id1": 17180014902,
+      "id2": 850403680956,
+      "source_pair_sha256": "ec39651e73b6db1698bf641674d0bf3155ee90247fe635c30a4ff440eccce360",
+      "name1": "coolpart накидки-чехлы для форд эйдж (2015 - 2018) внедорожник 5 дверей / ford edge на передние сиденья luxe soty, велюр, черный с бежевой строчкой",
+      "name2": "накидки-чехлы для форд куга (2012 - 2016) внедорожник 5 дверей / ford kuga на передние сиденья luxe soty, велюр, черный с бежевой строчкой.",
+      "rewritten_name2": "Coolpart накидки-чехлы для форд куга (2012 - 2016) внедорожник 5 дверей / Ford Kuga на передние сиденья Luxe Soty, велюр, черный с бежевой строчкой"
+    },
+    {
+      "category": "Обувь",
+      "id1": 223338359071,
+      "id2": 111669273350,
+      "source_pair_sha256": "817950a459b7fad5c312b7ac5df509bf6bed724b0661e72f0f5914492c9f7f8c",
+      "name1": "сапоги резиновые smile of milady",
+      "name2": "smile of milady / резиновые сапоги детские",
+      "rewritten_name2": "Сапоги резиновые детские Smile of Milady"
+    },
+    {
+      "category": "Галантерея и аксессуары",
+      "id1": 51539679346,
+      "id2": 146028912983,
+      "source_pair_sha256": "3a84bc21e731ea0dce30f013794b7f8f8b75b974e715223d83f2d7cc4042632b",
+      "name1": "paw patrol / рюкзак детский, 23х21х10 см, щенячий патруль",
+      "name2": "рюкзак детский, 23х21х10 см, щенячий патруль",
+      "rewritten_name2": "Paw Patrol / рюкзак детский, 23х21х10 см, Щенячий патруль"
+    },
+    {
+      "category": "Одежда",
+      "id1": 824633838520,
+      "id2": 60129638785,
+      "source_pair_sha256": "bc21ddc53e18070d0bedbea516a08ad9025b904df1db86f4151c6261c048ecfe",
+      "name1": "компрессионные чулки medi черный, 2 класс компрессии",
+      "name2": "medi / чулки компрессионные 2 класс компрессии",
+      "rewritten_name2": "Чулки компрессионные Medi, черный, 2 класс компрессии"
+    },
+    {
+      "category": "Ювелирные изделия",
+      "id1": 395137111521,
+      "id2": 171798801225,
+      "source_pair_sha256": "e4f1dba51d0315ab57c170b233cdc262d0a4b4c864ec0e108df077e018c91fdb",
+      "name1": "ювелирочка / серебряное кольцо с перламутром и фианитами",
+      "name2": "серебряное кольцо с перламутром и фианитами",
+      "rewritten_name2": "Ювелирочка / серебряное кольцо с перламутром и фианитами"
+    }
+  ]
+}
