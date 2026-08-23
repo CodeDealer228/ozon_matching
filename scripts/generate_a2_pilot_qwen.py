@@ -306,7 +306,10 @@ def main() -> None:
     parser.add_argument("--per-category", type=int, default=20)
     parser.add_argument("--seed", type=int, default=20260823)
     parser.add_argument("--timeout", type=int, default=120)
-    parser.add_argument("--max-retries", type=int, default=3)
+    # One transport retry is enough for the pilot.  A larger default can stall
+    # the sequential run for many minutes on a single unhealthy connection;
+    # the failed source is recorded explicitly and can be audited later.
+    parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
