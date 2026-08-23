@@ -1,0 +1,19 @@
+{
+  "id": "maxamsecret/frida-full-sft-error-analysis",
+  "title": "FRIDA Full-SFT Baseline and Error Analysis",
+  "code_file": "frida_full_sft_error_analysis.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-item-disjoint-split"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
