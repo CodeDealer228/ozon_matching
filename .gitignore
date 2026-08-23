@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+.idea/
 
 # Raw competition data -- heavy, fetch from the Kaggle dataset instead
 # (see README.md for exact download commands). data/splits/ is OUR derived
