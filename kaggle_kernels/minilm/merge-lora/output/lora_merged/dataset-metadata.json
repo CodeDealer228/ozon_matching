@@ -1,7 +1,0 @@
-{
-    "id": "maxamsecret/ozon-lora-merged-minilm",
-    "title": "Ozon LoRA MiniLM - merged weights (no peft)",
-    "subtitle": "MiniLM cross-encoder with LoRA merged in + classifier head",
-    "description": "Output of scripts/merge_lora.py (kaggle_kernels/merge-lora/merge_lora.py): the LoRA adapter from maxamsecret/ozon-lora-minilm-finetuned (best/ checkpoint) merged into the base encoder via merge_and_unload(), so inference needs only transformers.AutoModel, no peft dependency. Verified behaviorally identical to the PEFT-wrapped model on dummy batches (max abs diff 1.19e-6) before saving. Files: model.safetensors + config.json + tokenizer.json + tokenizer_config.json (merged encoder) + classifier.pt (trained Linear(384,1) head).",
-    "licenses": [{"name": "CC0-1.0"}]
-}

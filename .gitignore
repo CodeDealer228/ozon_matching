@@ -61,9 +61,13 @@ submits/probes/*/matching-*-submit.zip
 submits/matching-*-submit/
 
 # Kaggle kernel run artifacts -- downloaded outputs/pulled sources,
-# regenerate by re-running the kernel (see kaggle_kernels/*/kernel-metadata.json).
-kaggle_kernels/*/output/
-kaggle_kernels/*/pulled/
+# regenerate by re-running the kernel (see kernel-metadata.json next to each
+# script). ** (not a single *) because kernels now live 2-4 levels deep
+# under kaggle_kernels/ (e.g. kaggle_kernels/frida/lora/tpu-human-sft/) --
+# a single-level glob here silently stopped matching after that restructure
+# and let ~90 output/log/checkpoint files get committed by accident.
+kaggle_kernels/**/output/
+kaggle_kernels/**/pulled/
 
 # Scratch / local test artifacts (downloaded adapters, extracted zips for
 # testing, sampled parquet files, prediction CSVs from smoke tests).
