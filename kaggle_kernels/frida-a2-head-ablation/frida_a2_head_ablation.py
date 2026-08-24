@@ -313,8 +313,10 @@ def encode_pairs(name, frame, id_to_item, tokenizer, encoder, device):
 def load_head(utils, classifier_path: Path, device):
     import torch
 
-    head = utils.FullSftHead(1024, layer_sizes=(1024, 512, 128), dropout=0.2)
-    head.load_state_dict(torch.load(classifier_path, map_location="cpu"))
+    state_dict = torch.load(classifier_path, map_location="cpu")
+    hidden_dim = int(state_dict["blocks.0.0.weight"].shape[1])
+    head = utils.FullSftHead(hidden_dim, layer_sizes=(1024, 512, 128), dropout=0.2)
+    head.load_state_dict(state_dict)
     return head.float().to(device)
 
 
