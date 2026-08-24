@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.request
 import zipfile
 
 # Kaggle CPU image ships torchao 0.10.0, while current PEFT refuses to use
@@ -29,6 +30,8 @@ ADAPTER_EXPERIMENT = "frida_format_adapter_v4_c_last"
 WORKING = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 STAGE = os.path.join(WORKING, "_frida_format_adapter_v4_submit")
 ZIP_PATH = os.path.join(WORKING, "matching-frida_format_adapter_v4_best_188-submit.zip")
+UTILS2_URL = ("https://raw.githubusercontent.com/CodeDealer228/ozon_matching/"
+              "66791bd/scripts/formatting/utils_v2.py")
 
 
 def log(message):
@@ -102,8 +105,9 @@ def main():
     torch.save(bf16_state(os.path.join(base_dir, "head.pt")), os.path.join(STAGE, "classifier.pt"))
 
     os.makedirs(os.path.join(STAGE, "src"), exist_ok=True)
-    shutil.copy2(os.path.join(os.path.dirname(__file__), "utils2.py"),
-                 os.path.join(STAGE, "src", "utils.py"))
+    utils_path = os.path.join(STAGE, "src", "utils.py")
+    urllib.request.urlretrieve(UTILS2_URL, utils_path)
+    subprocess.check_call([sys.executable, "-m", "py_compile", utils_path])
     write_text(os.path.join(STAGE, "run.py"), '''import argparse
 import os
 from src.utils import predict_pipeline
