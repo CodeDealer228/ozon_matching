@@ -91,6 +91,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=repo / "artifacts/synthetic_v2/a2_pilot_v3_frida_scores",
     )
+    parser.add_argument(
+        "--expected-generation-profile",
+        default=EXPECTED_GENERATION_PROFILE,
+    )
+    parser.add_argument("--select-best-per-source", action="store_true")
     parser.add_argument("--batch-size", type=int, default=2)
     return parser.parse_args()
 
@@ -107,7 +112,7 @@ def main() -> None:
         generation_manifest = json.load(handle)
     if generation_manifest.get("status") != "complete":
         raise RuntimeError("Generation manifest is not complete")
-    if generation_manifest.get("profile") != EXPECTED_GENERATION_PROFILE:
+    if generation_manifest.get("profile") != args.expected_generation_profile:
         raise RuntimeError("Unexpected generation profile")
     if generation_manifest.get("uncertain_submissions") != 0:
         raise RuntimeError("Cannot score generation with uncertain submissions")
@@ -131,7 +136,10 @@ def main() -> None:
     accepted = candidates[candidates["accepted_by_deterministic_validator"]].copy()
     if accepted.empty:
         raise RuntimeError("No deterministically accepted candidates to score")
-    if accepted["source_pair_sha256"].duplicated().any():
+    if (
+        accepted["source_pair_sha256"].duplicated().any()
+        and not args.select_best_per_source
+    ):
         raise RuntimeError("Expected at most one accepted candidate per source pair")
 
     required_source_columns = {
@@ -149,7 +157,7 @@ def main() -> None:
         source[list(required_source_columns)],
         on=["source_pair_sha256", "category"],
         how="left",
-        validate="one_to_one",
+        validate="many_to_one" if args.select_best_per_source else "one_to_one",
     )
     if joined["name1"].isna().any():
         raise RuntimeError("Accepted candidate is missing from the source pool")
@@ -216,9 +224,44 @@ def main() -> None:
     result.to_parquet(scores_path, index=False)
     deltas = result["hardening_delta"].to_numpy(dtype=np.float64)
     useful = deltas > 0
+    selection_summary = None
+    selection_artifacts = None
+    if args.select_best_per_source:
+        best = (
+            result.sort_values(
+                ["source_pair_sha256", "hardening_delta"],
+                ascending=[True, False],
+            )
+            .groupby("source_pair_sha256", as_index=False, sort=False)
+            .first()
+        )
+        selected = best[best["hardening_delta"] > 0].copy()
+        best_path = args.output_dir / "best_candidate_per_source.parquet"
+        selected_path = args.output_dir / "selected_synthetics.parquet"
+        best.to_parquet(best_path, index=False)
+        selected.to_parquet(selected_path, index=False)
+        best_deltas = best["hardening_delta"].to_numpy(dtype=np.float64)
+        selection_summary = {
+            "sources_with_accepted_candidates": int(len(best)),
+            "sources_selected_positive_delta": int(len(selected)),
+            "selected_source_fraction": float(len(selected) / len(best)),
+            "best_delta_minimum": float(best_deltas.min()),
+            "best_delta_median": float(np.median(best_deltas)),
+            "best_delta_maximum": float(best_deltas.max()),
+            "gate_positive_fraction_at_least_0_60": bool(
+                len(selected) / len(best) >= 0.60
+            ),
+            "gate_median_positive": bool(np.median(best_deltas) > 0),
+        }
+        selection_artifacts = {
+            "best_candidate_per_source_sha256": file_sha256(best_path),
+            "selected_synthetics_sha256": file_sha256(selected_path),
+        }
+
     summary = {
         "status": "complete",
         "profile": "a2_v3_frozen_frida_scoring",
+        "generation_profile": args.expected_generation_profile,
         "generation_manifest_sha256": file_sha256(args.generation_manifest),
         "candidate_results_sha256": file_sha256(args.candidate_results),
         "source_pool_sha256": file_sha256(args.source_pool),
@@ -236,6 +279,8 @@ def main() -> None:
             "maximum": float(deltas.max()),
             "mean": float(deltas.mean()),
         },
+        "best_per_source_selection": selection_summary,
+        "selection_artifacts": selection_artifacts,
         "scores_sha256": file_sha256(scores_path),
         "elapsed_seconds": time.time() - started,
     }

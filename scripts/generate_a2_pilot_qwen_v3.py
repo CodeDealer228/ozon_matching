@@ -35,6 +35,8 @@ EXPECTED_PLAN_SHA256 = "57a4c747c9a122cb1e29279c7c8e4fe5d3c3bc96965cc1890430b5b9
 EXPECTED_FEW_SHOT_SHA256 = "00314f0b40fdc2fbc621ede716cc7e74deed02be6ae957e96e1a68aa597d200c"
 EXPECTED_SPLIT_SHA256 = "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e"
 EXPECTED_VAL_FINGERPRINT = "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8"
+EXPECTED_PILOT_ROWS = 20
+CANDIDATE_COUNT_LABEL = "1-2"
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -155,7 +157,11 @@ def main() -> None:
     pool = pd.read_parquet(args.source_pool)
     plan = read_jsonl(args.plan)
     contracts = {str(value["source_pair_sha256"]): value for value in plan}
-    if len(pool) != 20 or len(contracts) != 20 or set(pool["label"].unique()) != {0}:
+    if (
+        len(pool) != EXPECTED_PILOT_ROWS
+        or len(contracts) != EXPECTED_PILOT_ROWS
+        or set(pool["label"].unique()) != {0}
+    ):
         raise RuntimeError("Pilot identity mismatch")
     if set(map(str, pool["source_pair_sha256"])) != set(contracts):
         raise RuntimeError("Source pool and contract plan differ")
@@ -194,7 +200,7 @@ def main() -> None:
         "automatic_retries": 0,
         "max_paid_attempts_per_source": 1,
         "enable_thinking": False,
-        "candidate_count": "1-2",
+        "candidate_count": CANDIDATE_COUNT_LABEL,
         "explicit_cache": explicit_cache,
         "provider_payload_fields": [
             "category", "a_safe_template", "name2", "allowed_operations",
@@ -225,6 +231,7 @@ def main() -> None:
             "uncertain_not_retried": len(uncertain),
             "automatic_retries": 0,
             "enable_thinking": False,
+            "candidate_count": CANDIDATE_COUNT_LABEL,
             "workers": args.workers,
             "explicit_cache": explicit_cache,
             "provider_payload_contains_ids": False,
@@ -334,6 +341,7 @@ def main() -> None:
                 "source_pair_sha256": record["source_pair_sha256"],
                 "category": record["category"],
                 "candidate_index": index,
+                "variant_kind": candidate.get("variant_kind"),
                 "name2_prime": candidate["name2_prime"],
                 "accepted_by_deterministic_validator": candidate["accepted_by_deterministic_validator"],
                 "reject_reasons_json": json.dumps(candidate["reject_reasons"], ensure_ascii=False),
