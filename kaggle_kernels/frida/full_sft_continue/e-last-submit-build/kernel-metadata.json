@@ -1,0 +1,17 @@
+{
+  "id": "maxamsecret/frida-full-sft-e-last-submit-build",
+  "title": "Frida Full Sft E Last Submit Build",
+  "code_file": "frida_full_sft_e_last_submit_build.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/frida-full-sft-continue-e-last"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
