@@ -1,10 +1,10 @@
-# Experiment log — full detail behind CLAUDE.md's summaries
+# Experiment log — full detail behind AGENTS.md's summaries
 
 This file is the detailed backing for the condensed summaries in
-`CLAUDE.md` (per-category breakdown, LLM continue-SFT, bi-encoder probes).
-Nothing here overrides `CLAUDE.md` — it exists so the always-loaded file can
+`AGENTS.md` (per-category breakdown, LLM continue-SFT, bi-encoder probes).
+Nothing here overrides `AGENTS.md` — it exists so the always-loaded file can
 stay short without losing any of the numbers, root causes, or ruled-out
-ideas below. Organized in the same order `CLAUDE.md` references it.
+ideas below. Organized in the same order `AGENTS.md` references it.
 
 ## Per-category breakdown of the 0.5282 LoRA cross-encoder val score
 
@@ -617,3 +617,165 @@ now costs the same total output regardless of how many times the hourly
 cadence fires in an 8.5h session.
 
 Pushed as `maxamsecret/frida-full-sft` v11.
+
+## FRIDA vs BERTA parallel LoRA SFT tracks: checkpoints, the NaN-under-`DataParallel` bug, and the dataset-versioning saga
+
+Two parallel LoRA SFT tracks replacing the MiniLM cross-encoder, human-only
+(`matches.parquet`) so far. Full per-checkpoint numbers also in
+`kaggle_kernels/README.md` → "Разведка новых энкодеров".
+
+**FRIDA** (`ai-forever/FRIDA`, `T5EncoderModel`, 823M) — LoRA
+`target_modules=["q","k","v","o","wi_0","wi_1","wo"]` (T5's real module
+names, not BERT's), CLS pooling, item-level pre-tokenized cache
+(`maxamsecret/frida-item-tokens-human`, sidesteps the per-chunk
+pair↔items rejoin that cost the MiniLM continue-train ~9.5h/12h).
+`PAIR_MAX_LENGTH=128` (cost/quota choice, not the 384 near-lossless
+budget). Two sessions so far, each hit the 12h Kaggle wall before
+finishing one epoch: epoch 1
+(`kaggle_kernels/frida/lora/lora-sft-human-only-10-epochs`, account
+`maxamsecret`) reached val macro PR-AUC **0.652** @ 60% of 1 epoch; epoch 2
+(`kaggle_kernels/frida/lora/lora-sft-epoch2`, account `rays0n`, resumes
+epoch 1's checkpoint) reached **0.674** @ 40% of its epoch. Both already
+beat the shipped MiniLM checkpoint (0.5282).
+
+**BERTA** (`sergeyzh/BERTA`, `BertModel`, 128.3M, a FRIDA distillation) —
+real BERT pair format (`[CLS] item1 [SEP] item2 [SEP]` + `token_type_ids`),
+**mean pooling** (not CLS — BERTA's own model card calls this out as the
+one deliberate change from FRIDA),
+`target_modules=["query","key","value","dense"]`.
+`kaggle_kernels/berta/training/sft/lora-sft-human-only-20-epochs` (account
+`rays0n`) planned 20 epochs; hit the 12h wall at just 22% of that
+(`global_step` 5016/22840), already at val macro PR-AUC **0.7111** — the
+best number in the project at the time, still trending up, nowhere near
+converged.
+
+**Debugging note carried by both scripts**: fp16 (and bf16 under
+`nn.DataParallel`) produced NaN from a specific layer onward —
+root-caused in `kaggle_kernels/frida/probes/nan-diagnose` to
+`torch.autocast` opened in the calling thread not propagating into
+`DataParallel`'s per-replica `forward()` threads (documented PyTorch
+behavior, not a bug in this code). Fix: open autocast **inside** the
+model's own `forward()`, not around the outer call. Both scripts also
+apply the already-known "PEFT `is_trainable=True`" trap and "`del logits,
+loss` before `continue` on a skipped NaN microbatch" lessons from the
+MiniLM continue-train history instead of rediscovering them.
+
+**Dataset-versioning saga**: both checkpoints are now published as Kaggle
+datasets (by the team, not from a kernel's own auto-publish step):
+`maxamsecret/frida-lora-sft-epoch2-40` (FRIDA epoch 2, 0.674) and
+`maxamsecret/berta-lora-sft-5epoch` (BERTA, 0.7111, with full
+optimizer/scheduler state). Neither ended up as a new *version* of the
+older canonical dataset it continues (`maxamsecret/frida-lora` for FRIDA,
+`rays0n/berta-lora-sft-checkpoint` for BERTA, which was never actually
+created) — `kaggle datasets version` returned `Incompatible Dataset Type`
+for every `-r` mode tried (skip/zip/tar) against `frida-lora`, uploading
+real bandwidth each time without ever committing; the older datasets are
+unchanged. `kaggle_kernels/frida/lora/lora-sft-epoch3` and
+`kaggle_kernels/berta/training/sft/lora-sft-human-only-20-epochs`'s
+`kernel-metadata.json` both point `dataset_sources` at the actual new
+dataset names now (not the old ones) — if a checkpoint ever needs to move
+again, only `dataset_sources` needs updating, since the resume code
+searches `/kaggle/input` by file content (`adapter_config.json` /
+`train_state.json`), not by dataset name. The bi-encoder checkpoint is
+also published, as `maxamsecret/qwen-0-6-lora-sft-1epoch` (no prior
+dataset existed for it — nothing to version).
+
+**A working FRIDA submission already passed the contest's external test
+bench**: `matching-frida_lora_adapter-submit.zip` (downloaded locally to
+`submits/matching-frida_lora_adapter-submit/`, gitignored — 1.3GB zip + a
+1.65GB bf16 base model). Verified byte-for-byte (sha256) against the
+adapter/classifier of `frida-lora-sft-human-only-10-epochs`'s **epoch-1**
+checkpoint (val 0.652) — *not* epoch 2's 0.674, which hasn't been
+submitted anywhere yet. Its `src/utils.py` is a real, battle-tested
+reference for FRIDA inference specifically:
+
+- Does **not** merge the LoRA adapter (unlike `submits/minilm/lora`, which
+  merges precisely to drop the `peft` runtime dependency) — ships
+  `frida-base/` (bf16, to fit the 5GB zip budget) and
+  `frida-lora-adapter/` separately, plus a `wheels/` dir of ~26 offline
+  pip wheels for `peft` + its transitive deps (confirmed absent from
+  `odsai/ecup26-matching-baseline:1.0` on the real test stand). Installs
+  via `pip install --no-index --target {tempfile.gettempdir()}` at
+  runtime, appended to `sys.path` — a real stand run hit `OSError:
+  Read-only file system` on both system site-packages and the
+  `/root/.local` pip fallback; only `/tmp` was writable in the judging
+  container.
+- **Its pairwise text-preprocessing contract is FRIDA-specific, not the
+  MiniLM formula** (that one is `submits/minilm/lora`/MiniLM's contract
+  only). FRIDA's is: item-level tokenization with special tokens,
+  `Category:` span excision (zero discriminative signal, proven),
+  fair-share truncation to 128 — byte-match to what `frida-lora-sft-*`
+  kernels train against, detailed in
+  `kaggle_kernels/frida/lora/lora-sft-human-only-10-epochs/README.md`.
+
+Now tracked as `submits/frida/lora/early/lora_v2_epoch/` (epoch-1-lineage
+checkpoint, test 0.386) and
+`submits/frida/lora/length_256/tpu_human_256_epoch4/` (the newer
+`PAIR_MAX_LENGTH=256` checkpoint, val 0.7660, test not yet passed — see
+its own README.md for the Check-stage timing investigation).
+
+## val↔leaderboard fit, and the `continue_c_llm3m` "earlier checkpoint beats later checkpoint" puzzle
+
+A least-squares fit on the three *confirmed* points (all cross-encoders on
+the same seed-42 val split — MiniLM baseline, MiniLM LoRA, FRIDA epoch 1) —
+`leaderboard ≈ 0.763 × val − 0.146` (R²≈0.996 on just those 3 points) —
+would put BERTA around **~0.40** and FRIDA epoch 2 around **~0.37**
+leaderboard. Treat as a rough sanity check, not a prediction: it's a
+3-point fit extrapolated past its own range, and it says nothing about a
+*bi-encoder*'s val→test generalization (different architecture family than
+every point used to fit it; its 0.726 is also on a private item-disjoint
+5-fold split, not the seed-42 one the other rows share — see
+`kaggle_kernels/qwen3-bi-encoder-lora-sft/README.md` on the `bi-encoder`
+branch). A real second data point from a non-cross-encoder submission
+would be worth far more than refining this fit further.
+
+The FRIDA full fine-tune row (and its two `continue`-lineage descendants)
+are excluded from that 3-point fit for the same kind of reason the Qwen3
+row is: they're on the NEW item-disjoint 70/30 split
+(`data/splits/matches_item_disjoint_70_30_seed42.parquet`), not the shared
+seed-42 pair-level split every fit point uses, and it's a genuinely
+different training recipe (full-FT + Adafactor + focal loss, not LoRA +
+`BCEWithLogitsLoss`) — not a controlled comparison. For what it's worth,
+the fit would have predicted leaderboard≈0.432 at val=0.7582 (the base
+full-SFT row); the real score (0.481) beat that by ~0.05 — one data point
+in favor of full-FT transferring at least as well as LoRA at comparable
+val, not proof of it.
+
+**The project-best submission is `continue_c_llm3m_2ep`'s own `last`
+checkpoint (test 0.48999), not its `best` (test 0.487)** — same run, but
+`last` is the EARLIER of the two (`global_step=13,474`, a quiet
+safety-net save from before epoch 1 even finished and before any real
+eval had run on it), while `best`/`checkpoint_epoch01`
+(`global_step=20,350`, val_macro_pr_auc=0.7595) came chronologically
+AFTER. The less-trained, never-validated checkpoint out-tested the
+more-trained, validated one from the same run — echoing the
+`ecup_qwen_stage2_submit` pattern (less train-fit generalizing better on
+the real stand), but via a different mechanism: that one was genuine
+overfitting-vs-undertrained on repeated passes over the same data, this is
+a real step-count/schedule-position difference within a single still-early
+epoch, not overfitting in the classical sense. `last`'s own real
+val_macro_pr_auc was never measured before submission (it's a quiet,
+unvalidated save) — a GPU eval run against it was launched specifically to
+fill this gap once its test score turned out to matter. See
+`submits/frida/sft_continue/continue_c_llm3m/README.md` for the full
+checkpoint provenance once written.
+
+`continue_c_llm3m_2ep`'s `best` checkpoint (test 0.487) was, before this,
+the project-best submission — a `continue`-lineage full-FT run resumed
+from the base full-SFT checkpoint (val 0.7582, test 0.481) with the LLM
+subsample raised 1M→3M and `HUMAN_WEIGHT` rebalanced to 5.86 (keeps the
+human:llm gradient mix at ≈1:2, the same ratio the base run's own
+2.0/1M combination happened to land on). Only 1 of its planned 2 epochs
+finished before the run was interrupted, yet it already both out-vals
+(0.7595) and out-tests (0.487) the fully-finished base run — the plainest
+same-experiment sibling, `continue_a_baseline_3ep` (identical recipe, no
+LLM-subsample change, full 3/3 epochs), scored LOWER on both (0.7555 val /
+0.478 test) despite training longer, isolating the 3M-subsample+rebalance
+change itself (not just "more `continue`-stage training") as what's
+actually driving the improvement. `PAIR_MAX_LENGTH=188` (up from 180) is
+now the project's serving-length default for every `continue` submission
+going forward — confirmed on the real stand to both score higher AND
+still fit the time budget (frida+head forward pass alone measured ~16-19
+min at this length/`BATCH_SIZE_FIXED=5248`); `continue_a_baseline_3ep`'s
+own 180-length run separately confirmed 16/20 min at the shorter length,
+so 188 still has real margin.
