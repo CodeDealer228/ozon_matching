@@ -1,10 +1,10 @@
 {
-  "id": "maxamsecret/frida-percat-fullsft-last",
-  "title": "Frida Percat Fullsft Last",
+  "id": "kirpich682/frida-percat-fullsft-last-v2",
+  "title": "Frida Percat Fullsft Last V2",
   "code_file": "frida_percat_fullsft_last.py",
   "language": "python",
   "kernel_type": "script",
-  "is_private": true,
+  "is_private": false,
   "enable_gpu": false,
   "enable_tpu": true,
   "enable_internet": true,
