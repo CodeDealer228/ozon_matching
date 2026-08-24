@@ -1,0 +1,18 @@
+{
+  "id": "maximmarkovbb/frida-format-adapter-v4-submit-build",
+  "title": "FRIDA Format Adapter V4 Submit Build",
+  "code_file": "frida_format_adapter_v4_submit_build.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "kernel_sources": [
+    "maximmarkovbb/frida-full-sft-continue-c-llm3m",
+    "rays0n/frida-format-adapter-v4"
+  ],
+  "competition_sources": [],
+  "model_sources": []
+}

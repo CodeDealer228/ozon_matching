@@ -24,3 +24,16 @@ LoRA: `r=8`, `alpha=16`, dropout `0.10`, только `q` и `v`, LR `7e-5`, о�
 batch-размерами и наблюдаемым peak HBM. HBM также логируется после каждого
 smoke, каждых 500 train-step и полного human-val; значение allocator-based и
 может не видеть память резидентных XLA executable.
+
+## Реальный HBM smoke (v3)
+
+Все восемь rank прошли production-path smoke с `train/eval=32/64` при
+`PAIR_MAX_LENGTH=224`. Замер rank 0:
+
+```
+[HBM] smoke train batch=32: reported_used=1.84GiB reported_free=13.91GiB total=15.75GiB reported_peak=1.84GiB (compiled-program memory may be invisible)
+[HBM] smoke eval batch=64: reported_used=1.95GiB reported_free=13.80GiB total=15.75GiB reported_peak=1.95GiB (compiled-program memory may be invisible)
+```
+
+Это baseline allocator'а, а не полный лимит: `xm.get_memory_info()` может не
+отражать память скомпилированных XLA-program.
