@@ -1,0 +1,21 @@
+{
+  "id": "rays0n/frida-format-adapter-v4",
+  "title": "FRIDA Format Adapter V4",
+  "code_file": "frida_format_adapter_v4.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/frida-sft-experiment-c-llm-3m-output",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split"
+  ],
+  "kernel_sources": [
+    "maxamsecret/frida-tokenize-items-v4"
+  ],
+  "competition_sources": [],
+  "model_sources": []
+}
