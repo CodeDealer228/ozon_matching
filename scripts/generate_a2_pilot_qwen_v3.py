@@ -120,6 +120,16 @@ def parse_response(content: str) -> dict[str, object]:
     return value
 
 
+def call_transport(
+    client: object,
+    messages: list[dict[str, object]],
+    seed: int,
+    timeout: int,
+) -> tuple[str, dict[str, object], dict[str, object]]:
+    """Single compatibility boundary around the shared transport client."""
+    return request_completion(client, messages, seed, timeout)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -181,6 +191,20 @@ def main() -> None:
     api_key = os.environ.get("DASHSCOPE_API_KEY")
     if not args.dry_run and not api_key:
         raise RuntimeError("DASHSCOPE_API_KEY is not set")
+    client = None
+    if not args.dry_run:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError(
+                "Install the A2 client first: pip install -r scripts/requirements-a2.txt"
+            ) from exc
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=0,
+            timeout=args.timeout,
+        )
 
     explicit_cache = not args.no_explicit_cache
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -265,9 +289,11 @@ def main() -> None:
             "attempted_at_unix": submitted_at,
         }
         try:
-            content, usage, transport = request_completion(
-                endpoint, str(api_key), build_messages(pack, contract, explicit_cache),
-                seed, args.timeout,
+            content, usage, transport = call_transport(
+                client,
+                build_messages(pack, contract, explicit_cache),
+                seed,
+                args.timeout,
             )
             response = parse_response(content)
             validated: list[dict[str, object]] = []
@@ -363,14 +389,18 @@ def main() -> None:
         "reasoning_tokens": sum(int(((r.get("usage") or {}).get("completion_tokens_details") or {}).get("reasoning_tokens", 0)) for r in records),
         "cached_prompt_tokens": sum(int(((r.get("usage") or {}).get("prompt_tokens_details") or {}).get("cached_tokens", 0)) for r in records),
     }
+    request_errors = sum(r.get("request_status") == "error" for r in records)
+    manifest_status = (
+        "uncertain" if uncertain_after else "error" if request_errors else "complete"
+    )
     manifest = {
-        "status": "complete" if not uncertain_after else "uncertain",
+        "status": manifest_status,
         "profile": PROFILE, "model": MODEL_ID,
         "source_pool_sha256": file_sha256(args.source_pool),
         "plan_sha256": file_sha256(args.plan),
         "few_shot_sha256": file_sha256(args.few_shot),
         "planned_rows": len(pool), "completed_records": len(records),
-        "request_errors": sum(r.get("request_status") == "error" for r in records),
+        "request_errors": request_errors,
         "model_skips": sum(r.get("model_status") == "skip" for r in records),
         "candidate_rows": len(candidate_rows),
         "accepted_candidates": sum(bool(c.get("accepted_by_deterministic_validator")) for r in records for c in r.get("candidates", [])),

@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import generate_a2_pilot_qwen_v3 as generator
 from generate_a2_pilot_qwen_v3 import build_messages, compact_contract, parse_response
 
 
@@ -78,6 +80,17 @@ class ResponseSchemaTests(unittest.TestCase):
                     for index in range(3)
                 ],
             }))
+
+
+class TransportCompatibilityTests(unittest.TestCase):
+    def test_shared_transport_uses_client_signature(self) -> None:
+        expected = ("{}", {"prompt_tokens": 1}, {"provider_request_id": "r"})
+        client = object()
+        messages = [{"role": "user", "content": "x"}]
+        with patch.object(generator, "request_completion", return_value=expected) as mocked:
+            actual = generator.call_transport(client, messages, 7, 120)
+        self.assertEqual(actual, expected)
+        mocked.assert_called_once_with(client, messages, 7, 120)
 
 
 if __name__ == "__main__":
