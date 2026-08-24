@@ -1,0 +1,21 @@
+{
+  "id": "maxamsecret/frida-eval-c-last-checkpoint",
+  "title": "Frida Eval C Last Checkpoint",
+  "code_file": "frida_eval_c_last_checkpoint.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/frida-sft-experiment-c-llm-3m-output",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split",
+    "maxamsecret/frida-tokenize-items-v3"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
