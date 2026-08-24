@@ -11,7 +11,12 @@ import subprocess
 import sys
 import zipfile
 
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "peft", "safetensors"])
+# Kaggle CPU image ships torchao 0.10.0, while current PEFT refuses to use
+# any torchao <0.16 even for ordinary nn.Linear LoRA.  This builder neither
+# quantizes nor needs torchao, so remove the incompatible optional backend.
+subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torchao"],
+               check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "peft", "safetensors"])
 
 import torch
 from peft import PeftModel
