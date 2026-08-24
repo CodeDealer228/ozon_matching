@@ -96,6 +96,14 @@ def parse_args() -> argparse.Namespace:
         default=EXPECTED_GENERATION_PROFILE,
     )
     parser.add_argument("--select-best-per-source", action="store_true")
+    parser.add_argument(
+        "--allow-terminal-request-errors",
+        action="store_true",
+        help=(
+            "Score valid candidates from a fully attempted generation batch "
+            "whose manifest is error only because some requests failed."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=2)
     return parser.parse_args()
 
@@ -111,7 +119,15 @@ def main() -> None:
     with args.generation_manifest.open(encoding="utf-8") as handle:
         generation_manifest = json.load(handle)
     if generation_manifest.get("status") != "complete":
-        raise RuntimeError("Generation manifest is not complete")
+        terminal_partial = (
+            args.allow_terminal_request_errors
+            and generation_manifest.get("status") == "error"
+            and generation_manifest.get("request_errors", 0) > 0
+            and generation_manifest.get("completed_records")
+            == generation_manifest.get("planned_rows")
+        )
+        if not terminal_partial:
+            raise RuntimeError("Generation manifest is not complete")
     if generation_manifest.get("profile") != args.expected_generation_profile:
         raise RuntimeError("Unexpected generation profile")
     if generation_manifest.get("uncertain_submissions") != 0:
