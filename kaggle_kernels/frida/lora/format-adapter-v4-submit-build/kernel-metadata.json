@@ -9,7 +9,7 @@
   "enable_tpu": false,
   "enable_internet": true,
   "dataset_sources": [
-    "maximmarkovbb/frida-sft-experiment-c-llm3m",
+    "maximmarkovbb/frida-sft-experiment-c-llm-3m",
     "maxamsecret/frida-format-adapter-v4-ootput"
   ],
   "kernel_sources": [],
