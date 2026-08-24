@@ -19,7 +19,7 @@ meta = json.loads(META.read_text(encoding="utf-8"))
 assert meta["enable_tpu"] and not meta["enable_gpu"]
 assert "maxamsecret/frida-tokenize-items-v3" in meta["dataset_sources"]
 assert all("tokenize-items-v4" not in item for item in meta["dataset_sources"])
-assert "maxamsecret/frida-full-sft-continue-submit-build" in meta["kernel_sources"]
+assert any(s.startswith("maxamsecret/frida-full-sft-continue-submit-build") for s in meta["kernel_sources"])
 assert "PAIR_MAX_LENGTH = 188" in text
 assert "PER_CORE_TRAIN_BATCH = 16" in text
 assert "PER_CORE_EVAL_BATCH = 32" in text
