@@ -207,6 +207,23 @@ mistake costs.
    text/tokenization contract matches what inference will do, and matches what
    the resumed checkpoint already saw.
 
-After pushing, confirm the kernel actually reached `RUNNING` rather than
-erroring in the first minute — that check costs one command and catches the
-cheapest class of failure while it is still cheap.
+## Mandatory post-push monitoring
+
+Creating or pushing a Kaggle kernel/image includes monitoring it; a successful
+CLI push is not completion of the task.
+
+- During the first hour, poll every **5–10 minutes** until the kernel has
+  remained `RUNNING` for at least **10 continuous minutes**. Report and inspect
+  any `ERROR` immediately; do not wait for the next scheduled checkpoint.
+- Once startup is stable, poll at approximately **20%, 40%, 60%, 80%, and
+  100%** of the expected total wall-clock. Calculate these checkpoints from
+  the pre-push runtime estimate and the observed start time.
+- A terminal state always ends the schedule early. On `COMPLETE`, verify the
+  expected outputs; on `ERROR`/`CANCEL`, collect the log and diagnose it.
+- Do not silently abandon an active monitor when the interactive turn ends;
+  use the available recurring monitor/automation mechanism when the product
+  provides one, otherwise state explicitly who or what continues polling.
+
+This monitoring cadence is the project contract for every account and every
+accelerator type, including CPU-only builders. It supersedes a single
+post-push status check.
