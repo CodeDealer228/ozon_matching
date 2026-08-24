@@ -239,13 +239,14 @@ def request_completion(
     messages: list[dict[str, object]],
     seed: int,
     timeout: int,
+    max_tokens: int = 180,
 ) -> tuple[str, dict[str, object], dict[str, object]]:
     try:
         completion = client.chat.completions.create(
             model=MODEL_ID,
             messages=messages,
             temperature=0.25,
-            max_tokens=180,
+            max_tokens=max_tokens,
             seed=seed,
             response_format={"type": "json_object"},
             extra_body={"enable_thinking": False},
@@ -259,6 +260,7 @@ def request_completion(
     transport = {
         "provider_request_id": getattr(completion, "_request_id", None) or completion.id,
         "http_status": 200,
+        "finish_reason": completion.choices[0].finish_reason,
     }
     return str(content), usage if isinstance(usage, dict) else {}, transport
 

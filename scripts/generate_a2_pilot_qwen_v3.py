@@ -37,6 +37,7 @@ EXPECTED_SPLIT_SHA256 = "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c4
 EXPECTED_VAL_FINGERPRINT = "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8"
 EXPECTED_PILOT_ROWS = 20
 CANDIDATE_COUNT_LABEL = "1-2"
+MAX_COMPLETION_TOKENS = 180
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
@@ -127,7 +128,9 @@ def call_transport(
     timeout: int,
 ) -> tuple[str, dict[str, object], dict[str, object]]:
     """Single compatibility boundary around the shared transport client."""
-    return request_completion(client, messages, seed, timeout)
+    return request_completion(
+        client, messages, seed, timeout, max_tokens=MAX_COMPLETION_TOKENS
+    )
 
 
 def main() -> None:
@@ -225,6 +228,7 @@ def main() -> None:
         "max_paid_attempts_per_source": 1,
         "enable_thinking": False,
         "candidate_count": CANDIDATE_COUNT_LABEL,
+        "max_completion_tokens": MAX_COMPLETION_TOKENS,
         "explicit_cache": explicit_cache,
         "provider_payload_fields": [
             "category", "a_safe_template", "name2", "allowed_operations",
@@ -256,6 +260,7 @@ def main() -> None:
             "automatic_retries": 0,
             "enable_thinking": False,
             "candidate_count": CANDIDATE_COUNT_LABEL,
+            "max_completion_tokens": MAX_COMPLETION_TOKENS,
             "workers": args.workers,
             "explicit_cache": explicit_cache,
             "provider_payload_contains_ids": False,
@@ -295,6 +300,11 @@ def main() -> None:
                 seed,
                 args.timeout,
             )
+            record.update({
+                "usage": usage,
+                "transport": transport,
+                "raw_content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            })
             response = parse_response(content)
             validated: list[dict[str, object]] = []
             if response["status"] == "ok":
@@ -321,9 +331,6 @@ def main() -> None:
                 "model_status": response["status"],
                 "skip_reason": response.get("reason"),
                 "candidates": validated,
-                "usage": usage,
-                "transport": transport,
-                "raw_content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             })
         except Exception as exc:
             record.update({
@@ -412,6 +419,7 @@ def main() -> None:
         "uncertain_submissions": len(uncertain_after),
         "usage": usage,
         "automatic_retries": 0, "enable_thinking": False,
+        "max_completion_tokens": MAX_COMPLETION_TOKENS,
         "raw_responses_sha256": file_sha256(raw_path),
         "request_journal_sha256": file_sha256(journal_path),
         "candidate_results_sha256": file_sha256(candidates_path),

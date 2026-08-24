@@ -126,6 +126,7 @@ def main() -> None:
     engine.EXPECTED_FEW_SHOT_SHA256 = EXPECTED_FEW_SHOT_SHA256
     engine.EXPECTED_PILOT_ROWS = EXPECTED_PILOT_ROWS
     engine.CANDIDATE_COUNT_LABEL = "exactly_2_same_facts_different_placement"
+    engine.MAX_COMPLETION_TOKENS = 320
     engine.build_messages = build_messages
     engine.parse_response = parse_response
     engine.main()

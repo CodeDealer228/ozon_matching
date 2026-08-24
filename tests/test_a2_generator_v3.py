@@ -90,7 +90,7 @@ class TransportCompatibilityTests(unittest.TestCase):
         with patch.object(generator, "request_completion", return_value=expected) as mocked:
             actual = generator.call_transport(client, messages, 7, 120)
         self.assertEqual(actual, expected)
-        mocked.assert_called_once_with(client, messages, 7, 120)
+        mocked.assert_called_once_with(client, messages, 7, 120, max_tokens=180)
 
 
 if __name__ == "__main__":
