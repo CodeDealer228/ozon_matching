@@ -8,9 +8,10 @@
   "enable_gpu": false,
   "enable_tpu": false,
   "enable_internet": true,
-  "dataset_sources": [],
+  "dataset_sources": [
+    "maximmarkovbb/frida-continue-c-last-base"
+  ],
   "kernel_sources": [
-    "maximmarkovbb/frida-full-sft-continue-c-llm3m",
     "rays0n/frida-format-adapter-v4"
   ],
   "competition_sources": [],
