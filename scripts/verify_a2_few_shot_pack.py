@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
@@ -37,6 +38,10 @@ def load_helpers():
 
 def tokens(value: object, helpers) -> set[str]:
     return set(re.findall(r"[0-9a-zа-я]+", helpers.normalize_text(value)))
+
+
+def token_counts(value: object, helpers) -> Counter[str]:
+    return Counter(re.findall(r"[0-9a-zа-я]+", helpers.normalize_text(value)))
 
 
 def numeric_tokens(value: object, helpers) -> set[str]:
@@ -82,9 +87,11 @@ def main() -> None:
         if len(match) != 1:
             raise RuntimeError(f"Example {index} is not exactly one A2 source-pool row")
         row = match.iloc[0]
-        for field in ("category", "name1", "name2", "source_pair_sha256"):
+        for field in ("category", "name1", "name2", "attributes2", "source_pair_sha256"):
             if str(example[field]) != str(row[field]):
                 raise RuntimeError(f"Example {index} {field} differs from source pool")
+        if token_counts(example["prompt_name2"], helpers) != token_counts(row["name2"], helpers):
+            raise RuntimeError(f"Example {index} prompt_name2 changes source facts")
 
         rewritten = str(example["rewritten_name2"]).strip()
         if not rewritten:

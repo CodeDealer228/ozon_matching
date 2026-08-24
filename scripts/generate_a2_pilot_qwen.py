@@ -17,8 +17,6 @@ import os
 import random
 import re
 import time
-import urllib.error
-import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -32,17 +30,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MODEL_ID = "qwen3.8-27b"
 DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 EXPECTED_SOURCE_SHA256 = "2dee9a0b5b2ef54c4210b07b114346057bddc45effe728e2e43056f42505dd28"
-EXPECTED_FEW_SHOT_SHA256 = "2aa9c1734fac177782c897a76780bd60b26d01e952b43c0a5a683af5257f4f2a"
+EXPECTED_FEW_SHOT_SHA256 = "fac2f2cb2f988557e99bd4a9b4b1c5a1f1c95c18ba7285e083875cc0d2a0295a"
 EXPECTED_SPLIT_SHA256 = "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e"
 EXPECTED_VAL_FINGERPRINT = "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8"
-GENERATOR_PROFILE = "a2_qwen_safe_async_v2"
-
-COMMON_SURFACE_WORDS = {
-    "товар", "для", "из", "на", "с", "со", "и", "или", "цвет", "размер",
-    "женский", "женская", "женские", "мужской", "мужская", "мужские",
-    "детский", "детская", "детские", "комплект", "набор", "шт", "штук",
-}
-
+GENERATOR_PROFILE = "a2_qwen_safe_async_v3"
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -121,7 +112,8 @@ def build_messages(
                 "content": (
                     f"Категория: {example['category']}\n"
                     f"Название A: {example['name1']}\n"
-                    f"Название B: {example['name2']}"
+                    f"Название B: {example['prompt_name2']}\n"
+                    f"Неизменяемые attributes B: {example['attributes2']}"
                 ),
             }
         )
@@ -193,26 +185,31 @@ def validate_rewrite(row: object, rewritten: str, helpers) -> tuple[bool, list[s
     missing_numbers = sorted(original_numbers - rewritten_numbers)
     if missing_numbers:
         reasons.append("lost_numeric_fact")
+    attrs2_numbers = numeric_tokens(row.attributes2, helpers)
     copied_numbers = sorted(
-        (numeric_tokens(row.name1, helpers) - original_numbers) & rewritten_numbers
+        (numeric_tokens(row.name1, helpers) - original_numbers - attrs2_numbers) & rewritten_numbers
     )
     if copied_numbers:
         reasons.append("copied_numeric_fact_from_item1")
 
-    item1_tokens = tokens(row.name1, helpers)
     item2_tokens = tokens(row.name2, helpers)
     attrs2_tokens = tokens(row.attributes2, helpers)
     rewritten_tokens = tokens(rewritten, helpers)
+    evidence_tokens = item2_tokens | attrs2_tokens
     added_tokens = rewritten_tokens - item2_tokens
-    copied_item1_only = sorted(
-        token
-        for token in added_tokens & (item1_tokens - item2_tokens)
-        if not token_supported_by_item2(token, attrs2_tokens)
-        and token not in COMMON_SURFACE_WORDS
-        and len(token) >= 3
+    unsupported_added = sorted(
+        token for token in added_tokens
+        if len(token) >= 4 and not token_supported_by_item2(token, evidence_tokens)
     )
-    if copied_item1_only:
-        reasons.append("copied_unsupported_fact_from_item1")
+    if unsupported_added:
+        reasons.append("unsupported_added_fact")
+
+    missing_name_facts = sorted(
+        token for token in item2_tokens
+        if len(token) >= 4 and not token_supported_by_item2(token, rewritten_tokens)
+    )
+    if missing_name_facts:
+        reasons.append("lost_name_fact")
 
     missing_identifiers = sorted(
         identifier_like_tokens(row.name2, helpers) - identifier_like_tokens(rewritten, helpers)
@@ -230,74 +227,38 @@ def validate_rewrite(row: object, rewritten: str, helpers) -> tuple[bool, list[s
         "name_similarity_delta": new_similarity - old_similarity,
         "missing_numeric_tokens": missing_numbers,
         "copied_numeric_tokens": copied_numbers,
-        "copied_item1_only_tokens": copied_item1_only,
+        "unsupported_added_tokens": unsupported_added,
+        "missing_name_fact_tokens": missing_name_facts,
         "added_tokens_present_in_item2_attributes": sorted(added_tokens & attrs2_tokens),
     }
     return not reasons, reasons, diagnostics
 
 
 def request_completion(
-    endpoint: str,
-    api_key: str,
+    client,
     messages: list[dict[str, object]],
     seed: int,
     timeout: int,
 ) -> tuple[str, dict[str, object], dict[str, object]]:
-    body = json.dumps(
-        {
-            "model": MODEL_ID,
-            "messages": messages,
-            # This is a simple constrained rewrite task.  Reasoning previously
-            # consumed 146,786 of 149,442 completion tokens in the 100-row
-            # pilot and also amplified the cost of timed-out requests.
-            "enable_thinking": False,
-            "temperature": 0.25,
-            "top_p": 0.8,
-            "max_tokens": 180,
-            "seed": seed,
-            "response_format": {"type": "json_object"},
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_headers = {key.lower(): value for key, value in response.headers.items()}
-            http_status = int(response.status)
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        error_headers = exc.headers or {}
-        provider_request_id = (
-            error_headers.get("x-request-id")
-            or error_headers.get("x-dashscope-request-id")
-            or error_headers.get("request-id")
+        completion = client.chat.completions.create(
+            model=MODEL_ID,
+            messages=messages,
+            temperature=0.25,
+            max_tokens=180,
+            seed=seed,
+            response_format={"type": "json_object"},
+            extra_body={"enable_thinking": False},
+            timeout=timeout,
         )
-        detail = f"HTTP {exc.code}"
-        if provider_request_id:
-            detail += f" request_id={provider_request_id}"
-        raise RuntimeError(detail) from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"transport_error: {type(exc).__name__}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"transport_error: {type(exc).__name__}: {exc}") from exc
 
-    content = payload["choices"][0]["message"]["content"]
-    usage = payload.get("usage", {})
-    provider_request_id = (
-        payload.get("id")
-        or response_headers.get("x-request-id")
-        or response_headers.get("x-dashscope-request-id")
-        or response_headers.get("request-id")
-    )
+    content = completion.choices[0].message.content or ""
+    usage = completion.usage.model_dump() if completion.usage else {}
     transport = {
-        "provider_request_id": str(provider_request_id) if provider_request_id else None,
-        "http_status": http_status,
+        "provider_request_id": getattr(completion, "_request_id", None) or completion.id,
+        "http_status": 200,
     }
     return str(content), usage if isinstance(usage, dict) else {}, transport
 
@@ -371,7 +332,7 @@ def main() -> None:
     )
     parser.add_argument("--per-category", type=int, default=20)
     parser.add_argument("--seed", type=int, default=20260823)
-    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--no-explicit-cache", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -398,6 +359,12 @@ def main() -> None:
     api_key = os.environ.get("DASHSCOPE_API_KEY")
     if not args.dry_run and not api_key:
         raise RuntimeError("DASHSCOPE_API_KEY is not set")
+    if not args.dry_run:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError("Install the A2 client first: pip install -r scripts/requirements-a2.txt") from exc
+        client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0, timeout=args.timeout)
 
     pool = pd.read_parquet(args.source_pool)
     pilot = select_pilot(pool, args.per_category, args.seed)
@@ -423,7 +390,7 @@ def main() -> None:
         "automatic_retries": 0,
         "enable_thinking": False,
         "explicit_cache": explicit_cache,
-        "decoding": {"temperature": 0.25, "top_p": 0.8, "max_tokens": 180},
+        "decoding": {"temperature": 0.25, "max_tokens": 180},
     }
     if config_path.is_file():
         existing_config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -497,8 +464,7 @@ def main() -> None:
         }
         try:
             content, usage, transport = request_completion(
-                endpoint,
-                str(api_key),
+                client,
                 build_messages(pack, row, explicit_cache),
                 seed,
                 args.timeout,
@@ -513,6 +479,7 @@ def main() -> None:
                 "diagnostics": diagnostics,
                 "usage": usage,
                 "transport": transport,
+                "raw_content": content,
                 "raw_content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             })
         except Exception as exc:
@@ -621,7 +588,6 @@ def main() -> None:
         "generation_config_sha256": file_sha256(config_path),
         "decoding": {
             "temperature": 0.25,
-            "top_p": 0.8,
             "max_tokens": 180,
             "enable_thinking": False,
         },
