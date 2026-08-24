@@ -4,6 +4,7 @@ param(
     [string]$BaseUrl = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     [string]$PythonExe = 'C:\Users\fitai\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
     [string]$PyArrowPath = 'C:\Users\fitai\AppData\Local\Temp\codex_a2_pydeps',
+    [string]$GeneratorName = 'generate_a2_batch_100_qwen_v31.py',
     [int]$Workers = 6,
     [string]$OutputDir,
     [switch]$DryRun
@@ -13,7 +14,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$generatorPath = Join-Path $PSScriptRoot 'generate_a2_batch_100_qwen_v31.py'
+if ([IO.Path]::GetFileName($GeneratorName) -ne $GeneratorName -or -not $GeneratorName.EndsWith('.py')) {
+    throw 'GeneratorName must be a Python filename from the scripts directory'
+}
+$generatorPath = Join-Path $PSScriptRoot $GeneratorName
 $outputPath = if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     Join-Path $repoRoot 'artifacts\synthetic_v2\a2_v31_batch_100_01'
 }
