@@ -383,11 +383,15 @@ def main() -> None:
         reason for record in records for candidate in record.get("candidates", [])
         for reason in candidate.get("reject_reasons", [])
     )
+    # OpenAI-compatible providers may serialize optional usage counters as null.
+    # Treat those counters as zero so already completed requests can always be
+    # finalized without another provider call.
+    usage_int = lambda value: int(value or 0)
     usage = {
-        "prompt_tokens": sum(int((r.get("usage") or {}).get("prompt_tokens", 0)) for r in records),
-        "completion_tokens": sum(int((r.get("usage") or {}).get("completion_tokens", 0)) for r in records),
-        "reasoning_tokens": sum(int(((r.get("usage") or {}).get("completion_tokens_details") or {}).get("reasoning_tokens", 0)) for r in records),
-        "cached_prompt_tokens": sum(int(((r.get("usage") or {}).get("prompt_tokens_details") or {}).get("cached_tokens", 0)) for r in records),
+        "prompt_tokens": sum(usage_int((r.get("usage") or {}).get("prompt_tokens")) for r in records),
+        "completion_tokens": sum(usage_int((r.get("usage") or {}).get("completion_tokens")) for r in records),
+        "reasoning_tokens": sum(usage_int(((r.get("usage") or {}).get("completion_tokens_details") or {}).get("reasoning_tokens")) for r in records),
+        "cached_prompt_tokens": sum(usage_int(((r.get("usage") or {}).get("prompt_tokens_details") or {}).get("cached_tokens")) for r in records),
     }
     request_errors = sum(r.get("request_status") == "error" for r in records)
     manifest_status = (
