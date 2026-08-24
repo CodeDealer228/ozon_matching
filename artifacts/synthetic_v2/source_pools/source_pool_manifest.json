@@ -1,0 +1,110 @@
+{
+  "status": "complete",
+  "scope": "canonical_human_train_only",
+  "validation_content_used": false,
+  "validation_used_as_denylist_only": true,
+  "split": {
+    "path": "D:\\Projects\\kaggle\\ozon_matching\\data\\splits\\matches_item_disjoint_70_30_seed42.parquet",
+    "bytes": 6192178,
+    "sha256": "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e",
+    "seed": 42,
+    "train_rows": 256006,
+    "validation_rows": 109648,
+    "validation_fingerprint": "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8"
+  },
+  "items": {
+    "path": "D:\\Projects\\kaggle\\ozon_matching\\data\\items_human.parquet",
+    "bytes": 214210451,
+    "sha256": "07d4f09ac8cfa90a2dfc2a7802dec09fc1e188576e1281e781aa1340b3336f4a",
+    "target_train_items": 132868,
+    "bad_attribute_json": {
+      "Автотовары": 5,
+      "Галантерея и аксессуары": 3
+    }
+  },
+  "leak_checks": {
+    "shared_train_validation_items": 0,
+    "unordered_train_validation_overlap": 0,
+    "a2_validation_item_overlap": 0,
+    "c_validation_item_overlap": 0,
+    "c_replacement_validation_item_overlap": 0
+  },
+  "a2": {
+    "rows": 500,
+    "counts_by_category": {
+      "Автотовары": 100,
+      "Галантерея и аксессуары": 100,
+      "Обувь": 100,
+      "Одежда": 100,
+      "Ювелирные изделия": 100
+    },
+    "attributes_immutable": true,
+    "mutable_fields": [
+      "name2"
+    ],
+    "selection": "name similarity in [0.45, 0.90], then highest deterministic similarity; each item used at most once"
+  },
+  "c": {
+    "rows": 0,
+    "train_research_candidate_rows": 60,
+    "replacement_candidate_rows": 0,
+    "replacement_counts_by_category": {},
+    "counts_by_category": {},
+    "eligible_families": 0,
+    "hypotheses": {
+      "Обувь": [
+        "russian_size",
+        "manufacturer_size",
+        "generic_size"
+      ],
+      "Ювелирные изделия": [
+        "item_size",
+        "ring_size",
+        "article"
+      ],
+      "Одежда": [
+        "product_color",
+        "russian_size",
+        "manufacturer_size",
+        "generic_size"
+      ]
+    },
+    "min_negative_support": 2,
+    "max_positive_counterexamples": 0,
+    "requires_dimension_visible_in_name": true,
+    "global_category_attribute_rules_allowed": false
+  },
+  "outputs": {
+    "a2": {
+      "path": "D:\\Projects\\kaggle\\ozon_matching_synthetic-a2\\artifacts\\synthetic_v2\\source_pools\\a2_source_pool.parquet",
+      "bytes": 308638,
+      "sha256": "59818385fcf68e678b636318766ba7764d391c7de8498d9cab49d12d46e00bde"
+    },
+    "c": {
+      "path": "D:\\Projects\\kaggle\\ozon_matching_synthetic-a2\\artifacts\\synthetic_v2\\source_pools\\c_candidate_pool.parquet",
+      "bytes": 11884,
+      "sha256": "23c8ebbb6ae3c67d75a84d2b7b25d27789ef512dd7d9cda60057f94aa33b8816"
+    },
+    "c_train_research_candidates": {
+      "path": "D:\\Projects\\kaggle\\ozon_matching_synthetic-a2\\artifacts\\synthetic_v2\\source_pools\\c_train_research_candidates.parquet",
+      "bytes": 53519,
+      "sha256": "40a038938246b9eeeb2f10bfad46f52ad14c65abd038bfea271c09653daf80db"
+    },
+    "c_replacement_sources": {
+      "path": "D:\\Projects\\kaggle\\ozon_matching_synthetic-a2\\artifacts\\synthetic_v2\\source_pools\\c_replacement_source_pool.parquet",
+      "bytes": 8930,
+      "sha256": "2470a09ddf37d30d0329a52d37e99bba7d0c2ad79f562032de935c5d6612652f"
+    },
+    "c_rule_evidence": {
+      "path": "D:\\Projects\\kaggle\\ozon_matching_synthetic-a2\\artifacts\\synthetic_v2\\source_pools\\c_rule_evidence.json",
+      "bytes": 577,
+      "sha256": "8cf72dffb45a3b5d0a61f24c1bb56d8bfa389c285f2c2a71c133b7acb675f502"
+    },
+    "c_family_evidence": {
+      "path": "D:\\Projects\\kaggle\\ozon_matching_synthetic-a2\\artifacts\\synthetic_v2\\source_pools\\c_family_evidence.csv",
+      "bytes": 6308,
+      "sha256": "c223e57713cb04d996099ef9db485f0da0105d26e4b6b4f886ba01873112f877"
+    }
+  },
+  "elapsed_seconds": 50.214399576187134
+}

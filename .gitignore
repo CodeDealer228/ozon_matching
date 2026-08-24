@@ -74,6 +74,7 @@ artifacts/
 # .claude/skills/kaggle/ skill.
 /kaggle.json
 /kaggle*.json
+/alibaba_api_key.csv
 
 # OS / editor cruft
 .DS_Store

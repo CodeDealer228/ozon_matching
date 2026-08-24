@@ -1,0 +1,49 @@
+{
+  "status": "complete",
+  "generator_profile": "a2_qwen_safe_async_v3",
+  "model": "qwen3.8-27b",
+  "endpoint_host": "ws-pnm31ryj1wkdgbwl.ap-southeast-1.maas.aliyuncs.com",
+  "api_key_persisted": false,
+  "source_pool_sha256": "59818385fcf68e678b636318766ba7764d391c7de8498d9cab49d12d46e00bde",
+  "few_shot_sha256": "8476bc915e2129ecc98c2d86a5ffadbac08a5225eaa6cccd4a7e48c4b23b8228",
+  "canonical_split_sha256": "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e",
+  "validation_fingerprint": "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8",
+  "generation_seed": 20260823,
+  "generation_config_sha256": "029452ca985b4147d6aa123f9a932ff85f55ea17e8ba014f3773d20f461694c8",
+  "decoding": {
+    "temperature": 0.25,
+    "max_tokens": 180,
+    "enable_thinking": false
+  },
+  "transport": {
+    "workers": 6,
+    "automatic_retries": 0,
+    "max_paid_attempts_per_source": 1,
+    "explicit_cache": true,
+    "cache_warmup_requests": 0
+  },
+  "planned_rows": 30,
+  "completed_records": 30,
+  "submitted_attempts": 30,
+  "uncertain_submissions": 0,
+  "accepted": 8,
+  "request_errors": 0,
+  "reject_reasons": {
+    "not_harder_by_name_similarity": 3,
+    "trivial_normalization": 15,
+    "copied_numeric_fact_from_item1": 1,
+    "unsupported_added_fact": 2,
+    "lost_name_fact": 1
+  },
+  "usage": {
+    "prompt_tokens": 66270,
+    "completion_tokens": 711,
+    "reasoning_tokens": 0,
+    "visible_completion_tokens": 711,
+    "cached_prompt_tokens": 57971
+  },
+  "raw_responses_sha256": "088b226660f292c451c1a086c2446c954bebabb431594257763fea1567b90a58",
+  "request_journal_sha256": "cf4867f8f08322acf8af9d393afaf20a5e0c20856d4aff625aeb799b9f182566",
+  "results_sha256": "3d6d5630683c07f70fa54f103fa05cd5cdaff4a25020f55ed8dac6aff1327dd2",
+  "elapsed_seconds_this_run": 0.053386688232421875
+}
