@@ -24,7 +24,7 @@ submits/minilm/lora/classifier.pt
 # model weights, tokenizer vocab/merge files, offline-install pip wheels,
 # and packaged submission zips are all heavy and 100% regenerable from this
 # project's own Kaggle datasets/kernels + each submission's build script
-# (see CLAUDE.md, submits/<family>/<variant>/src/utils.py). `**` because
+# (see AGENTS.md, submits/<family>/<variant>/src/utils.py). `**` because
 # submits/ is organized in family/variant subdirectories (submits/berta/...,
 # submits/frida/...) and at least one variant (berta/catboost_256_len)
 # nests a full second build dir inside itself, one level deeper still.
@@ -37,7 +37,7 @@ submits/**/*.zip
 # + zip, all regenerable via scripts/download_probe_models.py +
 # scripts/fit_probe_classifier.py + scripts/build_submission_zip.py, or
 # (giga3b) `kaggle datasets download maxamsecret/giga3b-quantize` +
-# pip-downloading the pinned wheels (see CLAUDE.md and
+# pip-downloading the pinned wheels (see AGENTS.md and
 # submits/probes/giga3b/src/model.py).
 submits/probes/*/models/
 submits/probes/*/*.joblib
@@ -68,10 +68,19 @@ submits/matching-*-submit/
 # and let ~90 output/log/checkpoint files get committed by accident.
 kaggle_kernels/**/output/
 kaggle_kernels/**/pulled/
+*.log
+
+# Root-level temporary files/directories created by PR inspection and
+# downloaded Kaggle source inspection.
+/.tmp_*
 
 # Scratch / local test artifacts (downloaded adapters, extracted zips for
 # testing, sampled parquet files, prediction CSVs from smoke tests).
 artifacts/
+
+# Local staging directories for publishing large Kaggle datasets. Their
+# metadata and payloads are regenerated from tracked builder/kernel code.
+/kaggle_datasets/
 
 # Kaggle API credentials -- real API keys, never commit. Root-anchored so
 # this doesn't touch kaggle_kernels/*/kernel-metadata.json or the tracked
@@ -94,3 +103,4 @@ Thumbs.db
 # but is per-machine, not shared project config. The rest of
 # .claude/skills/kaggle/ IS tracked (see above).
 .claude/skills/kaggle/modules/setup/scripts/check_all_quotas.py
+.agents/skills/kaggle/modules/setup/scripts/check_all_quotas.py
