@@ -1,8 +1,8 @@
 """CPU builder: merge the validated FRIDA v4 LoRA into its exact c-last base.
 
 The resulting archive is self-contained for the offline H100 stand: after the
-one-time CPU merge it needs no PEFT/wheels at inference.  `utils2.py` is the
-new v4 serving contract and is copied verbatim as src/utils.py.
+one-time CPU merge it needs no PEFT/wheels at inference. `utils2.py` is copied
+to the archive and only its serving pair length is changed from 188 to 200.
 """
 import json
 import os
@@ -28,7 +28,7 @@ BASE_LAST_STEP = 13_474
 ADAPTER_EXPERIMENT = "frida_format_adapter_v4_c_last"
 WORKING = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 STAGE = os.path.join(WORKING, "_frida_format_adapter_v4_submit")
-ZIP_PATH = os.path.join(WORKING, "matching-frida_format_adapter_v4_best_188-submit.zip")
+ZIP_PATH = os.path.join(WORKING, "matching-frida_format_adapter_v4_best_200-submit.zip")
 
 
 def log(message):
@@ -112,12 +112,18 @@ def main():
     torch.save(bf16_state(os.path.join(base_dir, "head.pt")), os.path.join(STAGE, "classifier.pt"))
 
     os.makedirs(os.path.join(STAGE, "src"), exist_ok=True)
-    utils_path = os.path.join(STAGE, "src", "utils.py")
+    utils_path = os.path.join(STAGE, "src", "utils2.py")
     shutil.copy2(find_utils2(), utils_path)
+    with open(utils_path, encoding="utf-8") as fh:
+        utils_text = fh.read()
+    if utils_text.count("PAIR_MAX_LENGTH = 188") != 1:
+        raise RuntimeError("utils2.py must contain exactly one PAIR_MAX_LENGTH = 188")
+    with open(utils_path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(utils_text.replace("PAIR_MAX_LENGTH = 188", "PAIR_MAX_LENGTH = 200"))
     subprocess.check_call([sys.executable, "-m", "py_compile", utils_path])
     write_text(os.path.join(STAGE, "run.py"), '''import argparse
 import os
-from src.utils import predict_pipeline
+from src.utils2 import predict_pipeline
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
