@@ -4,9 +4,9 @@ Output:
   /kaggle/working/frida_item_tokens_v4/human/
   /kaggle/working/frida_item_tokens_v4/llm/
 
-Human and LLM ids are disjoint, but their union is the full items.parquet.
-Every full item is therefore formatted and tokenized exactly once, then routed
-to human/ when its id occurs in items_human.parquet, otherwise to llm/.
+Human and LLM ids are disjoint. items.parquet also contains unrelated rows;
+one streaming pass filters each batch to the union before formatting/tokenizing
+and routes every selected item to human/ or llm/ exactly once.
 """
 import os
 
@@ -41,7 +41,8 @@ BATCH_ROWS = 20_000
 
 EXPECTED_HUMAN = 711_304
 EXPECTED_LLM = 12_384_610
-EXPECTED_FULL = EXPECTED_HUMAN + EXPECTED_LLM
+EXPECTED_SOURCE_ROWS = 13_397_761
+EXPECTED_SELECTED = EXPECTED_HUMAN + EXPECTED_LLM
 
 LONG_VALUE_CHARS = 200
 LINK_MARKER = "https"
@@ -179,18 +180,32 @@ def finalize_cache(cache, path, scope):
 def main():
     items_path = find_input("items.parquet")
     human_path = find_input("items_human.parquet")
+    matches_llm_path = find_input("matches_llm.parquet")
     full_rows = pq.ParquetFile(items_path).metadata.num_rows
     human_table = pq.read_table(human_path, columns=["id"])
-    human_ids_array = human_table.column("id").to_numpy(zero_copy_only=False).astype(np.int64)
-    human_ids = set(map(int, human_ids_array))
-    del human_table, human_ids_array
+    human_ids = np.unique(
+        human_table.column("id").to_numpy(zero_copy_only=False).astype(np.int64),
+    )
+    del human_table
 
-    assert full_rows == EXPECTED_FULL, f"items.parquet rows={full_rows:,}, expected={EXPECTED_FULL:,}"
+    llm_table = pq.read_table(matches_llm_path, columns=["id1", "id2"])
+    llm_ids = np.unique(np.concatenate([
+        llm_table.column("id1").to_numpy(zero_copy_only=False).astype(np.int64),
+        llm_table.column("id2").to_numpy(zero_copy_only=False).astype(np.int64),
+    ]))
+    del llm_table
+    gc.collect()
+
+    assert full_rows == EXPECTED_SOURCE_ROWS, \
+        f"items.parquet rows={full_rows:,}, expected={EXPECTED_SOURCE_ROWS:,}"
     assert len(human_ids) == EXPECTED_HUMAN, \
         f"human ids={len(human_ids):,}, expected={EXPECTED_HUMAN:,}"
+    assert len(llm_ids) == EXPECTED_LLM, \
+        f"llm ids={len(llm_ids):,}, expected={EXPECTED_LLM:,}"
+    assert not np.intersect1d(human_ids, llm_ids, assume_unique=True).size
 
     bytes_per_row = 8 + ITEM_MAX_LENGTH * 5
-    required = int((EXPECTED_FULL * bytes_per_row) * 1.15)
+    required = int((EXPECTED_SELECTED * bytes_per_row) * 1.15)
     free = shutil.disk_usage(WORKING_ROOT).free
     log("PREFLIGHT", f"output required(+15%)={required / 1e9:.2f}GB, free={free / 1e9:.2f}GB")
     if free < required:
@@ -211,37 +226,53 @@ def main():
         "human": create_cache(HUMAN_DIR, EXPECTED_HUMAN),
         "llm": create_cache(LLM_DIR, EXPECTED_LLM),
     }
-    seen_human = set()
     processed = 0
+    skipped = 0
     parquet = pq.ParquetFile(items_path)
     for batch in parquet.iter_batches(batch_size=BATCH_ROWS, columns=["id", "name", "attributes"]):
         ids = batch.column(0).to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+        source_n = len(ids)
         names = batch.column(1).to_pylist()
         attributes = batch.column(2).to_pylist()
-        texts = [format_item(name, attr) for name, attr in zip(names, attributes)]
+        human_positions = np.searchsorted(human_ids, ids)
+        llm_positions = np.searchsorted(llm_ids, ids)
+        human_mask = ((human_positions < len(human_ids))
+                      & (human_ids[np.minimum(human_positions, len(human_ids) - 1)] == ids))
+        llm_mask = ((llm_positions < len(llm_ids))
+                    & (llm_ids[np.minimum(llm_positions, len(llm_ids) - 1)] == ids))
+        assert not (human_mask & llm_mask).any()
+        selected_mask = human_mask | llm_mask
+        selected_rows = np.flatnonzero(selected_mask)
+        skipped += source_n - len(selected_rows)
+        if not len(selected_rows):
+            processed += source_n
+            continue
+
+        ids = ids[selected_rows]
+        texts = [format_item(names[row], attributes[row]) for row in selected_rows]
+        human_mask = human_mask[selected_rows]
         encoded = tokenizer(
             texts, add_special_tokens=True, padding="max_length", truncation=True,
             max_length=ITEM_MAX_LENGTH, return_tensors="np",
         )
         input_ids = encoded["input_ids"].astype(np.int32)
         attention_mask = encoded["attention_mask"].astype(np.int8)
-        human_mask = np.fromiter((int(item_id) in human_ids for item_id in ids), bool, len(ids))
         if human_mask.any():
-            seen_human.update(map(int, ids[human_mask]))
             write_rows(caches["human"], ids[human_mask], input_ids[human_mask], attention_mask[human_mask])
         if (~human_mask).any():
             write_rows(caches["llm"], ids[~human_mask], input_ids[~human_mask], attention_mask[~human_mask])
 
-        processed += len(ids)
-        if processed % 500_000 < len(ids):
+        processed += source_n
+        if processed % 500_000 < source_n:
             log("TOKENIZE", f"{processed:,}/{full_rows:,}; human={caches['human']['written']:,}; "
-                            f"llm={caches['llm']['written']:,}")
-        del batch, names, attributes, texts, encoded, input_ids, attention_mask, human_mask
+                            f"llm={caches['llm']['written']:,}; skipped={skipped:,}")
+        del batch, names, attributes, texts, encoded, input_ids, attention_mask
+        del human_mask, llm_mask, selected_mask, selected_rows, human_positions, llm_positions
         gc.collect()
 
     assert caches["human"]["written"] == EXPECTED_HUMAN
     assert caches["llm"]["written"] == EXPECTED_LLM
-    assert seen_human == human_ids, f"missing human ids: {len(human_ids - seen_human):,}"
+    assert skipped == EXPECTED_SOURCE_ROWS - EXPECTED_SELECTED
 
     human_meta = finalize_cache(caches["human"], HUMAN_DIR, "human")
     llm_meta = finalize_cache(caches["llm"], LLM_DIR, "llm")
@@ -249,6 +280,7 @@ def main():
         "status": "complete",
         "elapsed_seconds": time.perf_counter() - t0,
         "single_full_items_pass": True,
+        "source_rows_skipped": skipped,
         "human": human_meta,
         "llm": llm_meta,
     }
