@@ -8,10 +8,14 @@
   "enable_gpu": false,
   "enable_tpu": false,
   "enable_internet": false,
-  "dataset_sources": [],
+  "dataset_sources": [
+    "kirpich682/frida-format-adapter-v4-merged",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split"
+  ],
   "competition_sources": [],
   "kernel_sources": [
-    "maxamsecret/frida-full-sft-continue-submit-build"
+    "maxamsecret/frida-tokenize-items-v4"
   ],
   "model_sources": []
 }

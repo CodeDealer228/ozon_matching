@@ -1,6 +1,6 @@
 {
-  "id": "kirpich682/frida-percat-fullsft-last-v4",
-  "title": "Frida Percat Fullsft Last V4",
+  "id": "kirpich682/frida-percat-format-v4",
+  "title": "Frida Percat Format V4",
   "code_file": "frida_percat_fullsft_last.py",
   "language": "python",
   "kernel_type": "script",
@@ -9,13 +9,13 @@
   "enable_tpu": true,
   "enable_internet": true,
   "dataset_sources": [
-    "maxamsecret/ozon-ecup-2026-matching",
-    "maxamsecret/frida-tokenize-items-v3",
+    "kirpich682/frida-format-adapter-v4-merged",
+    "maxamsecret/frida-item-disjoint-split",
     "maxamsecret/frida-llm-train-val-split"
   ],
   "competition_sources": [],
   "kernel_sources": [
-    "maxamsecret/frida-full-sft-continue-submit-build"
+    "maxamsecret/frida-tokenize-items-v4"
   ],
   "model_sources": []
 }

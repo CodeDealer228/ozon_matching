@@ -1,25 +1,23 @@
-"""
-FRIDA per-category specialists on the exact continue_c_llm3m `last` full-SFT
-backbone: train 20 independent LoRA + deep-head pairs, one per category.
+"""Train 20 independent LoRA + deep-head specialists, one per category,
+on the merged FRIDA formatting-v4 backbone.
 
 V13 CURRENT CONTRACT (later V3-V12 text is retained only as incident history)
 ===========================================================================
-The attached submit archive is content-searched; the model, config and deep
-classifier are verified by their own size+SHA256 manifest so harmless ZIP
-repacking cannot change model identity. Token inputs must be Tokenize Items v3;
-v4 is rejected by metadata. All CPU setup and the 823M model build happen once
+The attached merged formatting-v4 archive is content-searched; the model,
+config and deep classifier are verified by their own size+SHA256 manifest.
+Token inputs must be Tokenize Items v4 (no prefix/category). All CPU setup and
+the 823M model build happen once
 before fork on the 384GB/224-vCPU TPU host; eight ranks use 28 CPU threads each,
-num_workers=0 and two fixed XLA shapes (train 16, eval 32, pair length 188).
+num_workers=0 and two fixed XLA shapes (train 16, eval 32, pair length 224).
 
 AdamW is kept for optimization. Categories are sequential, so only one
 optimizer exists in RAM. `best` stores finite weights + validation metadata;
 `last` stores weights + AdamW + scheduler + exact batch cursor every 15 minutes
 and before eval. A compatible attached previous output resumes all three states.
-Loss and gradient finiteness votes are replica-synchronous and stay on-device;
-a bad rank's gradients are zeroed on every rank before the standard
-`xm.optimizer_step`. Counts are read only at log boundaries, avoiding the
-per-step host sync that made the first preflight path unusably slow. The
-96-update preflight covers the old deterministic cat00 failure at step 40.
+The optimizer uses the short proven XLA path (`backward`, clip,
+`xm.optimizer_step`). A 48-update preflight crosses the old deterministic
+cat00 failure at step 40 and emits heartbeats every eight steps so Kaggle's
+runner cannot mistake a long XLA phase for a dead subprocess.
 The deterministic 100K/category LLM cap keeps the projected run below Kaggle's
 9-hour TPU session cap.
 
@@ -33,7 +31,7 @@ to one static shape.  Second, v11 checked only finite forward loss before an
 uninspected gradient all-reduce/AdamW update.  V12 explicitly reduces first,
 checks/clips the global gradient norm, and skips a bad update identically on
 all ranks.  Fresh heads start at zero and get a 50-step head-only burn-in; a
-96-real-batch preflight exercises the complete optimizer path before cat00.
+48-real-batch preflight exercises the complete optimizer path before cat00.
 
 The full 11.09M LLM train split cannot fit a 9h session (18.6h at the
 notebook's own optimistic 170 rows/s).  V12 deterministically preserves the
@@ -95,20 +93,16 @@ one instead of twenty.
 TIME BUDGET (arithmetic, from this project's own measured 120 rows/s at
 PAIR_MAX_LENGTH=256 -- see frida-llm-tpu-sft's docstring)
 ===========================================================================
-PAIR_MAX_LENGTH=192 scales the attention term by (192/256)^2 and the rest
-linearly, giving ~170 rows/s. Per category: all its human train rows
-(~14.6K) + LLM_ROWS_PER_CATEGORY (100K) = ~114.6K rows; x20 categories =
-~2.36M rows = ~3.9h. Comfortably inside one 9h TPU session with the 8.5h
-stop, with quota left for a second pass.
+PAIR_MAX_LENGTH=224 is budgeted conservatively at ~145 rows/s. Roughly 2M
+LLM rows plus human item-disjoint train remains around 4--5h, inside one 9h
+TPU session with the 8h15 stop.
 
-SPLIT: THE OLD CANONICAL ONE, DELIBERATELY
+SPLIT: MATCH THE FORMATTING-V4 BACKBONE
 ===========================================================================
-This kernel uses the 80/20 pair-level seed-42 split, NOT the newer
-item-disjoint 70/30 one (data/splits/matches_item_disjoint_70_30_seed42.*).
-That is not an oversight. The adapter being merged here was trained and
-validated against the old split; re-splitting under it would move items it
-already trained on into the new val half and silently inflate every
-per-category number. A checkpoint keeps the split it was born with.
+The merged formatting adapter was trained/validated on the item-disjoint
+70/30 seed-42 split. Reusing the old random pair split would put rows already
+seen by the backbone into validation, so this run uses the same item-disjoint
+split and records its fingerprint in every result.
 
 WHAT IS WEIGHTED, AND WHY IT IS NOT CATEGORY SIZE
 ===========================================================================
@@ -118,13 +112,12 @@ no-op. Positive RATE is what varies (7.7x). Each specialist therefore gets
 its OWN pos_weight, computed from its own training mix, plus a 2x weight on
 human-labeled rows relative to LLM soft-labeled ones.
 
-HEAD SCHEDULE AND REPLICA-SYNCHRONOUS GRADIENT GUARD
+HEAD SCHEDULE AND NUMERICAL PREFLIGHT
 ===========================================================================
 Each specialist resets to the already-trained deep general head and identity
-LoRA.  The head uses a conservative 1e-5 peak while LoRA warms to 5e-5.  Every
-rank votes on finite loss and gradients on-device; one bad rank makes all ranks
-zero that batch's gradients before the normal XLA all-reduce.  Local gradients
-are clipped before averaging, so their average also cannot exceed the bound.
+LoRA.  The head uses a conservative 1e-5 peak while LoRA warms to 5e-5.
+The exact production optimizer path is checked for 48 updates, past the old
+deterministic step-40 failure, with an eight-step heartbeat and finite checks.
 
 This is a real fix, not a first-principles design choice: an earlier
 version jumped the head straight to peak at step 0 with no ramp and no
@@ -358,7 +351,6 @@ import resource
 import time
 import hashlib
 import shutil
-import zipfile
 import subprocess
 import importlib.util
 import importlib.metadata
@@ -403,7 +395,6 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 from transformers import T5EncoderModel, set_seed
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import average_precision_score
 
 try:
@@ -442,23 +433,19 @@ if _TORCH_MM != _XLA_MM:
 # =====================================================================
 
 SEED = 42
-# Exact project-best backbone requested by the user.  The CPU submit-builder
-# kernel is attached as a kernel_source; content search avoids relying on its
-# unstable Kaggle mount path.  Hash is from the local archive named below.
-BACKBONE_ZIP_NAME = "matching-frida_continue_c_last_188-submit.zip"
-# ZIP metadata changed when the submit-builder was rerun, while the model
-# files may remain byte-identical.  The container hash is provenance only;
-# the three files actually loaded by training are the identity contract.
-BACKBONE_ZIP_SHA256 = "6622022adf93bd159ebd9be2c938feed6cf5e606ce56f0e99c598a02dff4cb73"
-BACKBONE_MODEL_SUBDIR = "models/frida-full-sft"
+# Merged formatting-v4 model requested by the user.
+BACKBONE_ZIP_NAME = "matching-frida_format_adapter_v4_best_200-submit.zip"
+BACKBONE_MODEL_SUBDIR = "models/frida-format-adapter-v4"
 BACKBONE_CONTENT = {
     "classifier.pt": (4_340_725, "0fd9134e8cd4a9b945aee7fb3d12d991208c9ff93d293e958c0ec3b35eb94612"),
     f"{BACKBONE_MODEL_SUBDIR}/config.json": (846, "f42bc8b9f9706487667056e8bb5c2151a995fbf7d056c2461936d147e24e3651"),
-    f"{BACKBONE_MODEL_SUBDIR}/model.safetensors": (1_646_829_336, "ffae8888af57ee3d5337607033dbb972728bcec07937441fbc95414e43d9d758"),
+    f"{BACKBONE_MODEL_SUBDIR}/model.safetensors": (1_646_829_336, "3978a7b9c0641ab75248257adc0abe2b2c0007a98202b2ce22040bf40b42b3d1"),
 }
 
-MATCHES_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/matches.parquet"
-MATCHES_LLM_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/matches_llm.parquet"
+HUMAN_SPLIT_PATH_HINT = (
+    "/kaggle/input/datasets/maxamsecret/frida-item-disjoint-split/"
+    "matches_item_disjoint_70_30_seed42.parquet"
+)
 # v2 of frida-llm-train-val-split-no-leak-retroactive: train = every row
 # NOT held out for the fixed 100K val (~11.09M rows), not a subsample --
 # see that kernel's own docstring. Publishes to the SAME dataset id
@@ -468,35 +455,12 @@ LLM_SPLIT_PATH_HINT = (
     "/kaggle/input/datasets/maxamsecret/"
     "frida-llm-train-val-split/llm_train_val_split.parquet"
 )
-ITEMS_HUMAN_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/items_human.parquet"
-
-# v2 caches (frida-tokenize-items-cpu): correct char budget (140/32/529,
-# see reports/experiment_log.md "Char-budget rule v2") + the light v2
-# attribute cleanup. NOT the v1 caches, which carry the under-scaled
-# 128/64/384 budget sized for MiniLM's old 128-token regime.
-#
-# Published as ONE dataset covering both scopes (frida-tokenize-items-cpu's
-# own two publish_dataset() calls failed at the very last step -- the
-# tokenization itself completed correctly, confirmed via cache_meta.json:
-# 711,304 human items, v2 policy applied to 711,232 of them -- so the user
-# published /kaggle/working by hand as a single dataset instead). These
-# hints therefore won't resolve to an exact path; that's fine,
-# _find_v1_cache_root() falls back to a content-matching walk of
-# /kaggle/input keyed on n_items, which is what actually finds them.
-HUMAN_CACHE_HINT = "/kaggle/input/datasets/maxamsecret/frida-tokenize-items-v3/human_scope"
-LLM_CACHE_HINT = "/kaggle/input/datasets/maxamsecret/frida-tokenize-items-v3/llm_scope"
-
-ITEMS_FULL_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/items.parquet"
+HUMAN_CACHE_HINT = "/kaggle/input/notebooks/maxamsecret/frida-tokenize-items-v4/human"
+LLM_CACHE_HINT = "/kaggle/input/notebooks/maxamsecret/frida-tokenize-items-v4/llm"
 
 ITEM_MAX_LENGTH = 256
-# Byte-match the requested backbone's real serving contract.
-PAIR_MAX_LENGTH = 188
-
-MAX_CATEGORY_CHARS = 64
-
-CATEGORY_LABEL_TOKEN = 55917
-ATTRIBUTES_LABEL_TOKEN = 91837
-LABEL_COLON_TOKEN = 30
+# Byte-match formatting-v4 adapter training.
+PAIR_MAX_LENGTH = 224
 
 # Same deep head as the requested project-best backbone.  Every category is
 # reset to this proven general head before specialist training.
@@ -539,8 +503,8 @@ LR_RESUME_MULTIPLIER = 1.0
 HEAD_LR_MULTIPLIER = 0.2   # 1e-5: preserve the already-good general head
 HEAD_WARMUP_STEPS = 50
 HEAD_ONLY_STEPS = 0
-PREFLIGHT_STEPS = 96
-MAX_BAD_STEP_FRACTION = 0.02
+PREFLIGHT_STEPS = 48       # crosses the old deterministic cat00 failure at step 40
+PREFLIGHT_HEARTBEAT = 8    # Kaggle kills long silent TPU subprocesses
 GRAD_CLIP_NORM = 1.0
 WEIGHT_DECAY = 0.01
 WARMUP_RATIO = 0.10
@@ -567,12 +531,11 @@ LAST_SAVE_SECONDS = 900        # full resume checkpoint every 15 wall-clock min
 # Used ONLY to size the LR schedule (see docstring). Measured on
 # frida-tpu-human-sft at this exact model/sequence/batch. If a future run
 # reports a different rate, update this rather than the schedule shape.
-PROJECTED_ROWS_PER_SEC = 170   # conservative estimate at seq=188
+PROJECTED_ROWS_PER_SEC = 145   # conservative estimate after 188 -> 224 tokens
 LR_MIN_RATIO = 0.05            # LR floor as a fraction of peak
 
 WORKING_DIR = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 OUTPUT_DIR = os.path.join(WORKING_DIR, "frida_percat_lora")
-BACKBONE_DIR = os.path.join(WORKING_DIR, "frida_continue_c_last_188")
 RESULTS_JSON = os.path.join(OUTPUT_DIR, "percat_results.json")
 RUN_CONTRACT_PATH = os.path.join(OUTPUT_DIR, "run_contract.json")
 
@@ -711,28 +674,32 @@ def _lengths_chunked(attn, n_items, chunk=500_000):
 EXPECTED_N_ITEMS = {"human": 711_304, "llm": 12_384_610}
 
 
-def _find_v1_cache_root(hint, expect_n_items):
+def _find_v4_cache_root(hint, scope, expect_n_items):
     for candidate in (hint,):
         meta_path = os.path.join(candidate, "cache_meta.json")
         if os.path.isdir(candidate) and os.path.exists(meta_path):
             with open(meta_path) as f:
-                if json.load(f).get("n_items") == expect_n_items:
+                meta = json.load(f)
+                if (meta.get("format_version") == 4 and meta.get("scope") == scope
+                        and meta.get("n_items") == expect_n_items):
                     return candidate
     if os.path.isdir("/kaggle/input"):
         for root, _dirs, files in os.walk("/kaggle/input"):
             if "cache_meta.json" in files and "input_ids.bin" in files:
                 with open(os.path.join(root, "cache_meta.json")) as f:
                     meta = json.load(f)
-                if meta.get("n_items") == expect_n_items:
-                    print(f"[CACHE] hint {hint} missed -- matched n_items={expect_n_items:,} "
+                if (meta.get("format_version") == 4 and meta.get("scope") == scope
+                        and meta.get("n_items") == expect_n_items):
+                    print(f"[CACHE] hint {hint} missed -- matched v4 scope={scope!r} "
+                          f"n_items={expect_n_items:,} "
                           f"at {root}", flush=True)
                     return root
-    raise RuntimeError(f"[CACHE] no v1 item cache with n_items={expect_n_items:,} found "
-                       f"(hint was {hint})")
+    raise RuntimeError(f"[CACHE] no v4 {scope!r} cache with "
+                       f"n_items={expect_n_items:,} found (hint was {hint})")
 
 
-def load_v1_cache(hint, name):
-    root = _find_v1_cache_root(hint, EXPECTED_N_ITEMS[name])
+def load_v4_cache(hint, name):
+    root = _find_v4_cache_root(hint, name, EXPECTED_N_ITEMS[name])
     with open(os.path.join(root, "cache_meta.json")) as f:
         meta = json.load(f)
     n_items, max_length = meta["n_items"], meta["max_length"]
@@ -740,10 +707,11 @@ def load_v1_cache(hint, name):
           f"prefix={meta.get('prefix')!r}", flush=True)
     if max_length != ITEM_MAX_LENGTH:
         raise RuntimeError(f"[CACHE:{name}] max_length={max_length} != {ITEM_MAX_LENGTH}")
-    if meta.get("prefix") != "paraphrase: " or "Category" not in meta.get("text_formula", ""):
+    if (meta.get("format_version") != 4 or meta.get("scope") != name
+            or meta.get("prefix") != "" or meta.get("category_in_text") is not False
+            or meta.get("add_special_tokens") is not True):
         raise RuntimeError(
-            f"[CACHE:{name}] cache contract is not Tokenize Items v3 "
-            f"(prefix={meta.get('prefix')!r}, formula={meta.get('text_formula')!r})")
+            f"[CACHE:{name}] wrong Tokenize Items v4 contract: {meta}")
 
     ids_path = os.path.join(root, "ids.bin")
     input_ids_path = os.path.join(root, "input_ids.bin")
@@ -768,8 +736,8 @@ def load_v1_cache(hint, name):
     # referenced by the actual 100K/category training set and human val.
     return dict(name=name, n_items=n_items, max_length=max_length,
                 input_ids=input_ids, attention_mask_path=attn_path,
-                lengths=None, cat_start=None, attr_start=None,
-                order=order, sorted_ids=sorted_ids, pad_id=None)
+                lengths=None, order=order, sorted_ids=sorted_ids, pad_id=None,
+                meta=meta)
 
 
 def _prepare_cache_rows(cache, referenced_rows, chunk=100_000):
@@ -787,8 +755,6 @@ def _prepare_cache_rows(cache, referenced_rows, chunk=100_000):
     n_items = cache["n_items"]
     max_length = cache["max_length"]
     lengths = np.full(n_items, -1, dtype=np.int16)
-    cat_start = np.full(n_items, -1, dtype=np.int16)
-    attr_start = np.full(n_items, -1, dtype=np.int16)
     attention_mask = np.memmap(
         cache["attention_mask_path"], dtype=np.int8, mode="r",
         shape=(n_items, max_length),
@@ -798,19 +764,8 @@ def _prepare_cache_rows(cache, referenced_rows, chunk=100_000):
     for lo in range(0, len(rows), chunk):
         selected = rows[lo:lo + chunk]
         mask_block = np.asarray(attention_mask[selected])
-        token_block = np.asarray(cache["input_ids"][selected])
         lengths[selected] = mask_block.sum(axis=1).astype(np.int16)
-
-        for tok_a, destination in (
-            (CATEGORY_LABEL_TOKEN, cat_start),
-            (ATTRIBUTES_LABEL_TOKEN, attr_start),
-        ):
-            hits = ((token_block[:, :-1] == tok_a) &
-                    (token_block[:, 1:] == LABEL_COLON_TOKEN))
-            has_hit = hits.any(axis=1)
-            if has_hit.any():
-                destination[selected[has_hit]] = hits[has_hit].argmax(axis=1).astype(np.int16)
-        del mask_block, token_block
+        del mask_block
 
     used_lengths = lengths[rows].astype(np.int32)
     bad_length = (used_lengths < 2) | (used_lengths > max_length)
@@ -832,10 +787,9 @@ def _prepare_cache_rows(cache, referenced_rows, chunk=100_000):
 
     pad_id = _derive_pad_id(cache["input_ids"], lengths, max_length,
                             cache["name"], candidate_rows=rows)
-    for array in (lengths, cat_start, attr_start):
-        array.flags.writeable = False
-    cache.update(lengths=lengths, cat_start=cat_start, attr_start=attr_start,
-                 pad_id=pad_id, n_prepared_rows=int(len(rows)))
+    lengths.flags.writeable = False
+    cache.update(lengths=lengths, pad_id=pad_id,
+                 n_prepared_rows=int(len(rows)))
     del attention_mask, used_lengths
     print(f"[CACHE:{cache['name']}] prepared {len(rows):,}/{n_items:,} referenced rows "
           f"({time.perf_counter() - t0:.1f}s)", flush=True)
@@ -886,14 +840,7 @@ def allocate_pair_budget(len1, len2, budget):
 
 def build_compact_ids(cache, row):
     item_length = int(cache["lengths"][row])
-    category_start = int(cache["cat_start"][row])
-    attr_start = int(cache["attr_start"][row])
-    ids = cache["input_ids"]
-    if category_start < 0 or attr_start < 0:
-        return np.asarray(ids[row, :item_length])
-    head = np.asarray(ids[row, :category_start])
-    tail = np.asarray(ids[row, attr_start:item_length])
-    return np.concatenate((head, tail))
+    return np.asarray(cache["input_ids"][row, :item_length])
 
 
 class PairIndexDataset(Dataset):
@@ -1038,12 +985,14 @@ def _find_external_checkpoints_root():
 
 def _run_contract():
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "backbone_zip": BACKBONE_ZIP_NAME,
         "backbone_content_sha256": {
             name: digest for name, (_size, digest) in BACKBONE_CONTENT.items()
         },
-        "token_cache_dataset": "maxamsecret/frida-tokenize-items-v3",
+        "token_cache_kernel": "maxamsecret/frida-tokenize-items-v4",
+        "item_format_version": 4,
+        "human_split": "matches_item_disjoint_70_30_seed42.parquet",
         "pair_max_length": PAIR_MAX_LENGTH,
         "lora": {"r": LORA_R, "alpha": LORA_ALPHA,
                  "dropout": LORA_DROPOUT,
@@ -1105,15 +1054,18 @@ def write_run_contract():
     os.replace(temp, RUN_CONTRACT_PATH)
 
 
-def _find_backbone_zip():
+def _find_backbone_root():
     matches = []
     for root, _dirs, files in os.walk("/kaggle/input"):
-        if BACKBONE_ZIP_NAME in files:
-            matches.append(os.path.join(root, BACKBONE_ZIP_NAME))
+        if "classifier.pt" not in files:
+            continue
+        if all(os.path.isfile(os.path.join(root, *name.split("/")))
+               for name in BACKBONE_CONTENT):
+            matches.append(root)
     if len(matches) != 1:
         raise RuntimeError(
-            f"expected exactly one {BACKBONE_ZIP_NAME!r} from the attached "
-            f"submit-build kernel, found {matches}")
+            f"expected exactly one extracted merged formatting-v4 backbone, "
+            f"found {matches}")
     return matches[0]
 
 
@@ -1126,51 +1078,27 @@ def _sha256_file(path):
 
 
 def prepare_backbone():
-    """Verify and extract the requested project-best submit pre-fork."""
-    marker = os.path.join(BACKBONE_DIR, BACKBONE_MODEL_SUBDIR, "config.json")
-    if os.path.isfile(marker) and os.path.isfile(os.path.join(BACKBONE_DIR, "classifier.pt")):
-        return BACKBONE_DIR
-
-    archive = _find_backbone_zip()
-    archive_sha = _sha256_file(archive)
-    wanted = set(BACKBONE_CONTENT)
-    temp_dir = BACKBONE_DIR + ".tmp"
-    if os.path.isdir(temp_dir):
-        shutil.rmtree(temp_dir)
-    os.makedirs(temp_dir)
-    with zipfile.ZipFile(archive) as zf:
-        names = set(zf.namelist())
-        missing = wanted - names
-        if missing:
-            raise RuntimeError(f"backbone archive missing required files: {sorted(missing)}")
-        for name in names:
-            if name == "classifier.pt" or name.startswith(BACKBONE_MODEL_SUBDIR + "/"):
-                zf.extract(name, temp_dir)
-
+    """Verify the read-only merged model dataset before fork."""
+    root = _find_backbone_root()
     actual_content = {}
     for name, (expected_size, expected_sha) in BACKBONE_CONTENT.items():
-        path = os.path.join(temp_dir, *name.split("/"))
+        path = os.path.join(root, *name.split("/"))
         actual_size = os.path.getsize(path)
         actual_sha = _sha256_file(path)
         actual_content[name] = {"size": actual_size, "sha256": actual_sha}
         if (actual_size, actual_sha) != (expected_size, expected_sha):
-            shutil.rmtree(temp_dir)
             raise RuntimeError(
                 f"wrong backbone content for {name}: size/sha256="
                 f"{actual_size}/{actual_sha}, expected={expected_size}/{expected_sha}"
             )
-    os.replace(temp_dir, BACKBONE_DIR)
-    with open(os.path.join(BACKBONE_DIR, "BACKBONE_PROVENANCE.json"), "w", encoding="utf-8") as f:
-        json.dump({"archive": BACKBONE_ZIP_NAME,
-                   "archive_sha256": archive_sha,
-                   "reference_archive_sha256": BACKBONE_ZIP_SHA256,
+    with open(os.path.join(OUTPUT_DIR, "BACKBONE_PROVENANCE.json"), "w", encoding="utf-8") as f:
+        json.dump({"source_dataset": "kirpich682/frida-format-adapter-v4-merged",
+                   "source_archive": BACKBONE_ZIP_NAME,
                    "content": actual_content,
                    "pair_max_length": PAIR_MAX_LENGTH}, f, indent=2)
-    container_note = ("exact container" if archive_sha == BACKBONE_ZIP_SHA256
-                      else "repacked container; exact model content")
-    print(f"[{_elapsed():8.1f}s][BACKBONE] verified {container_note} + extracted {archive}",
+    print(f"[{_elapsed():8.1f}s][BACKBONE] verified exact merged model content at {root}",
           flush=True)
-    return BACKBONE_DIR
+    return root
 
 
 def _find_any_external_category_checkpoint(cat_id):
@@ -1390,15 +1318,9 @@ def _make_lr_lambda(warmup_steps, total_steps, min_ratio, delay_steps=0):
     return lr_lambda
 
 
-def _safe_optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
-                           world_size, head_only):
-    """One replica-synchronous TPU update without a per-step host sync.
-
-    Every rank votes on loss+gradient finiteness on-device.  If one rank is
-    bad, all ranks replace this batch's gradients with zeros before the normal
-    xm.optimizer_step all-reduce, keeping parameters and Adam moments finite.
-    The caller reads the accumulated bad-step count only at log boundaries.
-    """
+def _optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
+                      head_only):
+    """The proven minimal TPU path: backward, clip, XLA step, scheduler."""
     input_ids, attention_mask, batch_labels, _cats, batch_scope = batch
     batch_labels = batch_labels.to(device)
     batch_scope = batch_scope.to(device)
@@ -1416,25 +1338,9 @@ def _safe_optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
     trainable = [p for group in optimizer.param_groups for p in group["params"]]
     grad_norm = torch.nn.utils.clip_grad_norm_(
         trainable, GRAD_CLIP_NORM, error_if_nonfinite=False, foreach=False)
-    # clip_grad_norm_ aggregates every gradient into this scalar; any NaN/Inf
-    # gradient therefore makes grad_norm non-finite without 350 separate
-    # per-parameter reductions in the XLA graph.
-    local_finite = (torch.isfinite(loss.detach()) &
-                    torch.isfinite(grad_norm.detach())).to(torch.float32)
-    finite_replicas = xm.all_reduce(xm.REDUCE_SUM, local_finite)
-    global_finite = finite_replicas == float(world_size)
-
-    # Direct torch.where on .grad is safe: no backward graph is traversed
-    # through the rejected NaN branch.  A bad rank therefore cannot poison
-    # another rank's Adam state during xm.optimizer_step's all-reduce.
-    for parameter in trainable:
-        if parameter.grad is not None:
-            parameter.grad = torch.where(
-                global_finite, parameter.grad, torch.zeros_like(parameter.grad))
     xm.optimizer_step(optimizer)
     scheduler.step()
-    bad_update = 1.0 - global_finite.to(torch.float32)
-    return loss.detach(), grad_norm.detach(), bad_update
+    return loss.detach(), grad_norm.detach()
 
 
 def _trainable_parameters_finite(model, device, world_size):
@@ -1568,7 +1474,8 @@ def save_checkpoint(model, optimizer, scheduler, global_step, epoch,
             "backbone_content_sha256": {
                 name: digest for name, (_size, digest) in BACKBONE_CONTENT.items()
             },
-            "token_cache_dataset": "maxamsecret/frida-tokenize-items-v3",
+            "token_cache_kernel": "maxamsecret/frida-tokenize-items-v4",
+            "item_format_version": 4,
             **(extra or {}),
         }, f, ensure_ascii=False, indent=2)
     previous_dir = save_dir + ".previous"
@@ -1648,10 +1555,9 @@ def stratified_llm_sample(target, cat_id, n_per_category, seed):
     So "confident" rows (<=0.2 or >=0.8) are ALREADY 81.25% of the data by
     nature. Filtering on confidence would push that to 100% while discarding
     the 18.75% of rows sitting nearest the decision boundary -- and PR-AUC is
-    a ranking metric, decided precisely there. It would also be the worst
-    possible moment to do it: the backbone merged into this run is
-    frida-tpu-human-sft, trained human-ONLY, so these specialists are the
-    model's first exposure to LLM-labelled data at all.
+    a ranking metric, decided precisely there. The formatting-v4 backbone also
+    used a stratified LLM sample, so preserving this distribution is the least
+    disruptive continuation.
 
     Category balance is enforced (every category gets the same quota) rather
     than sampled proportionally, because the metric is a plain mean over
@@ -1693,70 +1599,51 @@ def _load_shared_data():
     write_run_contract()
     backbone_dir = prepare_backbone()
 
-    human_cache = load_v1_cache(HUMAN_CACHE_HINT, "human")
-    llm_cache = load_v1_cache(LLM_CACHE_HINT, "llm")
+    human_cache = load_v4_cache(HUMAN_CACHE_HINT, "human")
+    llm_cache = load_v4_cache(LLM_CACHE_HINT, "llm")
     caches = [human_cache, llm_cache]
 
-    # ---- human: the OLD canonical 80/20 split, deliberately (see docstring) ----
-    matches_pd = (
-        pl.read_parquet(_find_dataset_file(MATCHES_PATH_HINT, "matches.parquet"))
-        .filter(pl.col("id1").is_not_null() & pl.col("id2").is_not_null())
-        .with_columns([pl.col("target").fill_null(0).cast(pl.Float32),
-                       (pl.col("target").fill_null(0) >= 0.5)
-                       .cast(pl.Int8).alias("label")])
-        .select(["id1", "id2", "label"])
-        .to_pandas()
-    )
-    labels_all = matches_pd["label"].to_numpy().astype(np.int64)
-    indices = np.arange(len(labels_all), dtype=np.int64)
-    train_idx, val_idx = train_test_split(indices, test_size=0.20, random_state=SEED,
-                                          stratify=labels_all)
-    human_train = matches_pd.iloc[train_idx].reset_index(drop=True)
-    human_val = matches_pd.iloc[val_idx].reset_index(drop=True)
+    # Match the formatting-v4 backbone's leakage-safe human split. Reusing the
+    # old random pair split would validate on rows this backbone already saw.
+    human = pl.read_parquet(_find_dataset_file(
+        HUMAN_SPLIT_PATH_HINT, "matches_item_disjoint_70_30_seed42.parquet"
+    )).to_pandas()
+    required_human = {"id1", "id2", "label", "category", "split"}
+    missing_human = required_human - set(human.columns)
+    if missing_human:
+        raise RuntimeError(f"[SETUP] human item-disjoint split missing: {missing_human}")
+    human_train = human[human["split"] == "train"].reset_index(drop=True)
+    human_val = human[human["split"] == "val"].reset_index(drop=True)
+    if not len(human_train) or not len(human_val):
+        raise RuntimeError("[SETUP] empty train/val in human item-disjoint split")
     val_fingerprint = hashlib.sha256(
         ",".join(f"{a}-{b}" for a, b in sorted(zip(human_val["id1"], human_val["id2"]))).encode("utf-8")
     ).hexdigest()[:16]
     print(f"[{_elapsed():8.1f}s][SETUP] human train={len(human_train):,} val={len(human_val):,} "
-          f"val_fingerprint={val_fingerprint} (OLD canonical 80/20 split -- see docstring)",
+          f"val_fingerprint={val_fingerprint} (item-disjoint 70/30 seed42)",
           flush=True)
 
-    items_cat = (
-        pl.scan_parquet(_find_dataset_file(ITEMS_HUMAN_PATH_HINT, "items_human.parquet"))
-        .select(["id", "category"])
-        .with_columns(pl.col("category").fill_null("UNKNOWN").cast(pl.Utf8)
-                      .str.slice(0, MAX_CATEGORY_CHARS))
-        .collect(engine="streaming")
-    )
-    category_vocab = sorted(items_cat.get_column("category").unique().to_list())
+    category_vocab = sorted(human["category"].dropna().unique().tolist())
     if category_vocab != EXPECTED_CATEGORIES:
         raise RuntimeError(
             "[SETUP] category vocabulary/order differs from the required 20-category "
             f"checkpoint contract. Got {category_vocab!r}"
         )
     category_to_id = {c: i for i, c in enumerate(category_vocab)}
-    id_to_category = dict(zip(items_cat.get_column("id").to_list(),
-                              items_cat.get_column("category").to_list()))
     print(f"[{_elapsed():8.1f}s][SETUP] categories: {len(category_vocab)}", flush=True)
 
     def cat_ids(frame):
-        # No UNKNOWN fallback on purpose. items_human.parquet is built to cover
-        # every id matches.parquet references, and a local check over all
-        # 365,654 pairs found both endpoints sharing a real category in 100.0%
-        # of them. If that ever stops holding, an unmapped id silently becoming
-        # "UNKNOWN" would quietly move rows into a 21st pseudo-category and
-        # corrupt the per-category split -- so fail loudly instead.
-        mapped = frame["id1"].map(id_to_category).map(category_to_id)
+        mapped = frame["category"].map(category_to_id)
         n_missing = int(mapped.isna().sum())
         if n_missing:
-            raise RuntimeError(f"[SETUP] {n_missing:,} pairs have an id1 with no category in "
-                               f"items_human.parquet -- the per-category split cannot be built.")
+            raise RuntimeError(f"[SETUP] {n_missing:,} human pairs have unknown category")
         return mapped.to_numpy().astype(np.int64)
 
     human_train_frame = _build_frame(human_train["id1"], human_train["id2"],
                                      human_train["label"], cat_ids(human_train), 0, caches)
     human_val_frame = _build_frame(human_val["id1"], human_val["id2"],
                                    human_val["label"], cat_ids(human_val), 0, caches)
-    del matches_pd, items_cat, id_to_category, labels_all, indices, train_idx, val_idx
+    del human
     gc.collect()
 
     # ---- LLM: v2 no-leak train split, then deterministic 100K/category ----
@@ -1963,8 +1850,8 @@ def _preflight_optimizer_updates(model, device, caches, pad_id, train_frame,
 
     V11's smoke test stopped after backward while the real failure appeared
     after all-reduce + clipping + AdamW (as early as step 3).  This preflight
-    runs 96 real cat00 batches, crosses the head-only/joint boundary, verifies
-    finite parameters, and then resets the model byte-clean for real training.
+    runs 48 real cat00 batches past the historical step-40 failure, emits a
+    heartbeat every 8 steps, then resets the model byte-clean for training.
     """
     _log(rank, "PREFLIGHT", f"{PREFLIGHT_STEPS} real optimizer updates "
                             f"({HEAD_ONLY_STEPS} head-only, then joint)", force=True)
@@ -1990,34 +1877,44 @@ def _preflight_optimizer_updates(model, device, caches, pad_id, train_frame,
         world_size, rank, SEED, epoch=0)
     mp_loader = pl_xla.MpDeviceLoader(loader, device)
     attempts = 0
-    bad_updates = torch.zeros((), device=device)
     last_loss = torch.zeros((), device=device)
     last_norm = torch.zeros((), device=device)
     for step, batch in enumerate(mp_loader):
         if step >= PREFLIGHT_STEPS:
             break
-        last_loss, last_norm, bad = _safe_optimizer_update(
-            model, optimizer, scheduler, loss_fn, batch, device, world_size,
+        last_loss, last_norm = _optimizer_update(
+            model, optimizer, scheduler, loss_fn, batch, device,
             head_only=(attempts < HEAD_ONLY_STEPS))
         attempts += 1
-        bad_updates = bad_updates + bad
+        if attempts == 1 or attempts % PREFLIGHT_HEARTBEAT == 0:
+            xm.mark_step()
+            loss_value = float(last_loss.item())
+            norm_value = float(last_norm.item())
+            finite_params = _trainable_parameters_finite(model, device, world_size)
+            _log(rank, "PREFLIGHT", f"step={attempts}/{PREFLIGHT_STEPS} "
+                                    f"loss={loss_value:.4f} grad_norm={norm_value:.4f}",
+                 force=True)
+            if not (math.isfinite(loss_value) and math.isfinite(norm_value)
+                    and finite_params):
+                raise RuntimeError(
+                    f"[PREFLIGHT] non-finite at step {attempts}: "
+                    f"loss={loss_value}, grad_norm={norm_value}, "
+                    f"finite_params={finite_params}"
+                )
     xm.mark_step()
     if attempts != PREFLIGHT_STEPS:
         raise RuntimeError(
             f"[PREFLIGHT] loader produced only {attempts}/{PREFLIGHT_STEPS} batches"
         )
-    n_bad = int(bad_updates.item())
-    successful_updates = attempts - n_bad
     finite_params = _trainable_parameters_finite(model, device, world_size)
-    if not finite_params or n_bad != 0 or successful_updates != PREFLIGHT_STEPS:
+    if not finite_params:
         raise RuntimeError(
             f"[PREFLIGHT] numerical stability check failed: finite_params={finite_params}, "
-            f"updates={successful_updates}/{PREFLIGHT_STEPS}, "
-            f"bad_updates={n_bad}, last_loss={last_loss.item()}, "
+            f"updates={attempts}/{PREFLIGHT_STEPS}, last_loss={last_loss.item()}, "
             f"last_grad_norm={last_norm.item()}"
         )
     _log(rank, "PREFLIGHT", f"passed in {time.perf_counter() - t0:.1f}s: "
-                            f"bad_updates={n_bad}/{PREFLIGHT_STEPS} "
+                            f"updates={attempts}/{PREFLIGHT_STEPS} "
                             f"loss={last_loss.item():.4f} grad_norm={last_norm.item():.4f}",
          force=True)
 
@@ -2059,7 +1956,7 @@ def _write_results(results, category_vocab, stopped):
         "llm_rows_used_train": _SHARED["n_llm_used"],
         "pair_max_length": PAIR_MAX_LENGTH,
         "val_fingerprint": _SHARED["val_fingerprint"],
-        "split": "OLD canonical pair-level 80/20 seed42",
+        "split": "item-disjoint 70/30 seed42",
     }
     temp_path = RESULTS_JSON + ".tmp"
     with open(temp_path, "w", encoding="utf-8") as handle:
@@ -2253,7 +2150,6 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
             raise RuntimeError(f"[{cat_id:02d}] inconsistent resume counters")
         last_loss = torch.zeros((), device=device)
         last_norm = torch.zeros((), device=device)
-        pending_bad_updates = torch.zeros((), device=device)
         last_save_wall = _elapsed()
         current_epoch = min(start_epoch, EPOCHS)
         next_batch_in_epoch = resume_batch
@@ -2267,24 +2163,32 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
                 if epoch == start_epoch and batch_index < resume_batch:
                     continue
                 head_only = external is None and attempted_steps < HEAD_ONLY_STEPS
-                last_loss, last_norm, bad = _safe_optimizer_update(
+                last_loss, last_norm = _optimizer_update(
                     model, optimizer, scheduler, loss_fn, batch, device,
-                    world_size, head_only=head_only)
+                    head_only=head_only)
                 attempted_steps += 1
-                pending_bad_updates = pending_bad_updates + bad
                 next_batch_in_epoch = batch_index + 1
 
                 if attempted_steps % LOG_EVERY_STEPS == 0:
                     xm.mark_step()
-                    n_bad += int(pending_bad_updates.item())
-                    successful_updates = attempted_steps - n_bad
-                    pending_bad_updates = torch.zeros((), device=device)
+                    loss_value = float(last_loss.item())
+                    norm_value = float(last_norm.item())
+                    finite_params = _trainable_parameters_finite(
+                        model, device, world_size)
+                    if not (math.isfinite(loss_value) and math.isfinite(norm_value)
+                            and finite_params):
+                        raise RuntimeError(
+                            f"[{cat_id:02d}] non-finite at step {attempted_steps}: "
+                            f"loss={loss_value}, grad_norm={norm_value}, "
+                            f"finite_params={finite_params}"
+                        )
+                    successful_updates = attempted_steps
                     if rank == 0:
                         print(f"[{_elapsed():8.1f}s] cat={cat_id:02d} "
                               f"batch={attempted_steps}/{total_steps} "
                               f"updates={successful_updates} "
-                              f"loss={torch.nan_to_num(last_loss).item():.4f} "
-                              f"grad_norm={torch.nan_to_num(last_norm).item():.4f} "
+                              f"loss={loss_value:.4f} "
+                              f"grad_norm={norm_value:.4f} "
                               f"bad_updates={n_bad} "
                               f"lr={scheduler.get_last_lr()[0]:.2e}/"
                               f"{scheduler.get_last_lr()[1]:.2e}", flush=True)
@@ -2317,15 +2221,10 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
                 break
 
         xm.mark_step()
-        n_bad += int(pending_bad_updates.item())
-        successful_updates = attempted_steps - n_bad
+        successful_updates = attempted_steps
         finite_params = _trainable_parameters_finite(model, device, world_size)
         if not finite_params:
             raise RuntimeError(f"[{cat_id:02d}] trainable parameters became non-finite")
-        if n_bad > math.floor(max(1, attempted_steps) * MAX_BAD_STEP_FRACTION):
-            raise RuntimeError(
-                f"[{cat_id:02d}] excessive guarded updates: {n_bad}/{attempted_steps}"
-            )
 
         checkpoint_extra = {
             "category": cat_name, "category_id": cat_id, "n_train": int(n_train),
