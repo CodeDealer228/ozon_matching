@@ -34,6 +34,20 @@ before it starts running is fully free.
 
 ## Image differences — GPU/CPU vs TPU
 
+### Реальные host-профили kernel-сессий
+
+| Тип kernel | CPU | Host RAM |
+|---|---:|---:|
+| TPU v5e-8 | **224 vCPU** | **384 ГБ** |
+| CPU-only | **4 ядра** | **30 ГБ** |
+| GPU T4 x2 | **4 ядра** | **29 ГБ** |
+
+Переменные `OMP_NUM_THREADS`, `MKL_NUM_THREADS` и `RAYON_NUM_THREADS`
+задают число потоков **на процесс**, а не на всю VM. Для обычного
+8-процессного TPU v5e-8 kernel безопасная исходная настройка — `28`
+(`224 / 8`), а не `224` на каждый rank. Для CPU-only и T4 x2 исходное
+значение — `4`, если измерения конкретного workload не требуют меньшего.
+
 The TPU image is not the standard image with an accelerator swapped in. Four
 separate incidents came from assuming it was:
 

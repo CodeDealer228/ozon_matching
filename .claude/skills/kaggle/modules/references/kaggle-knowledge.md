@@ -136,11 +136,16 @@ Expert: 3 Bronze. Master: 1 Gold + 4 Silver. Grandmaster: 5 Gold + 5 Silver.
 
 ### Hardware
 
-| Resource | CPU | GPU |
-|----------|-----|-----|
-| CPU Cores | 4 | 4 |
-| RAM | ~16 GB | ~29 GB |
-| Disk (`/kaggle/working`) | 20 GB | 20 GB |
+| Kernel type | Host CPU | Host RAM |
+|---|---:|---:|
+| TPU v5e-8 | **224 vCPU** | **384 GB** |
+| CPU-only | **4 cores** | **30 GB** |
+| GPU T4 x2 | **4 cores** | **29 GB** |
+
+Thread environment variables are per process. An 8-worker TPU v5e-8 kernel
+should normally start with `OMP_NUM_THREADS=MKL_NUM_THREADS=RAYON_NUM_THREADS=28`
+(`224 / 8`), not 224 on every worker. CPU-only and T4 x2 kernels normally
+start at 4 unless workload measurements justify fewer threads.
 
 ### Accelerators
 
