@@ -122,16 +122,30 @@ spend before launching rather than inferring it.
 
 | Account | Creds | Scope |
 |---|---|---|
-| `maxamsecret` | `~/.kaggle/kaggle.json` (default) | owns the source dataset; FRIDA lineage |
-| `rays0n` | `~/.kaggle/kaggle_rays0n.json` | BERTA lineage |
-| `maximmarkovbb` | `~/.kaggle/kaggle_maxim_markov.json` | FRIDA v2; public by convention |
+| `maxamsecret` | `.kaggle/kaggle_maxamsecret/.kaggle/kaggle.json` | owns the source dataset; FRIDA lineage |
+| `rays0n` | `.kaggle/kaggle_rays0n/.kaggle/kaggle.json` | BERTA lineage |
+| `maximmarkovbb` | `.kaggle/kaggle_maximmarkovbb/kaggle.json` (**flat, no nested `.kaggle/`**) | FRIDA v2; public by convention |
 
-Never overwrite `kaggle.json` with another account's file. Override per command
-instead:
+Updated 2026-08-22: `~/.kaggle/` moved from flat per-account files
+(`kaggle.json`, `kaggle_rays0n.json`, ...) to one subdirectory per account —
+**including the default account**, `maxamsecret`. The old bare
+`~/.kaggle/kaggle.json` no longer exists at all, so a plain `kaggle ...` with
+no override now fails auth for every account, default included. The old
+`KAGGLE_USERNAME=... KAGGLE_KEY=$(python -c "...json.load(open(...))...")`
+override pattern is also dead (`FileNotFoundError` on the old flat path).
+Current working pattern, for ANY account including the default:
 
 ```bash
-KAGGLE_USERNAME=rays0n KAGGLE_KEY=$(python -c "import json;print(json.load(open('$HOME/.kaggle/kaggle_rays0n.json'))['key'])") kaggle kernels status rays0n/<slug>
+KAGGLE_CONFIG_DIR="C:/Users/mba90/.kaggle/kaggle_{account}/.kaggle" kaggle kernels status {account}/<slug>
+# maximmarkovbb is the one exception -- flat, no nested .kaggle/:
+KAGGLE_CONFIG_DIR="C:/Users/mba90/.kaggle/kaggle_maximmarkovbb" kaggle kernels status maximmarkovbb/<slug>
 ```
+
+More accounts than these three may exist on disk at any given time (a
+`check_all_quotas.py` script under the `kaggle` skill's own setup module
+discovers whatever `kaggle_*/` directories are actually present, rather than
+assuming this fixed list) — confirm which account a run should spend before
+launching rather than inferring it from this table alone.
 
 ## CLI lifecycle
 
