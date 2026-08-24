@@ -81,14 +81,10 @@ HUMAN_WEIGHT = 5.86
 
 LLM_TRAIN_SUBSAMPLE_SIZE = 3_000_000
 EPOCHS = 1
-# Smoke-search bounds. The fallback 16/32 is compiled first, then at most
-# three binary-search shapes. On the first OOM the search stops
-# because failed XLA programs can leave HBM fragmented/resident.
-MIN_PER_CORE_TRAIN_BATCH = 16
-MAX_PER_CORE_TRAIN_BATCH = 48
-MIN_PER_CORE_EVAL_BATCH = 32
-MAX_PER_CORE_EVAL_BATCH = 96
-BATCH_SMOKE_ITERATIONS = 3
+# Fixed shape confirmed on all 8 ranks in v2. TPU/XLA batch probing is unsafe:
+# each candidate leaves a compiled executable resident in HBM.
+PER_CORE_TRAIN_BATCH = 32
+PER_CORE_EVAL_BATCH = 64
 HBM_LOG_EVERY_STEPS = 500
 VALIDATE_EVERY_ROWS = 100_000
 QUALIFIED_SCORE = 0.758
@@ -470,47 +466,6 @@ def smoke_pair(model, optimizer, device, rank, world_size, train_batch, eval_bat
     log(rank, "SMOKE", f"PASS {train_batch}/{eval_batch}: loss={loss_value:.5f}", force=True)
 
 
-def select_batches(model, optimizer, device, rank, world_size,
-                   category_weight, category_pos_weight, tracker):
-    """Compile the safe fallback, then run up to three binary refinements.
-    Any OOM ends the search immediately: continuing after a failed XLA
-    program is unsafe."""
-    safe_train, safe_eval = MIN_PER_CORE_TRAIN_BATCH, MIN_PER_CORE_EVAL_BATCH
-    smoke_pair(model, optimizer, device, rank, world_size, safe_train, safe_eval,
-               category_weight, category_pos_weight, tracker)
-    high = MAX_PER_CORE_TRAIN_BATCH
-    for iteration in range(BATCH_SMOKE_ITERATIONS):
-        candidate = (safe_train + high + 1) // 2
-        candidate_eval = min(MAX_PER_CORE_EVAL_BATCH, candidate * 2)
-        local_status = 1  # 1=pass, 0=OOM, -1=other failure
-        local_error = None
-        try:
-            smoke_pair(model, optimizer, device, rank, world_size, candidate, candidate_eval,
-                       category_weight, category_pos_weight, tracker)
-        except RuntimeError as error:
-            message = str(error)
-            local_error = message
-            local_status = (0 if "RESOURCE_EXHAUSTED" in message or
-                            "out of memory" in message.lower() else -1)
-        statuses = xm.all_gather(torch.tensor([local_status], device=device, dtype=torch.float32))
-        xm.mark_step()
-        statuses = statuses.cpu().numpy().astype(np.int64)
-        if (statuses < 0).any():
-            raise RuntimeError(f"Non-OOM smoke failure on at least one rank at "
-                               f"{candidate}/{candidate_eval}; local_error={local_error}")
-        if (statuses == 0).any():
-            log(rank, "SMOKE", f"OOM at {candidate}/{candidate_eval}; stop probing and use "
-                                f"last safe {safe_train}/{safe_eval}; local_error={local_error}",
-                force=True)
-            model.train()
-            optimizer.zero_grad(set_to_none=True)
-            gc.collect()
-            break
-        safe_train, safe_eval = candidate, candidate_eval
-    log(rank, "SMOKE", f"selected train/eval={safe_train}/{safe_eval}", force=True)
-    return safe_train, safe_eval
-
-
 def build_frame(id1, id2, labels, categories, scope, caches):
     row1 = lookup_rows(caches[scope], id1)
     row2 = lookup_rows(caches[scope], id2)
@@ -650,9 +605,9 @@ def mp_fn(_index):
         train_batch = int(resume_state["per_core_train_batch"])
         eval_batch = int(resume_state["per_core_eval_batch"])
     else:
-        train_batch, eval_batch = select_batches(
-            model, optimizer, device, rank, world_size,
-            category_weight, category_pos_weight, hbm_tracker)
+        train_batch, eval_batch = PER_CORE_TRAIN_BATCH, PER_CORE_EVAL_BATCH
+        smoke_pair(model, optimizer, device, rank, world_size, train_batch, eval_batch,
+                   category_weight, category_pos_weight, hbm_tracker)
 
     total_batch = train_batch * world_size
     steps_per_epoch = len(_SHARED["train_frame"]["label"]) // total_batch
