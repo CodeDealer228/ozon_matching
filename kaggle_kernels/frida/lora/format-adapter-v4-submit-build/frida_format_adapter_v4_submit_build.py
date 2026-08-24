@@ -9,7 +9,6 @@ import os
 import shutil
 import subprocess
 import sys
-import urllib.request
 import zipfile
 
 # Kaggle CPU image ships torchao 0.10.0, while current PEFT refuses to use
@@ -30,8 +29,6 @@ ADAPTER_EXPERIMENT = "frida_format_adapter_v4_c_last"
 WORKING = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 STAGE = os.path.join(WORKING, "_frida_format_adapter_v4_submit")
 ZIP_PATH = os.path.join(WORKING, "matching-frida_format_adapter_v4_best_188-submit.zip")
-UTILS2_URL = ("https://raw.githubusercontent.com/CodeDealer228/ozon_matching/"
-              "66791bd/scripts/formatting/utils_v2.py")
 
 
 def log(message):
@@ -65,6 +62,16 @@ def find_best_adapter():
                 found.append((root, state))
     if len(found) != 1:
         raise RuntimeError(f"Expected one validated v4 best adapter, got {[p for p, _ in found]}")
+    return found[0]
+
+
+def find_utils2():
+    found = []
+    for root, _dirs, files in os.walk("/kaggle/input"):
+        if "utils2.py" in files:
+            found.append(os.path.join(root, "utils2.py"))
+    if len(found) != 1:
+        raise RuntimeError(f"Expected one utils2.py input, got {found}")
     return found[0]
 
 
@@ -106,7 +113,7 @@ def main():
 
     os.makedirs(os.path.join(STAGE, "src"), exist_ok=True)
     utils_path = os.path.join(STAGE, "src", "utils.py")
-    urllib.request.urlretrieve(UTILS2_URL, utils_path)
+    shutil.copy2(find_utils2(), utils_path)
     subprocess.check_call([sys.executable, "-m", "py_compile", utils_path])
     write_text(os.path.join(STAGE, "run.py"), '''import argparse
 import os
