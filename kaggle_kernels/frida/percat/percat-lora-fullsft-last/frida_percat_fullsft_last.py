@@ -1433,7 +1433,11 @@ def _safe_optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
 def _trainable_parameters_finite(model, device, world_size):
     flags = [torch.isfinite(p.detach()).all().to(torch.float32)
              for p in model.parameters() if p.requires_grad]
-    local = torch.stack(flags).amin() if flags else torch.ones((), device=device)
+    # XLA 2.8 left amin(dim=None) unreduced here (350 flags); an explicit
+    # dimension guarantees the scalar required by the replica vote.
+    local = torch.stack(flags).amin(dim=0) if flags else torch.ones((), device=device)
+    if local.numel() != 1:
+        raise RuntimeError(f"finite-parameter reduction is not scalar: {tuple(local.shape)}")
     replicas = xm.all_reduce(xm.REDUCE_SUM, local)
     return bool((replicas == float(world_size)).item())
 
