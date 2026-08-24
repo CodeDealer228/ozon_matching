@@ -26,6 +26,7 @@ assert "PER_CORE_EVAL_BATCH = 32" in text
 assert "num_workers=0" in text and "drop_last=True" in text
 assert "xmp.MpModelWrapper" in text and 'start_method="fork"' in text
 assert "xm.reduce_gradients(optimizer)" in text
+assert "torch.stack(flags).amin(dim=0)" in text
 assert 'if kind == "last":' in text
 assert '"optimizer.pt"' in text and '"scheduler.pt"' in text
 digest = hashlib.sha256()
