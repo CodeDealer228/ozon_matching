@@ -1,6 +1,6 @@
 {
-  "id": "kirpich682/frida-percat-fullsft-last-v3",
-  "title": "Frida Percat Fullsft Last V3",
+  "id": "kirpich682/frida-percat-fullsft-last-v4",
+  "title": "Frida Percat Fullsft Last V4",
   "code_file": "frida_percat_fullsft_last.py",
   "language": "python",
   "kernel_type": "script",
@@ -15,7 +15,7 @@
   ],
   "competition_sources": [],
   "kernel_sources": [
-    "maxamsecret/frida-full-sft-continue-submit-build/1"
+    "maxamsecret/frida-full-sft-continue-submit-build"
   ],
   "model_sources": []
 }

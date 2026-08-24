@@ -4,8 +4,9 @@ backbone: train 20 independent LoRA + deep-head pairs, one per category.
 
 V13 CURRENT CONTRACT (later V3-V12 text is retained only as incident history)
 ===========================================================================
-The attached submit archive is content-searched, SHA256-verified, and loaded
-with its exact deep classifier head. Token inputs must be Tokenize Items v3;
+The attached submit archive is content-searched; the model, config and deep
+classifier are verified by their own size+SHA256 manifest so harmless ZIP
+repacking cannot change model identity. Token inputs must be Tokenize Items v3;
 v4 is rejected by metadata. All CPU setup and the 823M model build happen once
 before fork on the 384GB/224-vCPU TPU host; eight ranks use 28 CPU threads each,
 num_workers=0 and two fixed XLA shapes (train 16, eval 32, pair length 188).
@@ -14,11 +15,13 @@ AdamW is kept for optimization. Categories are sequential, so only one
 optimizer exists in RAM. `best` stores finite weights + validation metadata;
 `last` stores weights + AdamW + scheduler + exact batch cursor every 15 minutes
 and before eval. A compatible attached previous output resumes all three states.
-Forward-loss and post-all-reduce gradient checks are replica-synchronous; a
-bad loss never enters backward and a bad gradient never advances AdamW or LR.
-The 32-update preflight covers the real forward/backward/reduce/optimizer path
-before category 00. The deterministic 100K/category LLM cap keeps the projected
-run below Kaggle's 9-hour TPU session cap.
+Loss and gradient finiteness votes are replica-synchronous and stay on-device;
+a bad rank's gradients are zeroed on every rank before the standard
+`xm.optimizer_step`. Counts are read only at log boundaries, avoiding the
+per-step host sync that made the first preflight path unusably slow. The
+96-update preflight covers the old deterministic cat00 failure at step 40.
+The deterministic 100K/category LLM cap keeps the projected run below Kaggle's
+9-hour TPU session cap.
 
 V12 FINAL REPAIR (the later V3-V11 sections are retained as failure history)
 ===========================================================================
@@ -115,13 +118,13 @@ no-op. Positive RATE is what varies (7.7x). Each specialist therefore gets
 its OWN pos_weight, computed from its own training mix, plus a 2x weight on
 human-labeled rows relative to LLM soft-labeled ones.
 
-HEAD SCHEDULE AND GLOBAL-GRADIENT GUARD
+HEAD SCHEDULE AND REPLICA-SYNCHRONOUS GRADIENT GUARD
 ===========================================================================
-The classifier is zero-initialised at the balanced logit implied by each
-category's pos_weight.  For a fresh specialist, the first 50 steps detach the
-encoder and fit only that head; LoRA then warms from zero while the stable head
-continues at a 2x peak.  Gradients are averaged before their global norm is
-checked/clipped, so every rank makes the same guarded update decision.
+Each specialist resets to the already-trained deep general head and identity
+LoRA.  The head uses a conservative 1e-5 peak while LoRA warms to 5e-5.  Every
+rank votes on finite loss and gradients on-device; one bad rank makes all ranks
+zero that batch's gradients before the normal XLA all-reduce.  Local gradients
+are clipped before averaging, so their average also cannot exceed the bound.
 
 This is a real fix, not a first-principles design choice: an earlier
 version jumped the head straight to peak at step 0 with no ramp and no
@@ -443,8 +446,16 @@ SEED = 42
 # kernel is attached as a kernel_source; content search avoids relying on its
 # unstable Kaggle mount path.  Hash is from the local archive named below.
 BACKBONE_ZIP_NAME = "matching-frida_continue_c_last_188-submit.zip"
+# ZIP metadata changed when the submit-builder was rerun, while the model
+# files may remain byte-identical.  The container hash is provenance only;
+# the three files actually loaded by training are the identity contract.
 BACKBONE_ZIP_SHA256 = "6622022adf93bd159ebd9be2c938feed6cf5e606ce56f0e99c598a02dff4cb73"
 BACKBONE_MODEL_SUBDIR = "models/frida-full-sft"
+BACKBONE_CONTENT = {
+    "classifier.pt": (4_340_725, "0fd9134e8cd4a9b945aee7fb3d12d991208c9ff93d293e958c0ec3b35eb94612"),
+    f"{BACKBONE_MODEL_SUBDIR}/config.json": (846, "f42bc8b9f9706487667056e8bb5c2151a995fbf7d056c2461936d147e24e3651"),
+    f"{BACKBONE_MODEL_SUBDIR}/model.safetensors": (1_646_829_336, "ffae8888af57ee3d5337607033dbb972728bcec07937441fbc95414e43d9d758"),
+}
 
 MATCHES_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/matches.parquet"
 MATCHES_LLM_PATH_HINT = "/kaggle/input/datasets/maxamsecret/ozon-ecup-2026-matching/matches_llm.parquet"
@@ -528,7 +539,7 @@ LR_RESUME_MULTIPLIER = 1.0
 HEAD_LR_MULTIPLIER = 0.2   # 1e-5: preserve the already-good general head
 HEAD_WARMUP_STEPS = 50
 HEAD_ONLY_STEPS = 0
-PREFLIGHT_STEPS = 32
+PREFLIGHT_STEPS = 96
 MAX_BAD_STEP_FRACTION = 0.02
 GRAD_CLIP_NORM = 1.0
 WEIGHT_DECAY = 0.01
@@ -1027,9 +1038,11 @@ def _find_external_checkpoints_root():
 
 def _run_contract():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "backbone_zip": BACKBONE_ZIP_NAME,
-        "backbone_sha256": BACKBONE_ZIP_SHA256,
+        "backbone_content_sha256": {
+            name: digest for name, (_size, digest) in BACKBONE_CONTENT.items()
+        },
         "token_cache_dataset": "maxamsecret/frida-tokenize-items-v3",
         "pair_max_length": PAIR_MAX_LENGTH,
         "lora": {"r": LORA_R, "alpha": LORA_ALPHA,
@@ -1104,27 +1117,23 @@ def _find_backbone_zip():
     return matches[0]
 
 
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def prepare_backbone():
-    """Verify and extract the exact requested project-best submit pre-fork."""
+    """Verify and extract the requested project-best submit pre-fork."""
     marker = os.path.join(BACKBONE_DIR, BACKBONE_MODEL_SUBDIR, "config.json")
     if os.path.isfile(marker) and os.path.isfile(os.path.join(BACKBONE_DIR, "classifier.pt")):
         return BACKBONE_DIR
 
     archive = _find_backbone_zip()
-    digest = hashlib.sha256()
-    with open(archive, "rb") as f:
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    actual = digest.hexdigest()
-    if actual != BACKBONE_ZIP_SHA256:
-        raise RuntimeError(
-            f"wrong backbone archive: sha256={actual}, expected={BACKBONE_ZIP_SHA256}")
-
-    wanted = {
-        "classifier.pt",
-        f"{BACKBONE_MODEL_SUBDIR}/config.json",
-        f"{BACKBONE_MODEL_SUBDIR}/model.safetensors",
-    }
+    archive_sha = _sha256_file(archive)
+    wanted = set(BACKBONE_CONTENT)
     temp_dir = BACKBONE_DIR + ".tmp"
     if os.path.isdir(temp_dir):
         shutil.rmtree(temp_dir)
@@ -1137,23 +1146,35 @@ def prepare_backbone():
         for name in names:
             if name == "classifier.pt" or name.startswith(BACKBONE_MODEL_SUBDIR + "/"):
                 zf.extract(name, temp_dir)
+
+    actual_content = {}
+    for name, (expected_size, expected_sha) in BACKBONE_CONTENT.items():
+        path = os.path.join(temp_dir, *name.split("/"))
+        actual_size = os.path.getsize(path)
+        actual_sha = _sha256_file(path)
+        actual_content[name] = {"size": actual_size, "sha256": actual_sha}
+        if (actual_size, actual_sha) != (expected_size, expected_sha):
+            shutil.rmtree(temp_dir)
+            raise RuntimeError(
+                f"wrong backbone content for {name}: size/sha256="
+                f"{actual_size}/{actual_sha}, expected={expected_size}/{expected_sha}"
+            )
     os.replace(temp_dir, BACKBONE_DIR)
     with open(os.path.join(BACKBONE_DIR, "BACKBONE_PROVENANCE.json"), "w", encoding="utf-8") as f:
-        json.dump({"archive": BACKBONE_ZIP_NAME, "sha256": actual,
+        json.dump({"archive": BACKBONE_ZIP_NAME,
+                   "archive_sha256": archive_sha,
+                   "reference_archive_sha256": BACKBONE_ZIP_SHA256,
+                   "content": actual_content,
                    "pair_max_length": PAIR_MAX_LENGTH}, f, indent=2)
-    print(f"[{_elapsed():8.1f}s][BACKBONE] verified + extracted {archive}", flush=True)
+    container_note = ("exact container" if archive_sha == BACKBONE_ZIP_SHA256
+                      else "repacked container; exact model content")
+    print(f"[{_elapsed():8.1f}s][BACKBONE] verified {container_note} + extracted {archive}",
+          flush=True)
     return BACKBONE_DIR
 
 
 def _find_any_external_category_checkpoint(cat_id):
-    """v6: resume source for EVERY category, not just the validated ones.
-    Prefers cat{NN}_best (real val_pr_auc); falls back to cat{NN}_last
-    (a quiet mid-training save, val_pr_auc=null) if that's the only thing
-    v5's own session produced for this category before its wall-clock cutoff
-    -- any already-trained state is a better starting point than a fresh
-    random init, per direct instruction ('Инициализация существующими
-    адаптерами+головами'). Returns (checkpoint_dir, source_label,
-    val_pr_auc_or_None) or None if nothing exists for this category at all."""
+    """Return a full resumable `last`; weights-only `best` is never resumed."""
     root = _find_external_checkpoints_root()
     if root is None:
         return None
@@ -1371,14 +1392,12 @@ def _make_lr_lambda(warmup_steps, total_steps, min_ratio, delay_steps=0):
 
 def _safe_optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
                            world_size, head_only):
-    """One replica-synchronous, non-finite-safe TPU optimizer update.
+    """One replica-synchronous TPU update without a per-step host sync.
 
-    The old loop checked only the forward loss, clipped rank-local gradients,
-    and then let xm.optimizer_step all-reduce them.  A single rank's NaN/Inf
-    backward therefore poisoned every replica and Adam moment.  Here the loss
-    flag and gradients are reduced first, the *global* norm is clipped, and a
-    bad update skips both AdamW and its scheduler identically on every rank.
-    There is no rank-local collective branch.
+    Every rank votes on loss+gradient finiteness on-device.  If one rank is
+    bad, all ranks replace this batch's gradients with zeros before the normal
+    xm.optimizer_step all-reduce, keeping parameters and Adam moments finite.
+    The caller reads the accumulated bad-step count only at log boundaries.
     """
     input_ids, attention_mask, batch_labels, _cats, batch_scope = batch
     batch_labels = batch_labels.to(device)
@@ -1393,41 +1412,29 @@ def _safe_optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
                           torch.ones_like(per_sample))
     loss = (per_sample * weights).sum() / weights.sum()
 
-    local_loss_finite = torch.isfinite(loss.detach()).to(torch.float32)
-    finite_replicas = xm.all_reduce(xm.REDUCE_SUM, local_loss_finite)
-    global_loss_finite = bool((finite_replicas == float(world_size)).item())
-    if not global_loss_finite:
-        # torch.where() is not a safe NaN guard for backward: the rejected
-        # branch can still produce 0*NaN. All ranks take this same branch
-        # because finite_replicas was globally reduced.
-        optimizer.zero_grad(set_to_none=True)
-        xm.mark_step()
-        bad_norm = torch.full((), float("inf"), device=device)
-        return loss.detach(), bad_norm, True, False
-
     loss.backward()
-
-    # This is the reduction half of xm.optimizer_step().  Splitting it out
-    # makes the norm check happen on the same averaged gradients on all ranks.
-    xm.reduce_gradients(optimizer)
     trainable = [p for group in optimizer.param_groups for p in group["params"]]
     grad_norm = torch.nn.utils.clip_grad_norm_(
         trainable, GRAD_CLIP_NORM, error_if_nonfinite=False, foreach=False)
-    step_finite = torch.isfinite(grad_norm.detach())
+    # clip_grad_norm_ aggregates every gradient into this scalar; any NaN/Inf
+    # gradient therefore makes grad_norm non-finite without 350 separate
+    # per-parameter reductions in the XLA graph.
+    local_finite = (torch.isfinite(loss.detach()) &
+                    torch.isfinite(grad_norm.detach())).to(torch.float32)
+    finite_replicas = xm.all_reduce(xm.REDUCE_SUM, local_finite)
+    global_finite = finite_replicas == float(world_size)
 
-    # grad_norm is computed after an all-reduce, so this scalar is identical
-    # on every rank.  A host decision costs one sync per update (the previous
-    # v11 loop already paid that cost for loss.isfinite().item()), but makes a
-    # bad batch a TRUE no-op: no Adam momentum/weight-decay change, no moment
-    # counter increment, and no scheduler advance.
-    update_applied = bool(step_finite.item())
-    if update_applied:
-        optimizer.step()  # gradients were already averaged above
-        scheduler.step()
-    else:
-        optimizer.zero_grad(set_to_none=True)
-        xm.mark_step()
-    return loss.detach(), grad_norm.detach(), (not update_applied), update_applied
+    # Direct torch.where on .grad is safe: no backward graph is traversed
+    # through the rejected NaN branch.  A bad rank therefore cannot poison
+    # another rank's Adam state during xm.optimizer_step's all-reduce.
+    for parameter in trainable:
+        if parameter.grad is not None:
+            parameter.grad = torch.where(
+                global_finite, parameter.grad, torch.zeros_like(parameter.grad))
+    xm.optimizer_step(optimizer)
+    scheduler.step()
+    bad_update = 1.0 - global_finite.to(torch.float32)
+    return loss.detach(), grad_norm.detach(), bad_update
 
 
 def _trainable_parameters_finite(model, device, world_size):
@@ -1505,6 +1512,19 @@ def evaluate(model, eval_loader, device, category_names, expected_n):
 # CHECKPOINT -- own directory per save, explicit null when unvalidated
 # =====================================================================
 
+def _to_cpu_state(obj):
+    """Move every tensor in a nested state dict to CPU before serialization."""
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {key: _to_cpu_state(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_to_cpu_state(value) for value in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_cpu_state(value) for value in obj)
+    return obj
+
+
 def save_checkpoint(model, optimizer, scheduler, global_step, epoch,
                     val_macro_pr_auc, label, rank, kind, extra=None):
     """Save weights-only best or a full resumable last checkpoint."""
@@ -1529,8 +1549,10 @@ def save_checkpoint(model, optimizer, scheduler, global_step, epoch,
     torch.save({k: v.detach().cpu() for k, v in model.classifier.state_dict().items()},
                os.path.join(temp_dir, "head.pt"))
     if kind == "last":
-        xm.save(optimizer.state_dict(), os.path.join(temp_dir, "optimizer.pt"))
-        torch.save(scheduler.state_dict(), os.path.join(temp_dir, "scheduler.pt"))
+        torch.save(_to_cpu_state(optimizer.state_dict()),
+                   os.path.join(temp_dir, "optimizer.pt"))
+        torch.save(_to_cpu_state(scheduler.state_dict()),
+                   os.path.join(temp_dir, "scheduler.pt"))
 
     with open(os.path.join(temp_dir, "train_state.json"), "w", encoding="utf-8") as f:
         json.dump({
@@ -1543,7 +1565,9 @@ def save_checkpoint(model, optimizer, scheduler, global_step, epoch,
             "lora": {"r": LORA_R, "alpha": LORA_ALPHA, "dropout": LORA_DROPOUT,
                      "target_modules": LORA_TARGET_MODULES},
             "pair_max_length": PAIR_MAX_LENGTH,
-            "backbone_sha256": BACKBONE_ZIP_SHA256,
+            "backbone_content_sha256": {
+                name: digest for name, (_size, digest) in BACKBONE_CONTENT.items()
+            },
             "token_cache_dataset": "maxamsecret/frida-tokenize-items-v3",
             **(extra or {}),
         }, f, ensure_ascii=False, indent=2)
@@ -1966,24 +1990,24 @@ def _preflight_optimizer_updates(model, device, caches, pad_id, train_frame,
         world_size, rank, SEED, epoch=0)
     mp_loader = pl_xla.MpDeviceLoader(loader, device)
     attempts = 0
-    successful_updates = 0
-    n_bad = 0
+    bad_updates = torch.zeros((), device=device)
     last_loss = torch.zeros((), device=device)
     last_norm = torch.zeros((), device=device)
     for step, batch in enumerate(mp_loader):
         if step >= PREFLIGHT_STEPS:
             break
-        last_loss, last_norm, bad, applied = _safe_optimizer_update(
+        last_loss, last_norm, bad = _safe_optimizer_update(
             model, optimizer, scheduler, loss_fn, batch, device, world_size,
-            head_only=(successful_updates < HEAD_ONLY_STEPS))
+            head_only=(attempts < HEAD_ONLY_STEPS))
         attempts += 1
-        successful_updates += int(applied)
-        n_bad += int(bad)
+        bad_updates = bad_updates + bad
     xm.mark_step()
     if attempts != PREFLIGHT_STEPS:
         raise RuntimeError(
             f"[PREFLIGHT] loader produced only {attempts}/{PREFLIGHT_STEPS} batches"
         )
+    n_bad = int(bad_updates.item())
+    successful_updates = attempts - n_bad
     finite_params = _trainable_parameters_finite(model, device, world_size)
     if not finite_params or n_bad != 0 or successful_updates != PREFLIGHT_STEPS:
         raise RuntimeError(
@@ -2229,6 +2253,7 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
             raise RuntimeError(f"[{cat_id:02d}] inconsistent resume counters")
         last_loss = torch.zeros((), device=device)
         last_norm = torch.zeros((), device=device)
+        pending_bad_updates = torch.zeros((), device=device)
         last_save_wall = _elapsed()
         current_epoch = min(start_epoch, EPOCHS)
         next_batch_in_epoch = resume_batch
@@ -2241,17 +2266,19 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
             for batch_index, batch in enumerate(mp_loader):
                 if epoch == start_epoch and batch_index < resume_batch:
                     continue
-                head_only = external is None and successful_updates < HEAD_ONLY_STEPS
-                last_loss, last_norm, bad, applied = _safe_optimizer_update(
+                head_only = external is None and attempted_steps < HEAD_ONLY_STEPS
+                last_loss, last_norm, bad = _safe_optimizer_update(
                     model, optimizer, scheduler, loss_fn, batch, device,
                     world_size, head_only=head_only)
                 attempted_steps += 1
-                successful_updates += int(applied)
-                n_bad += int(bad)
+                pending_bad_updates = pending_bad_updates + bad
                 next_batch_in_epoch = batch_index + 1
 
                 if attempted_steps % LOG_EVERY_STEPS == 0:
                     xm.mark_step()
+                    n_bad += int(pending_bad_updates.item())
+                    successful_updates = attempted_steps - n_bad
+                    pending_bad_updates = torch.zeros((), device=device)
                     if rank == 0:
                         print(f"[{_elapsed():8.1f}s] cat={cat_id:02d} "
                               f"batch={attempted_steps}/{total_steps} "
@@ -2290,6 +2317,8 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
                 break
 
         xm.mark_step()
+        n_bad += int(pending_bad_updates.item())
+        successful_updates = attempted_steps - n_bad
         finite_params = _trainable_parameters_finite(model, device, world_size)
         if not finite_params:
             raise RuntimeError(f"[{cat_id:02d}] trainable parameters became non-finite")
