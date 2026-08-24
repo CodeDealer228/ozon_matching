@@ -12,6 +12,8 @@ import hashlib
 import json
 import math
 import os
+import subprocess
+import sys
 import time
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -19,6 +21,12 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("OMP_NUM_THREADS", "28")
 os.environ.setdefault("MKL_NUM_THREADS", "28")
 os.environ.setdefault("RAYON_NUM_THREADS", "28")
+
+# Kaggle TPU image does not include these packages. Install before their
+# first import; internet is enabled in kernel-metadata.json.
+subprocess.check_call(
+    [sys.executable, "-m", "pip", "install", "-q", "polars", "peft"]
+)
 
 import numpy as np
 import polars as pl
