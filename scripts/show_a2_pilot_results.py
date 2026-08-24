@@ -28,7 +28,12 @@ def main() -> None:
         row = rows.loc[record["source_pair_sha256"]]
         accepted, reasons, _ = validate_rewrite(row, record["rewritten_name2"], helpers)
         user_prompt = build_messages(few_shot, row, explicit_cache=False)[-1]["content"]
-        print(f"\n{'=' * 100}\nINPUT (без system prompt):\n{user_prompt}\n\nQWEN:\n{record['raw_content']}\n\nVALIDATOR: accepted={accepted}; reasons={reasons}")
+        print(
+            f"\n{'=' * 100}\nINPUT (без system prompt):\n{user_prompt}"
+            f"\n\nATTRIBUTES A (Qwen этого не видел):\n{row.attributes1}"
+            f"\n\nQWEN:\n{record['raw_content']}"
+            f"\n\nVALIDATOR: accepted={accepted}; reasons={reasons}"
+        )
 
 
 if __name__ == "__main__":
