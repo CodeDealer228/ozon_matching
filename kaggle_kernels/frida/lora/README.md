@@ -11,6 +11,7 @@
 | `lora-sft-epoch3` | резюм с epoch2 |
 | `lora-v2-epoch` | v2-переупорядочивание атрибутов, отдельная линия |
 | `tpu-human-sft` | 4-эпохная human-only версия, `PAIR_MAX_LENGTH=256` — источник лучших "чисто человеческих" чекпоинтов (val 0.7660) |
+| `format-adapter-v4` | frozen `continue_c/last` + маленькая q/v LoRA для компактного item-format v4 |
 | `continue/lora-continue-2ep` | продолжение на LLM-разметке, 2 эпохи |
 | `continue/llm-tpu-sft` | почасовые чекпоинты human+LLM continue-SFT (источник `tpu_human_llm_*` сабмитов, лучший тест LoRA-линии — 0.469) |
 
