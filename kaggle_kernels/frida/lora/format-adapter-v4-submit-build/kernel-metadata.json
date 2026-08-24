@@ -9,11 +9,10 @@
   "enable_tpu": false,
   "enable_internet": true,
   "dataset_sources": [
-    "maximmarkovbb/frida-continue-c-last-base"
+    "maximmarkovbb/frida-sft-experiment-c-llm3m",
+    "maxamsecret/frida-format-adapter-v4-ootput"
   ],
-  "kernel_sources": [
-    "rays0n/frida-format-adapter-v4"
-  ],
+  "kernel_sources": [],
   "competition_sources": [],
   "model_sources": []
 }

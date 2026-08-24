@@ -15,14 +15,14 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "peft", "sa
 
 import torch
 from peft import PeftModel
-from transformers import AutoTokenizer, T5EncoderModel
+from transformers import AutoTokenizer, T5Config, T5EncoderModel
 
 MODEL_NAME = "ai-forever/FRIDA"
-BASE_ARCHIVE = "matching-frida_continue_c_last_188-submit.zip"
+BASE_EXPERIMENT = "continue_c_llm3m_2ep"
+BASE_LAST_STEP = 13_474
 ADAPTER_EXPERIMENT = "frida_format_adapter_v4_c_last"
 WORKING = "/kaggle/working" if os.path.isdir("/kaggle/working") else "."
 STAGE = os.path.join(WORKING, "_frida_format_adapter_v4_submit")
-BASE_STAGE = os.path.join(WORKING, "_frida_c_last_base")
 ZIP_PATH = os.path.join(WORKING, "matching-frida_format_adapter_v4_best_188-submit.zip")
 
 
@@ -30,20 +30,19 @@ def log(message):
     print(f"[BUILD] {message}", flush=True)
 
 
-def unpack_base():
+def find_base():
     found = []
     for root, _dirs, files in os.walk("/kaggle/input"):
-        if BASE_ARCHIVE in files:
-            found.append(os.path.join(root, BASE_ARCHIVE))
+        if {"encoder.pt", "head.pt", "train_state.json"} <= set(files):
+            with open(os.path.join(root, "train_state.json"), encoding="utf-8") as fh:
+                state = json.load(fh)
+            if (state.get("experiment") == BASE_EXPERIMENT
+                    and int(state.get("global_step", -1)) == BASE_LAST_STEP
+                    and os.path.basename(root) == "last"):
+                found.append(root)
     if len(found) != 1:
-        raise RuntimeError(f"Expected one {BASE_ARCHIVE}, got {found}")
-    with zipfile.ZipFile(found[0]) as archive:
-        archive.extractall(BASE_STAGE)
-    model_dir = os.path.join(BASE_STAGE, "models", "frida-full-sft")
-    head_path = os.path.join(BASE_STAGE, "classifier.pt")
-    if not os.path.isfile(os.path.join(model_dir, "config.json")) or not os.path.isfile(head_path):
-        raise RuntimeError("c-last archive lacks model config or classifier.pt")
-    return model_dir, head_path
+        raise RuntimeError(f"Expected one c-last step={BASE_LAST_STEP}, got {found}")
+    return found[0]
 
 
 def find_best_adapter():
@@ -75,17 +74,19 @@ def write_text(path, text):
 def main():
     if os.path.exists(STAGE):
         shutil.rmtree(STAGE)
-    if os.path.exists(BASE_STAGE):
-        shutil.rmtree(BASE_STAGE)
     if os.path.exists(ZIP_PATH):
         os.remove(ZIP_PATH)
 
-    base_model_dir, head_path = unpack_base()
+    base_dir = find_base()
     adapter_root, adapter_state = find_best_adapter()
-    log(f"base={base_model_dir}")
+    log(f"base={base_dir}")
     log(f"adapter={adapter_root}; val={adapter_state.get('val_macro_pr_auc')}")
 
-    model = T5EncoderModel.from_pretrained(base_model_dir)
+    model = T5EncoderModel(T5Config.from_pretrained(MODEL_NAME))
+    incompatible = model.load_state_dict(torch.load(os.path.join(base_dir, "encoder.pt"),
+                                                     map_location="cpu", weights_only=True))
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise RuntimeError(f"base state mismatch: {incompatible}")
     merged = PeftModel.from_pretrained(model, os.path.join(adapter_root, "adapter")).merge_and_unload()
     merged = merged.to(dtype=torch.bfloat16)
 
@@ -93,7 +94,7 @@ def main():
     os.makedirs(model_dir, exist_ok=True)
     merged.save_pretrained(model_dir, safe_serialization=True)
     AutoTokenizer.from_pretrained(MODEL_NAME).save_pretrained(model_dir)
-    torch.save(bf16_state(head_path), os.path.join(STAGE, "classifier.pt"))
+    torch.save(bf16_state(os.path.join(base_dir, "head.pt")), os.path.join(STAGE, "classifier.pt"))
 
     os.makedirs(os.path.join(STAGE, "src"), exist_ok=True)
     shutil.copy2(os.path.join(os.path.dirname(__file__), "utils2.py"),
@@ -122,7 +123,6 @@ predict_pipeline(args.items_path, args.matches_path,
                 path = os.path.join(root, name)
                 archive.write(path, os.path.relpath(path, STAGE))
     shutil.rmtree(STAGE)
-    shutil.rmtree(BASE_STAGE)
     log(f"wrote only {ZIP_PATH} ({os.path.getsize(ZIP_PATH) / 2**30:.2f} GiB)")
 
 
