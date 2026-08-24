@@ -29,8 +29,8 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODEL_ID = "qwen3.8-27b"
 DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-EXPECTED_SOURCE_SHA256 = "2dee9a0b5b2ef54c4210b07b114346057bddc45effe728e2e43056f42505dd28"
-EXPECTED_FEW_SHOT_SHA256 = "fac2f2cb2f988557e99bd4a9b4b1c5a1f1c95c18ba7285e083875cc0d2a0295a"
+EXPECTED_SOURCE_SHA256 = "59818385fcf68e678b636318766ba7764d391c7de8498d9cab49d12d46e00bde"
+EXPECTED_FEW_SHOT_SHA256 = "8476bc915e2129ecc98c2d86a5ffadbac08a5225eaa6cccd4a7e48c4b23b8228"
 EXPECTED_SPLIT_SHA256 = "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e"
 EXPECTED_VAL_FINGERPRINT = "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8"
 GENERATOR_PROFILE = "a2_qwen_safe_async_v3"
@@ -564,14 +564,14 @@ def main() -> None:
     uncertain_after_run = load_uncertain_submissions(journal_path, terminal_hashes)
     if uncertain_after_run:
         raise RuntimeError(f"Run ended with {len(uncertain_after_run)} uncertain paid submissions")
-    prompt_tokens = sum(int((record.get("usage") or {}).get("prompt_tokens", 0)) for record in records)
-    completion_tokens = sum(int((record.get("usage") or {}).get("completion_tokens", 0)) for record in records)
+    prompt_tokens = sum(int((record.get("usage") or {}).get("prompt_tokens") or 0) for record in records)
+    completion_tokens = sum(int((record.get("usage") or {}).get("completion_tokens") or 0) for record in records)
     reasoning_tokens = sum(
-        int(((record.get("usage") or {}).get("completion_tokens_details") or {}).get("reasoning_tokens", 0))
+        int(((record.get("usage") or {}).get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
         for record in records
     )
     cached_tokens = sum(
-        int(((record.get("usage") or {}).get("prompt_tokens_details") or {}).get("cached_tokens", 0))
+        int(((record.get("usage") or {}).get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
         for record in records
     )
     manifest = {

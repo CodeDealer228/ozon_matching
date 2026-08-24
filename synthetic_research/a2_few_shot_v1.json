@@ -6,7 +6,7 @@
   "validation_examples_used": false,
   "canonical_split_sha256": "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e",
   "validation_fingerprint": "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8",
-  "a2_source_pool_sha256": "2dee9a0b5b2ef54c4210b07b114346057bddc45effe728e2e43056f42505dd28",
+  "a2_source_pool_sha256": "59818385fcf68e678b636318766ba7764d391c7de8498d9cab49d12d46e00bde",
   "rules": [
     "Rewrite only name2; attributes2 and category are immutable.",
     "Preserve every fact already present in name2 and attributes2.",
