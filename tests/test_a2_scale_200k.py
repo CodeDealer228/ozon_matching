@@ -119,3 +119,23 @@ def test_scheduler_prioritizes_categories_with_fewer_attempts() -> None:
         limit=2,
     )
     assert selected == ["C", "D"]
+
+
+def test_exact_model_not_found_is_safe_to_rotate_and_retry_elsewhere() -> None:
+    error = {"status_code": 404, "code": "model_not_found", "message": "not accessible"}
+    assert a2.is_exact_model_unavailable_error(error)
+    assert a2.is_retryable_model_unavailable_record(
+        {"request_status": "provider_error", "error": error}
+    )
+
+
+def test_other_provider_errors_are_not_retryable() -> None:
+    assert not a2.is_exact_model_unavailable_error(
+        {"status_code": 429, "code": "rate_limit", "message": "slow down"}
+    )
+    assert not a2.is_retryable_model_unavailable_record(
+        {
+            "request_status": "provider_error",
+            "error": {"status_code": 403, "code": "permission_denied"},
+        }
+    )

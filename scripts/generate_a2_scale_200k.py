@@ -3,8 +3,8 @@
 The generator rotates through an explicit registry of Alibaba Singapore Qwen
 models up to 32B, followed only by explicitly authorized bounded extensions.
 It never retries an uncertain request and only changes model after an exact
-allocation/free-quota rejection. IDs remain local and are not included in
-provider messages.
+allocation/free-quota rejection or an exact 404 model-not-found response. IDs
+remain local and are not included in provider messages.
 """
 
 from __future__ import annotations
@@ -311,9 +311,29 @@ def is_exact_quota_error(error: dict[str, object]) -> bool:
     return code in exact_codes or "allocationquota.freetieronly" in message
 
 
+def is_exact_model_unavailable_error(error: dict[str, object]) -> bool:
+    """Recognize a deterministic pre-inference 404 that is safe to rotate past."""
+
+    return (
+        int(error.get("status_code") or 0) == 404
+        and str(error.get("code") or "").casefold() == "model_not_found"
+    )
+
+
+def is_retryable_model_unavailable_record(record: dict[str, object]) -> bool:
+    return (
+        record.get("request_status") == "provider_error"
+        and is_exact_model_unavailable_error(record.get("error") or {})
+    )
+
+
 def load_state(raw_path: Path, journal_path: Path) -> tuple[list[dict[str, object]], set[str], set[str]]:
     records = read_jsonl(raw_path)
-    completed = {str(record["source_orientation_sha256"]) for record in records}
+    completed = {
+        str(record["source_orientation_sha256"])
+        for record in records
+        if not is_retryable_model_unavailable_record(record)
+    }
     last_event: dict[str, str] = {}
     for event in read_jsonl(journal_path):
         last_event[str(event["source_orientation_sha256"])] = str(event["event"])
@@ -618,17 +638,32 @@ def main() -> None:
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     records, completed, uncertain = load_state(raw_path, journal_path)
+    model_events = read_jsonl(model_events_path)
     exhausted = {
         str(event["model"])
-        for event in read_jsonl(model_events_path)
-        if event.get("event") == "quota_exhausted"
+        for event in model_events
+        if event.get("event") in {"quota_exhausted", "model_unavailable"}
     }
+    recovered_unavailable = {
+        str(record["model"])
+        for record in records
+        if is_retryable_model_unavailable_record(record)
+    } - exhausted
+    for unavailable_model in sorted(recovered_unavailable):
+        append_jsonl(model_events_path, {
+            "event": "model_unavailable",
+            "model": unavailable_model,
+            "at_unix": time.time(),
+            "exact_reason": "404_model_not_found_recovered_from_raw",
+        }, Lock())
+    exhausted.update(recovered_unavailable)
     write_lock = Lock()
     accepted_counts: Counter[str] = Counter()
     attempted_counts: Counter[str] = Counter()
     for record in records:
         accepted_counts[str(record["category"])] += len(accepted_from_record(record))
-        attempted_counts[str(record["category"])] += 1
+        if not is_retryable_model_unavailable_record(record):
+            attempted_counts[str(record["category"])] += 1
     run_sources: Counter[str] = Counter()
     terminal_since_snapshot = 0
     explicit_cache = not args.no_explicit_cache
@@ -721,6 +756,8 @@ def main() -> None:
             error = safe_error(exc)
             if is_exact_quota_error(error):
                 return {"kind": "quota", "source": source, "model": model, "error": error}
+            if is_exact_model_unavailable_error(error):
+                return {"kind": "model_unavailable", "source": source, "model": model, "error": error}
             if error.get("status_code") is None:
                 return {"kind": "uncertain", "source": source, "model": model, "error": error}
             return {
@@ -764,6 +801,7 @@ def main() -> None:
             break
 
         quota_hit = False
+        unavailable_hit = False
         with ThreadPoolExecutor(max_workers=min(args.workers, len(batch))) as executor:
             futures = {executor.submit(request_one, row, model): row for row in batch}
             for future in as_completed(futures):
@@ -776,6 +814,16 @@ def main() -> None:
                         "model": model, "at_unix": time.time(), "error": result["error"],
                     }, write_lock)
                     quota_hit = True
+                    continue
+                if result["kind"] == "model_unavailable":
+                    append_jsonl(journal_path, {
+                        "event": "model_unavailable_rejected",
+                        "source_orientation_sha256": source,
+                        "model": model,
+                        "at_unix": time.time(),
+                        "error": result["error"],
+                    }, write_lock)
+                    unavailable_hit = True
                     continue
                 if result["kind"] == "uncertain":
                     append_jsonl(journal_path, {
@@ -806,6 +854,13 @@ def main() -> None:
                 "exact_reason": "AllocationQuota.FreeTierOnly_or_equivalent",
             }, write_lock)
             print(json.dumps({"event": "model_rotated", "exhausted_model": model, "next_model": next((m for m in models if m not in exhausted), None)}, ensure_ascii=False), flush=True)
+        elif unavailable_hit:
+            exhausted.add(model)
+            append_jsonl(model_events_path, {
+                "event": "model_unavailable", "model": model, "at_unix": time.time(),
+                "exact_reason": "404_model_not_found",
+            }, write_lock)
+            print(json.dumps({"event": "model_rotated", "unavailable_model": model, "next_model": next((m for m in models if m not in exhausted), None)}, ensure_ascii=False), flush=True)
 
         if terminal_since_snapshot >= args.snapshot_every:
             manifest = create_snapshot(args.output_dir, pool, records, args.target_per_category, registry_sha, raw_path, journal_path, model_events_path, registry_extensions)
