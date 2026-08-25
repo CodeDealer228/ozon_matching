@@ -2,6 +2,9 @@
 
 Дата: 2026-08-25  
 Kaggle kernel: `rvitvitskii/frida-a2-head-ablation`, version 2  
+Public sanitized results kernel:
+`rvitvitskii/frida-a2-head-ablation-public-validation-results`, version 2
+
 Kernel commit: `b79ba0f`
 
 ## Краткий вывод
