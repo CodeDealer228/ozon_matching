@@ -1,24 +1,14 @@
-"""Sample human pairs and print intersections of item fact lemmas.
-
-Requires: pip install pymorphy3
-"""
+"""Sample human pairs and print intersections of normalized fact tokens."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import re
-from functools import lru_cache
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
-
-from analyze_synthetic_negative_rules import normalize_text
-
-try:
-    from pymorphy3 import MorphAnalyzer
-except ImportError as exc:
-    raise RuntimeError("Install pymorphy3: pip install pymorphy3") from exc
 
 
 def flatten_values(value: object) -> list[str]:
@@ -29,17 +19,12 @@ def flatten_values(value: object) -> list[str]:
     return [] if value is None else [str(value)]
 
 
-morph = MorphAnalyzer()
-
-
-@lru_cache(maxsize=100_000)
-def lemma(token: str) -> str:
-    return morph.parse(token)[0].normal_form if re.fullmatch(r"[а-я]+", token) else token
-
-
-def lemma_set(text: object) -> set[str]:
-    normalized = normalize_text(text)
-    return {lemma(token) for token in re.findall(r"[0-9a-zа-я]+", normalized)}
+def token_set(text: object) -> set[str]:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower().replace("ё", "е")
+    return {
+        token.replace(",", ".")
+        for token in re.findall(r"\d+[.,]\d+|[0-9a-zа-я]+", normalized)
+    }
 
 
 def main() -> None:
@@ -66,13 +51,13 @@ def main() -> None:
             right_values = " ".join(flatten_values(json.loads(right["attributes"])))
         except json.JSONDecodeError:
             continue
-        left_tokens = lemma_set(f"{left['name']} {left_values}")
-        right_tokens = lemma_set(f"{right['name']} {right_values}")
+        left_tokens = token_set(f"{left['name']} {left_values}")
+        right_tokens = token_set(f"{right['name']} {right_values}")
         print(
             f"\n{'=' * 80}\ntarget={pair.target}\n"
             f"id_1={pair.id1} | category_1={left['category']}\nname_1: {left['name']}\nattr_1: {left['attributes']}\n"
             f"\nid_2={pair.id2} | category_2={right['category']}\nname_2: {right['name']}\nattr_2: {right['attributes']}\n"
-            f"\nПересечение лемм ({len(left_tokens & right_tokens)}): {sorted(left_tokens & right_tokens)}"
+            f"\nПересечение токенов ({len(left_tokens & right_tokens)}): {sorted(left_tokens & right_tokens)}"
         )
         shown += 1
         if shown == args.count:
