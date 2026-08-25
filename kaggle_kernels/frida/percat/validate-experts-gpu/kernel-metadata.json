@@ -1,0 +1,23 @@
+{
+  "id": "maxamsecret/frida-experts-validate-gpu",
+  "title": "Frida Experts Validate GPU",
+  "code_file": "frida_experts_validate_gpu.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/frida-experts",
+    "maxamsecret/frida-sft-experiment-c-llm-3m-output",
+    "maxamsecret/frida-format-adapter-v4-ootput",
+    "maxamsecret/frida-item-disjoint-split"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [
+    "maxamsecret/frida-tokenize-items-v4"
+  ],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}

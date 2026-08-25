@@ -1,0 +1,20 @@
+{
+  "id": "maxamsecret/berta-format-v4-tokenize-teacher",
+  "title": "Berta Format V4 Tokenize Teacher",
+  "code_file": "berta_format_v4_tokenize_teacher.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split",
+    "rays0n/frida-format-adapter-v4-188"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

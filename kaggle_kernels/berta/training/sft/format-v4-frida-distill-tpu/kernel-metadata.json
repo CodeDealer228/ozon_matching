@@ -1,0 +1,15 @@
+{
+  "id": "maxamsecret/berta-format-v4-frida-distill-tpu",
+  "title": "Berta Format V4 Frida Distill Tpu",
+  "code_file": "berta_format_v4_frida_distill_tpu.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "kernel_sources": ["maxamsecret/berta-format-v4-tokenize-teacher"],
+  "competition_sources": [],
+  "model_sources": []
+}

@@ -10,6 +10,7 @@
   "enable_internet": true,
   "dataset_sources": [
     "kirpich682/frida-format-adapter-v4-merged",
+    "maxamsecret/frida-experts",
     "maxamsecret/frida-item-disjoint-split",
     "maxamsecret/frida-llm-train-val-split"
   ],

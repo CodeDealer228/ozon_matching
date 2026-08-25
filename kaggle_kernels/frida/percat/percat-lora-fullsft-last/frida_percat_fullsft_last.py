@@ -18,8 +18,9 @@ The optimizer uses the short proven XLA path (`backward`, clip,
 `xm.optimizer_step`). A 48-update preflight crosses the old deterministic
 cat00 failure at step 40 and emits heartbeats every eight steps so Kaggle's
 runner cannot mistake a long XLA phase for a dead subprocess.
-The deterministic 100K/category LLM cap keeps the projected run below Kaggle's
-9-hour TPU session cap.
+V2 warm-starts all 20 current experts, trains three additional epochs with a
+150K/category LLM cap, and uses resumable bounded sessions because the full
+plan cannot fit Kaggle's 9-hour TPU cap in one run.
 
 V12 FINAL REPAIR (the later V3-V11 sections are retained as failure history)
 ===========================================================================
@@ -93,9 +94,9 @@ one instead of twenty.
 TIME BUDGET (arithmetic, from this project's own measured 120 rows/s at
 PAIR_MAX_LENGTH=256 -- see frida-llm-tpu-sft's docstring)
 ===========================================================================
-PAIR_MAX_LENGTH=224 is budgeted conservatively at ~145 rows/s. Roughly 2M
-LLM rows plus human item-disjoint train remains around 4--5h, inside one 9h
-TPU session with the 8h15 stop.
+PAIR_MAX_LENGTH=224 is budgeted conservatively at ~145 rows/s. Three epochs
+over ~3.25M rows/epoch need roughly 19h, so the wall stop and full `last`
+checkpoint are part of the training plan rather than emergency fallbacks.
 
 SPLIT: MATCH THE FORMATTING-V4 BACKBONE
 ===========================================================================
@@ -109,8 +110,8 @@ WHAT IS WEIGHTED, AND WHY IT IS NOT CATEGORY SIZE
 Category SIZES are nearly uniform in this dataset -- 17,286 to 23,357 pairs,
 a 1.4x spread -- so weighting by inverse category size would be close to a
 no-op. Positive RATE is what varies (7.7x). Each specialist therefore gets
-its OWN pos_weight, computed from its own training mix, plus a 2x weight on
-human-labeled rows relative to LLM soft-labeled ones.
+its OWN pos_weight from the source-balanced positive rate. Per-row source
+weights make total human and LLM coefficients exactly 1:1 over each epoch.
 
 HEAD SCHEDULE AND NUMERICAL PREFLIGHT
 ===========================================================================
@@ -508,8 +509,8 @@ PREFLIGHT_HEARTBEAT = 8    # Kaggle kills long silent TPU subprocesses
 GRAD_CLIP_NORM = 1.0
 WEIGHT_DECAY = 0.01
 WARMUP_RATIO = 0.10
-HUMAN_WEIGHT = 2.0         # human rows count double against LLM soft labels
 MAX_POS_WEIGHT = 20.0
+LOSS_CONTRACT = "per_category_posrate_human_llm_1to1_v1"
 
 # Use the project's already-proven 16/32 train/eval shapes.  Sequence length
 # 192 is smaller than the 256-token run that established this fit, so this
@@ -517,14 +518,13 @@ MAX_POS_WEIGHT = 20.0
 PER_CORE_TRAIN_BATCH = 16
 PER_CORE_EVAL_BATCH = 32
 
-# A full 11.09M-row LLM epoch needs at least 18.6h at the measured 170
-# rows/s, before setup/eval.  A deterministic 100K/category cap yields about
-# 2.29M total rows (5.3h even at a conservative 120 rows/s), which is the
-# only single-session configuration with a defensible margin under Kaggle's
-# 9h TPU limit.
-LLM_ROWS_PER_CATEGORY = 100_000
-EPOCHS = 1                     # per category
-MAX_WALL_SECONDS = 29_700      # 8h15 from process start; 45m shutdown margin
+# Three 150K/category epochs exceed one 9h TPU session by design. Full `last`
+# checkpoints plus the hard deadline make this a safe multi-session run.
+LLM_ROWS_PER_CATEGORY = 150_000
+EPOCHS = 3                     # additional epochs from current expert weights
+# kirpich682 has 5.67 TPU-hours left before the weekly refresh. Stop at 4h45
+# from process start, leaving ~55m for setup/save variance and quota safety.
+MAX_WALL_SECONDS = 17_100
 LOG_EVERY_STEPS = 50
 LAST_SAVE_SECONDS = 900        # full resume checkpoint every 15 wall-clock min
 
@@ -886,13 +886,15 @@ def make_pair_collate_fn(caches, pad_id, pair_max_length, include_valid=False):
             input_ids[i, :n] = combined
             attention_mask[i, :n] = 1
         # scope rides along (0=human, 1=llm) so the training loop can apply
-        # HUMAN_WEIGHT without a second lookup.
+        # source rides along so per-category loss can balance human/LLM 1:1.
         result = (torch.from_numpy(input_ids), torch.from_numpy(attention_mask),
                   torch.tensor(labels, dtype=torch.float32),
                   np.asarray(categories, dtype=np.int64),
                   torch.tensor([int(s) for s in scope], dtype=torch.int64))
         if include_valid:
-            result += (torch.tensor(valid, dtype=torch.bool),)
+            # torch.tensor(tuple[np.bool_]) fails on Kaggle's PyTorch with
+            # "numpy.bool object cannot be interpreted as an integer".
+            result += (torch.from_numpy(np.asarray(valid, dtype=np.bool_)),)
         return result
     return collate_fn
 
@@ -1025,7 +1027,23 @@ def stage_compatible_resume():
         except (OSError, json.JSONDecodeError):
             continue
     if len(candidates) > 1:
-        raise RuntimeError(f"multiple compatible resume roots found: {candidates}")
+        def progress(root):
+            score = 0
+            for cat_id in range(20):
+                state_path = os.path.join(root, f"cat{cat_id:02d}_last", "train_state.json")
+                if not os.path.isfile(state_path):
+                    continue
+                with open(state_path, encoding="utf-8") as handle:
+                    state = json.load(handle)
+                contract = state.get("training_contract") or {}
+                if contract.get("loss_contract") == LOSS_CONTRACT:
+                    score += int(state.get("attempted_steps", 0)) + 1
+            return score
+        scored = sorted((progress(root), root) for root in candidates)
+        if len(scored) > 1 and scored[-1][0] == scored[-2][0]:
+            raise RuntimeError(f"ambiguous compatible resume roots: {scored}")
+        candidates = [scored[-1][1]]
+        print(f"[RESUME] selected most-progressed root: {scored[-1]}", flush=True)
     if not candidates:
         return
     source = candidates[0]
@@ -1318,8 +1336,8 @@ def _make_lr_lambda(warmup_steps, total_steps, min_ratio, delay_steps=0):
     return lr_lambda
 
 
-def _optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
-                      head_only):
+def _optimizer_update(model, optimizer, scheduler, loss_fn, source_weights,
+                      batch, device, head_only):
     """The proven minimal TPU path: backward, clip, XLA step, scheduler."""
     input_ids, attention_mask, batch_labels, _cats, batch_scope = batch
     batch_labels = batch_labels.to(device)
@@ -1329,10 +1347,8 @@ def _optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
     logits = model(input_ids=input_ids, attention_mask=attention_mask,
                    detach_encoder=head_only)
     per_sample = loss_fn(logits, batch_labels)
-    weights = torch.where(batch_scope == 0,
-                          torch.full_like(per_sample, HUMAN_WEIGHT),
-                          torch.ones_like(per_sample))
-    loss = (per_sample * weights).sum() / weights.sum()
+    weights = source_weights[batch_scope.to(torch.long)]
+    loss = (per_sample * weights).mean()
 
     loss.backward()
     trainable = [p for group in optimizer.param_groups for p in group["params"]]
@@ -1341,6 +1357,39 @@ def _optimizer_update(model, optimizer, scheduler, loss_fn, batch, device,
     xm.optimizer_step(optimizer)
     scheduler.step()
     return loss.detach(), grad_norm.detach()
+
+
+def _make_category_loss(frame, device):
+    """Per-category class prior plus equal total human/LLM loss weight."""
+    labels = frame["label"]
+    scope = frame["scope"]
+    human = labels[scope == 0]
+    llm = labels[scope == 1]
+    if len(human) == 0 or len(llm) == 0:
+        raise RuntimeError("category loss requires both human and LLM rows")
+    pos_rate_human = float(human.mean())
+    pos_rate_llm = float(llm.mean())
+    pos_rate = 0.5 * (pos_rate_human + pos_rate_llm)
+    pos_weight_value = min((1.0 - pos_rate) / max(pos_rate, 1e-9), MAX_POS_WEIGHT)
+    loss_fn = torch.nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(pos_weight_value, device=device), reduction="none")
+    n_total = len(labels)
+    human_weight = n_total / (2.0 * len(human))
+    llm_weight = n_total / (2.0 * len(llm))
+    assert math.isclose(len(human) * human_weight, n_total / 2.0)
+    assert math.isclose(len(llm) * llm_weight, n_total / 2.0)
+    source_weights = torch.tensor(
+        [human_weight, llm_weight], dtype=torch.float32, device=device)
+    report = {
+        "contract": LOSS_CONTRACT,
+        "n_human": int(len(human)), "n_llm": int(len(llm)),
+        "pos_rate_human": pos_rate_human, "pos_rate_llm": pos_rate_llm,
+        "source_balanced_pos_rate": pos_rate,
+        "pos_weight": pos_weight_value,
+        "human_sample_weight": human_weight,
+        "llm_sample_weight": llm_weight,
+    }
+    return loss_fn, source_weights, report
 
 
 def _trainable_parameters_finite(model, device, world_size):
@@ -1646,7 +1695,7 @@ def _load_shared_data():
     del human
     gc.collect()
 
-    # ---- LLM: v2 no-leak train split, then deterministic 100K/category ----
+    # ---- LLM: v2 no-leak train split, then deterministic per-category cap ----
     # Only the five required columns are materialised and pandas is avoided:
     # a pandas frame containing 11M repeated category strings was a large
     # pre-fork host-RAM baseline.  Sampling preserves each category's ten
@@ -1858,10 +1907,7 @@ def _preflight_optimizer_updates(model, device, caches, pad_id, train_frame,
     t0 = time.perf_counter()
     reset_specialist_(model, SEED)
     labels = train_frame["label"]
-    pos_mass = float(labels.sum())
-    pos_weight = min((len(labels) - pos_mass) / max(pos_mass, 1e-9), MAX_POS_WEIGHT)
-    loss_fn = torch.nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor(pos_weight, device=device), reduction="none")
+    loss_fn, source_weights, _loss_report = _make_category_loss(train_frame, device)
     optimizer = torch.optim.AdamW(
         make_param_groups(model), weight_decay=WEIGHT_DECAY, eps=1e-6)
     total_steps = max(PREFLIGHT_STEPS + 1,
@@ -1883,7 +1929,7 @@ def _preflight_optimizer_updates(model, device, caches, pad_id, train_frame,
         if step >= PREFLIGHT_STEPS:
             break
         last_loss, last_norm = _optimizer_update(
-            model, optimizer, scheduler, loss_fn, batch, device,
+            model, optimizer, scheduler, loss_fn, source_weights, batch, device,
             head_only=(attempts < HEAD_ONLY_STEPS))
         attempts += 1
         if attempts == 1 or attempts % PREFLIGHT_HEARTBEAT == 0:
@@ -1921,7 +1967,7 @@ def _preflight_optimizer_updates(model, device, caches, pad_id, train_frame,
     model.zero_grad(set_to_none=True)
     reset_specialist_(model, SEED)
     xm.mark_step()
-    del mp_loader, loader, sampler, optimizer, scheduler, loss_fn
+    del mp_loader, loader, sampler, optimizer, scheduler, loss_fn, source_weights
 
 
 def _deadline_reached(device):
@@ -2097,11 +2143,7 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
         labels = train_frame["label"]
         if not np.isfinite(labels).all() or labels.min() < 0 or labels.max() > 1:
             raise RuntimeError(f"[{cat_id:02d}] invalid training labels")
-        pos_mass = float(labels.sum())
-        raw_pos_weight = (len(labels) - pos_mass) / max(pos_mass, 1e-9)
-        pos_weight_value = min(raw_pos_weight, MAX_POS_WEIGHT)
-        pos_weight = torch.tensor(pos_weight_value, device=device)
-        loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
+        loss_fn, source_weights, loss_report = _make_category_loss(train_frame, device)
 
         optimizer = torch.optim.AdamW(
             make_param_groups(model, lr_scale=lr_scale),
@@ -2117,26 +2159,41 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
         ])
 
         resume_state = None
+        resume_mode = "fresh"
         if external is not None:
             state_path = os.path.join(external[0], "train_state.json")
             with open(state_path, encoding="utf-8") as handle:
-                resume_state = json.load(handle)
-            if int(resume_state.get("category_id", -1)) != cat_id:
+                candidate_state = json.load(handle)
+            if int(candidate_state.get("category_id", -1)) != cat_id:
                 raise RuntimeError(f"[{cat_id:02d}] resume category contract mismatch")
-            if int(resume_state.get("planned_steps", -1)) != total_steps:
-                raise RuntimeError(f"[{cat_id:02d}] resume schedule length mismatch")
-            optimizer_state = torch.load(
-                os.path.join(external[0], "optimizer.pt"), map_location="cpu")
-            if not _optimizer_state_finite(optimizer_state):
-                raise RuntimeError(f"[{cat_id:02d}] optimizer checkpoint contains NaN/Inf")
-            optimizer.load_state_dict(optimizer_state)
-            scheduler.load_state_dict(torch.load(
-                os.path.join(external[0], "scheduler.pt"), map_location="cpu"))
-            del optimizer_state
+            expected_training = {
+                "epochs": EPOCHS,
+                "llm_rows_per_category": LLM_ROWS_PER_CATEGORY,
+                "loss_contract": LOSS_CONTRACT,
+            }
+            if (int(candidate_state.get("planned_steps", -1)) == total_steps
+                    and candidate_state.get("training_contract") == expected_training):
+                resume_state = candidate_state
+                optimizer_state = torch.load(
+                    os.path.join(external[0], "optimizer.pt"), map_location="cpu")
+                if not _optimizer_state_finite(optimizer_state):
+                    raise RuntimeError(f"[{cat_id:02d}] optimizer checkpoint contains NaN/Inf")
+                optimizer.load_state_dict(optimizer_state)
+                scheduler.load_state_dict(torch.load(
+                    os.path.join(external[0], "scheduler.pt"), map_location="cpu"))
+                del optimizer_state
+                resume_mode = "exact"
+            else:
+                # The attached 1-epoch experts provide the requested current
+                # weights. Optimizer/scheduler reset because the objective and
+                # planned schedule both changed in v2.
+                resume_mode = "weights_only"
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         _log(rank, "CAT", f"[{cat_id:02d}] {cat_name}: train={n_train:,} "
                           f"val={len(val_frame['label']):,} steps={total_steps} "
-                          f"head_only={fresh_delay} pos_weight={pos_weight_value:.3f} "
+                          f"resume={resume_mode} pos_weight={loss_report['pos_weight']:.3f} "
+                          f"human/llm_weight={loss_report['human_sample_weight']:.3f}/"
+                          f"{loss_report['llm_sample_weight']:.3f} "
                           f"rss_highwater={rss_mb:.0f}MB", force=True)
 
         attempted_steps = int(resume_state.get("attempted_steps", 0)) if resume_state else 0
@@ -2164,7 +2221,7 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
                     continue
                 head_only = external is None and attempted_steps < HEAD_ONLY_STEPS
                 last_loss, last_norm = _optimizer_update(
-                    model, optimizer, scheduler, loss_fn, batch, device,
+                    model, optimizer, scheduler, loss_fn, source_weights, batch, device,
                     head_only=head_only)
                 attempted_steps += 1
                 next_batch_in_epoch = batch_index + 1
@@ -2201,8 +2258,15 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
                             "next_epoch": epoch,
                             "next_batch_in_epoch": next_batch_in_epoch,
                             "resumed_from": external[1] if external else None,
+                            "resume_mode": resume_mode,
                             "lr_scale": lr_scale, "llm_is_subsample": True,
                             "llm_rows_per_category": LLM_ROWS_PER_CATEGORY,
+                            "training_contract": {
+                                "epochs": EPOCHS,
+                                "llm_rows_per_category": LLM_ROWS_PER_CATEGORY,
+                                "loss_contract": LOSS_CONTRACT,
+                            },
+                            "loss_report": loss_report,
                         }
                         xm.rendezvous(f"v13_{label_prefix}_periodic_before_{attempted_steps}")
                         save_checkpoint(
@@ -2234,8 +2298,15 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
             "next_epoch": int(current_epoch),
             "next_batch_in_epoch": int(next_batch_in_epoch),
             "resumed_from": external[1] if external is not None else None,
+            "resume_mode": resume_mode,
             "lr_scale": lr_scale, "llm_is_subsample": True,
             "llm_rows_per_category": LLM_ROWS_PER_CATEGORY,
+            "training_contract": {
+                "epochs": EPOCHS,
+                "llm_rows_per_category": LLM_ROWS_PER_CATEGORY,
+                "loss_contract": LOSS_CONTRACT,
+            },
+            "loss_report": loss_report,
         }
         if stopped:
             xm.rendezvous(f"v13_{label_prefix}_deadline_before")
@@ -2278,7 +2349,7 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
             _log(rank, "EVAL_ERROR", f"[{cat_id:02d}] {cat_name}: "
                  f"{type(error).__name__}: {error}; kept resumable last", force=True)
             results[cat_name] = None
-            del eval_loader, optimizer, scheduler, loss_fn
+            del eval_loader, optimizer, scheduler, loss_fn, source_weights
             model.train()
             xm.rendezvous(f"v13_{label_prefix}_eval_failed")
             if rank == 0:
@@ -2290,7 +2361,7 @@ def _train_categories_v13(model, device, caches, pad_id, train_by_cat,
                         float(pr_auc), f"{label_prefix}_best", rank, "best",
                         extra=checkpoint_extra)
         results[cat_name] = float(pr_auc)
-        del eval_loader, optimizer, scheduler, loss_fn
+        del eval_loader, optimizer, scheduler, loss_fn, source_weights
         model.train()
 
         # Rank 0 may still be writing checkpoint files; align before any rank
@@ -2332,7 +2403,7 @@ def _mp_fn(index):
 
     _log(rank, "CONFIG", f"world_size={world_size} pair_max_length={PAIR_MAX_LENGTH} "
                          f"lora_r={LORA_R} lr={LR} head_lr={LR * HEAD_LR_MULTIPLIER} "
-                         f"warmup={WARMUP_RATIO} human_weight={HUMAN_WEIGHT} "
+                         f"warmup={WARMUP_RATIO} loss_contract={LOSS_CONTRACT} "
                          f"lr_resume_multiplier={LR_RESUME_MULTIPLIER} "
                          f"llm_train_sample={_SHARED['n_llm_used']:,} "
                          f"(of {_SHARED['n_llm_full_train']:,} v2 train rows)", force=True)
