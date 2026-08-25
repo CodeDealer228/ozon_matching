@@ -36,12 +36,14 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260825)
     parser.add_argument("--max-attributes-chars", type=int, default=1000)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     items = pd.read_parquet(args.items, columns=["id", "category", "name", "attributes"]).set_index("id")
     pairs = pd.read_parquet(args.pairs, columns=["id1", "id2", "target"])
     pairs = pairs[pairs["target"].eq(1)].sample(frac=1, random_state=args.seed)
     shown = 0
+    reports: list[str] = []
     for pair in pairs.itertuples(index=False):
         if pair.id1 not in items.index or pair.id2 not in items.index:
             continue
@@ -55,7 +57,7 @@ def main() -> None:
             continue
         left_tokens = token_set(f"{left['name']} {left_values}")
         right_tokens = token_set(f"{right['name']} {right_values}")
-        print(
+        reports.append(
             f"\n{'=' * 80}\ntarget={pair.target}\n"
             f"id_1={pair.id1} | category_1={left['category']}\nname_1: {left['name']}\nattr_1: {left['attributes']}\n"
             f"\nid_2={pair.id2} | category_2={right['category']}\nname_2: {right['name']}\nattr_2: {right['attributes']}\n"
@@ -66,6 +68,11 @@ def main() -> None:
             break
     if shown != args.count:
         raise RuntimeError(f"Found only {shown} valid pairs")
+    report = "\n".join(reports)
+    print(report)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(report + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
