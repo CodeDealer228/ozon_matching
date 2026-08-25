@@ -9,6 +9,7 @@ param(
     [int]$MaxNewSourcesPerCategory = 0,
     [string]$OutputDir = '',
     [string[]]$ExcludeOutputDir = @(),
+    [string]$ExcludeOutputDirs = '',
     [switch]$DryRun
 )
 
@@ -58,7 +59,11 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
         $arguments += @('--output-dir', $OutputDir)
     }
-    foreach ($excludedDir in $ExcludeOutputDir) {
+    $allExcludedDirs = @($ExcludeOutputDir)
+    if (-not [string]::IsNullOrWhiteSpace($ExcludeOutputDirs)) {
+        $allExcludedDirs += @($ExcludeOutputDirs.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries))
+    }
+    foreach ($excludedDir in $allExcludedDirs) {
         if (-not [string]::IsNullOrWhiteSpace($excludedDir)) {
             $arguments += @('--exclude-output-dir', $excludedDir)
         }
