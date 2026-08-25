@@ -342,6 +342,36 @@ def accepted_from_record(record: dict[str, object]) -> list[dict[str, object]]:
     return result
 
 
+def choose_balanced_categories(
+    categories: list[str],
+    accepted_counts: Counter[str],
+    attempted_counts: Counter[str],
+    run_sources: Counter[str],
+    target_per_category: int,
+    max_new_sources_per_category: int | None,
+    limit: int,
+) -> list[str]:
+    """Choose the least-attempted active categories for the next request window."""
+
+    active = [
+        category
+        for category in categories
+        if accepted_counts[category] < target_per_category
+        and (
+            max_new_sources_per_category is None
+            or run_sources[category] < max_new_sources_per_category
+        )
+    ]
+    return sorted(
+        active,
+        key=lambda category: (
+            attempted_counts[category],
+            accepted_counts[category],
+            category,
+        ),
+    )[:limit]
+
+
 def create_snapshot(
     output_dir: Path,
     pool: pd.DataFrame,
@@ -551,8 +581,10 @@ def main() -> None:
     }
     write_lock = Lock()
     accepted_counts: Counter[str] = Counter()
+    attempted_counts: Counter[str] = Counter()
     for record in records:
         accepted_counts[str(record["category"])] += len(accepted_from_record(record))
+        attempted_counts[str(record["category"])] += 1
     run_sources: Counter[str] = Counter()
     terminal_since_snapshot = 0
     explicit_cache = not args.no_explicit_cache
@@ -660,11 +692,15 @@ def main() -> None:
 
     stop_reason = "no_remaining_sources"
     while True:
-        active_categories = [
-            category for category in categories
-            if accepted_counts[category] < args.target_per_category
-            and (args.max_new_sources_per_category is None or run_sources[category] < args.max_new_sources_per_category)
-        ]
+        active_categories = choose_balanced_categories(
+            categories,
+            accepted_counts,
+            attempted_counts,
+            run_sources,
+            args.target_per_category,
+            args.max_new_sources_per_category,
+            args.workers,
+        )
         if not active_categories:
             stop_reason = "target_or_run_cap_reached"
             break
@@ -676,8 +712,6 @@ def main() -> None:
 
         batch: list[object] = []
         for category in active_categories:
-            if len(batch) >= args.workers:
-                break
             row = next_row(category)
             if row is not None:
                 batch.append(row)
@@ -706,6 +740,7 @@ def main() -> None:
                     }, write_lock)
                     uncertain.add(source)
                     run_sources[str(row.category)] += 1
+                    attempted_counts[str(row.category)] += 1
                     continue
                 record = result["record"]
                 append_jsonl(raw_path, record, write_lock)
@@ -716,6 +751,7 @@ def main() -> None:
                 records.append(record)
                 completed.add(source)
                 run_sources[str(row.category)] += 1
+                attempted_counts[str(row.category)] += 1
                 accepted_counts[str(row.category)] += len(accepted_from_record(record))
                 terminal_since_snapshot += 1
 

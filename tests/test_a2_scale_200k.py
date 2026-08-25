@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+from collections import Counter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,3 +105,17 @@ def test_accepts_content_word_supported_by_b_attributes() -> None:
     )
     accepted, reasons, _ = a2.validate_candidate(source, "Кардиган Koton женский черный")
     assert accepted, reasons
+
+
+def test_scheduler_prioritizes_categories_with_fewer_attempts() -> None:
+    categories = ["A", "B", "C", "D"]
+    selected = a2.choose_balanced_categories(
+        categories,
+        Counter({"A": 300, "B": 290, "C": 5, "D": 6}),
+        Counter({"A": 500, "B": 500, "C": 10, "D": 11}),
+        Counter(),
+        target_per_category=10_000,
+        max_new_sources_per_category=None,
+        limit=2,
+    )
+    assert selected == ["C", "D"]
