@@ -99,6 +99,11 @@ all_registered_model_quotas_exhausted`: исчерпаны бесплатные 
 
 ## Проверенные артефакты
 
+Итоговый принятый датасет добавлен в репозиторий как
+`data/a2_synthetic_all_categories_v4.parquet`; рядом лежит
+`data/a2_synthetic_all_categories_v4.meta.json` со схемой и identity. Это
+точная копия проверенного `accepted_a2.parquet`, а не raw provider output.
+
 | Файл | Размер, байт | SHA-256 |
 |---|---:|---|
 | `accepted_a2.parquet` | 3 185 966 | `c4c0242fd1ae273d3f13c7358d639a503f9b4e2d4efed200d1d6e05d8521ba00` |

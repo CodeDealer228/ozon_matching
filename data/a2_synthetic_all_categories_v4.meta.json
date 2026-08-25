@@ -1,0 +1,37 @@
+{
+  "dataset": "a2_synthetic_all_categories_v4",
+  "file": "data/a2_synthetic_all_categories_v4.parquet",
+  "status": "accepted_generation_output",
+  "rows": 12833,
+  "unique_source_orientations": 7462,
+  "category_count": 20,
+  "max_candidates_per_source_orientation": 2,
+  "bytes": 3185966,
+  "sha256": "c4c0242fd1ae273d3f13c7358d639a503f9b4e2d4efed200d1d6e05d8521ba00",
+  "canonical_split_sha256": "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e",
+  "validation_fingerprint": "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8",
+  "source_pool_sha256": "61b83e5a50fc96a539430d12571e1de8d3fece4218a8b8f8e920388beecb8a9f",
+  "validation_used_as_generation_source": false,
+  "ids_sent_to_provider": false,
+  "provider_payload_fields": [
+    "category",
+    "name A",
+    "name B",
+    "attributes B"
+  ],
+  "columns": [
+    "source_orientation_sha256",
+    "source_pair_sha256",
+    "category",
+    "model",
+    "candidate_index",
+    "name2_prime",
+    "diagnostics",
+    "id1",
+    "id2",
+    "name1",
+    "name2"
+  ],
+  "generation_stop_reason": "all_registered_model_quotas_exhausted",
+  "report": "synthetic_research/a2_scale_200k/03_final_generation_report.md"
+}
