@@ -29,6 +29,14 @@ import torch_xla.core.xla_model as xm
 import torch_xla.distributed.parallel_loader as pl_xla
 import torch_xla.runtime as xr
 
+try:
+    import peft.import_utils
+    import peft.tuners.lora.torchao
+    peft.import_utils.is_torchao_available = lambda: False
+    peft.tuners.lora.torchao.is_torchao_available = lambda: False
+except Exception as exc:
+    print(f"[WARN] optional torchao dispatcher patch failed: {exc}", flush=True)
+
 
 ARM = "C1"  # The only intended C1 -> T1 code change between kernel versions.
 START = time.perf_counter()

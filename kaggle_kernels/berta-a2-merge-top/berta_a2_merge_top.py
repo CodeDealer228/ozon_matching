@@ -20,6 +20,18 @@ from peft import PeftModel
 from sklearn.metrics import average_precision_score
 from transformers import AutoModel, AutoTokenizer
 
+# Kaggle's current GPU image ships torchao 0.10.0 while the bundled PEFT
+# dispatcher accepts only >=0.16.  This model is ordinary fp32/fp16 BERTA and
+# does not use torchao at all, so disable only that optional dispatcher.  This
+# is the same compatibility patch used by the established BERTA kernels here.
+try:
+    import peft.import_utils
+    import peft.tuners.lora.torchao
+    peft.import_utils.is_torchao_available = lambda: False
+    peft.tuners.lora.torchao.is_torchao_available = lambda: False
+except Exception as exc:
+    print(f"[WARN] optional torchao dispatcher patch failed: {exc}", flush=True)
+
 
 START = time.perf_counter()
 OUT = Path("/kaggle/working/berta_a2_merge_top")
