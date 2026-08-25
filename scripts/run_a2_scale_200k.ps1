@@ -10,6 +10,8 @@ param(
     [string]$OutputDir = '',
     [string[]]$ExcludeOutputDir = @(),
     [string]$ExcludeOutputDirs = '',
+    [string[]]$RegistryExtension = @(),
+    [string]$RegistryExtensions = '',
     [switch]$DryRun
 )
 
@@ -66,6 +68,15 @@ try {
     foreach ($excludedDir in $allExcludedDirs) {
         if (-not [string]::IsNullOrWhiteSpace($excludedDir)) {
             $arguments += @('--exclude-output-dir', $excludedDir)
+        }
+    }
+    $allRegistryExtensions = @($RegistryExtension)
+    if (-not [string]::IsNullOrWhiteSpace($RegistryExtensions)) {
+        $allRegistryExtensions += @($RegistryExtensions.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries))
+    }
+    foreach ($extensionPath in $allRegistryExtensions) {
+        if (-not [string]::IsNullOrWhiteSpace($extensionPath)) {
+            $arguments += @('--registry-extension', $extensionPath)
         }
     }
     if ($DryRun) {

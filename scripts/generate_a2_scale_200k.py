@@ -1,9 +1,10 @@
 """Checkpointed A2 v4 generation for all 20 canonical categories.
 
 The generator rotates through an explicit registry of Alibaba Singapore Qwen
-models up to 32B.  It never retries an uncertain request and only changes model
-after an exact allocation/free-quota rejection.  IDs remain local and are not
-included in provider messages.
+models up to 32B, followed only by explicitly authorized bounded extensions.
+It never retries an uncertain request and only changes model after an exact
+allocation/free-quota rejection. IDs remain local and are not included in
+provider messages.
 """
 
 from __future__ import annotations
@@ -381,6 +382,7 @@ def create_snapshot(
     raw_path: Path,
     journal_path: Path,
     model_events_path: Path,
+    registry_extensions: list[dict[str, object]],
 ) -> dict[str, object]:
     accepted_rows = [candidate for record in records for candidate in accepted_from_record(record)]
     accepted = pd.DataFrame(accepted_rows)
@@ -424,6 +426,7 @@ def create_snapshot(
         "accepted_by_category": accepted_counts,
         "token_usage": dict(token_totals),
         "model_registry_sha256": registry_sha,
+        "model_registry_extensions": registry_extensions,
         "source_pool_sha256": file_sha256(output_dir.parent / "source_pool/source_orientations.parquet"),
         "accepted_a2_sha256": file_sha256(selected_path),
         "raw_responses_sha256": file_sha256(raw_path) if raw_path.is_file() else None,
@@ -464,6 +467,7 @@ def main() -> None:
         type=Path,
         default=REPO_ROOT / "synthetic_research/a2_scale_200k/model_rotation_v1.json",
     )
+    parser.add_argument("--registry-extension", type=Path, action="append", default=[])
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -498,6 +502,34 @@ def main() -> None:
     if not models or any(int(value["parameter_billions"]) > 32 for value in registry["models"]):
         raise RuntimeError("Invalid <=32B model registry")
     registry_sha = file_sha256(registry_path)
+    registry_extensions: list[dict[str, object]] = []
+    for extension_path_value in args.registry_extension:
+        extension_path = extension_path_value.resolve()
+        extension = json.loads(extension_path.read_text(encoding="utf-8"))
+        extension_models = sorted(
+            extension.get("models") or [], key=lambda value: int(value["rank"])
+        )
+        if not extension_models:
+            raise RuntimeError(f"Empty model registry extension: {extension_path}")
+        if any(
+            not 32 < int(value["parameter_billions"]) <= 35
+            for value in extension_models
+        ):
+            raise RuntimeError(
+                "Registry extension may contain only explicitly authorized 33B-35B models"
+            )
+        extension_ids = [str(value["id"]) for value in extension_models]
+        duplicate_ids = set(models) & set(extension_ids)
+        if duplicate_ids:
+            raise RuntimeError(f"Duplicate models across registries: {sorted(duplicate_ids)}")
+        models.extend(extension_ids)
+        registry_extensions.append(
+            {
+                "path_name": extension_path.name,
+                "sha256": file_sha256(extension_path),
+                "models": extension_ids,
+            }
+        )
     source_sha = file_sha256(source_path)
     base_url = os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     parsed = urlparse(base_url)
@@ -535,6 +567,18 @@ def main() -> None:
     journal_path = args.output_dir / "request_journal.jsonl"
     model_events_path = args.output_dir / "model_events.jsonl"
     config_path = args.output_dir / "generation_config.json"
+    extension_state_path = args.output_dir / "model_registry_extensions.json"
+    if extension_state_path.is_file():
+        existing_extensions = json.loads(extension_state_path.read_text(encoding="utf-8"))
+        if not registry_extensions:
+            raise RuntimeError("Existing registry extensions must be supplied again on resume")
+        if existing_extensions != registry_extensions:
+            raise RuntimeError("Registry extension identity differs from existing output state")
+    elif registry_extensions:
+        extension_state_path.write_text(
+            json.dumps(registry_extensions, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     config = {
         "profile": PROFILE,
         "prompt_version": PROMPT_VERSION,
@@ -764,11 +808,11 @@ def main() -> None:
             print(json.dumps({"event": "model_rotated", "exhausted_model": model, "next_model": next((m for m in models if m not in exhausted), None)}, ensure_ascii=False), flush=True)
 
         if terminal_since_snapshot >= args.snapshot_every:
-            manifest = create_snapshot(args.output_dir, pool, records, args.target_per_category, registry_sha, raw_path, journal_path, model_events_path)
+            manifest = create_snapshot(args.output_dir, pool, records, args.target_per_category, registry_sha, raw_path, journal_path, model_events_path, registry_extensions)
             terminal_since_snapshot = 0
             print(json.dumps({"event": "checkpoint", "terminal_records": len(records), "accepted_total": manifest["accepted_total"], "accepted_by_category": manifest["accepted_by_category"]}, ensure_ascii=False), flush=True)
 
-    manifest = create_snapshot(args.output_dir, pool, records, args.target_per_category, registry_sha, raw_path, journal_path, model_events_path)
+    manifest = create_snapshot(args.output_dir, pool, records, args.target_per_category, registry_sha, raw_path, journal_path, model_events_path, registry_extensions)
     manifest["stop_reason"] = stop_reason
     manifest["uncertain_sources"] = len(uncertain)
     manifest["exhausted_models"] = [model for model in models if model in exhausted]

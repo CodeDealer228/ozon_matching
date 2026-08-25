@@ -1,0 +1,20 @@
+{
+  "registry_extension_version": 1,
+  "provider": "Alibaba Cloud Model Studio",
+  "region": "Singapore",
+  "minimum_parameter_billions_exclusive": 32,
+  "maximum_parameter_billions": 35,
+  "authorized_by_user_at": "2026-08-25",
+  "selection_rule": "newest suitable 35B text model first; use only after the base <=32B registry is exhausted",
+  "models": [
+    {"id": "qwen3.6-35b-a3b", "parameter_billions": 35, "rank": 1},
+    {"id": "qwen3.5-35b-a3b", "parameter_billions": 35, "rank": 2}
+  ],
+  "explicitly_not_authorized": [
+    {
+      "id": "qwen3-next-80b-a3b-instruct",
+      "parameter_billions": 80,
+      "reason": "80B is not a slight increase over the original <=32B limit and requires separate approval"
+    }
+  ]
+}
