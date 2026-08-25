@@ -30,9 +30,9 @@ EXPECTED_SPLIT_SHA256 = "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c4
 EXPECTED_VAL_FINGERPRINT = "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8"
 EXPECTED_CATEGORY_COUNT = 20
 PROFILE = "a2_v4_all_categories_natural_two_candidate_rotating_models"
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 MAX_ATTRIBUTES_CHARS = 3000
-MAX_COMPLETION_TOKENS = 320
+MAX_COMPLETION_TOKENS = 512
 
 
 def file_sha256(path: Path) -> str:
@@ -97,7 +97,9 @@ def build_messages(row: object, explicit_cache: bool) -> list[dict[str, object]]
         "факты из исходного B. Марка, модель, артикул, числа, размер, объём, количество, "
         "цвет, комплектация, совместимость и единицы B должны остаться верными. Можно "
         "использовать только факты B из title_b или attributes_b. Нельзя копировать факт "
-        "только из A. Верни один или два действительно разных естественных варианта. Если "
+        "только из A. Не объединяй отдельные ингредиенты, свойства или объекты в новое "
+        "составное понятие: например, 'с курицей, с печенью' нельзя превращать в 'с куриной "
+        "печенью'. Верни один или два действительно разных естественных варианта. Если "
         "безопасно изменить название нельзя, верни skip. Ответ — один JSON без markdown: "
         "{\"status\":\"ok\",\"candidates\":[{\"name2_prime\":\"...\"},"
         "{\"name2_prime\":\"...\"}]} или {\"status\":\"skip\",\"reason\":\"...\"}."
@@ -413,8 +415,9 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=REPO_ROOT / "artifacts/synthetic_v2/a2_scale_200k/generation",
+        default=REPO_ROOT / "artifacts/synthetic_v2/a2_scale_200k/generation_v2",
     )
+    parser.add_argument("--exclude-output-dir", type=Path)
     parser.add_argument("--target-per-category", type=int, default=10_000)
     parser.add_argument("--max-new-sources-per-category", type=int)
     parser.add_argument("--workers", type=int, default=6)
@@ -496,7 +499,23 @@ def main() -> None:
         "max_completion_tokens": MAX_COMPLETION_TOKENS,
         "automatic_retries": 0,
         "explicit_cache": not args.no_explicit_cache,
+        "excluded_output_identity": None,
     }
+    externally_excluded: set[str] = set()
+    if args.exclude_output_dir:
+        exclude_dir = args.exclude_output_dir.resolve()
+        exclude_raw = exclude_dir / "raw_responses.jsonl"
+        exclude_journal = exclude_dir / "request_journal.jsonl"
+        for record in read_jsonl(exclude_raw):
+            externally_excluded.add(str(record["source_orientation_sha256"]))
+        for event in read_jsonl(exclude_journal):
+            externally_excluded.add(str(event["source_orientation_sha256"]))
+        config["excluded_output_identity"] = {
+            "path_name": exclude_dir.name,
+            "excluded_sources": len(externally_excluded),
+            "raw_responses_sha256": file_sha256(exclude_raw) if exclude_raw.is_file() else None,
+            "request_journal_sha256": file_sha256(exclude_journal) if exclude_journal.is_file() else None,
+        }
     if config_path.is_file() and json.loads(config_path.read_text(encoding="utf-8")) != config:
         raise RuntimeError("Generation config differs from existing output identity")
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -527,7 +546,7 @@ def main() -> None:
             row = rows[cursor[category]]
             cursor[category] += 1
             source = str(row.source_orientation_sha256)
-            if source not in completed and source not in uncertain:
+            if source not in completed and source not in uncertain and source not in externally_excluded:
                 return row
         return None
 
@@ -553,7 +572,24 @@ def main() -> None:
             )
             content = completion.choices[0].message.content or ""
             usage = completion.usage.model_dump() if completion.usage else {}
-            parsed_response = parse_response(content)
+            try:
+                parsed_response = parse_response(content)
+            except Exception as exc:
+                return {
+                    "kind": "terminal",
+                    "record": {
+                        "source_orientation_sha256": source,
+                        "source_pair_sha256": str(row.source_pair_sha256),
+                        "category": str(row.category), "model": model,
+                        "request_status": "parse_error", "error": safe_error(exc),
+                        "candidate_results": [], "usage": usage,
+                        "finish_reason": completion.choices[0].finish_reason,
+                        "provider_request_id": getattr(completion, "_request_id", None) or completion.id,
+                        "raw_content": content,
+                        "raw_content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                        "completed_at_unix": time.time(),
+                    },
+                }
             candidates = []
             if parsed_response["status"] == "ok":
                 seen: set[str] = set()
@@ -677,6 +713,7 @@ def main() -> None:
     manifest["stop_reason"] = stop_reason
     manifest["uncertain_sources"] = len(uncertain)
     manifest["exhausted_models"] = [model for model in models if model in exhausted]
+    manifest["externally_excluded_sources"] = len(externally_excluded)
     (args.output_dir / "generation_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 

@@ -72,3 +72,14 @@ def test_provider_payload_has_attributes_b_but_no_ids() -> None:
 def test_seed_is_within_signed_32_bit_range() -> None:
     seed = a2.bounded_seed("source", "qwen3.6-27b")
     assert 0 <= seed < 2_147_483_647
+
+
+def test_prompt_forbids_merging_separate_ingredients() -> None:
+    source = SimpleNamespace(
+        category="Товары для животных",
+        name1="Корм с перепелкой",
+        name2="Корм с курицей, с печенью",
+        attributes2="{}",
+    )
+    system = a2.build_messages(source, explicit_cache=False)[0]["content"]
+    assert "с куриной печенью" in system

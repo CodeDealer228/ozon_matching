@@ -7,6 +7,8 @@ param(
     [int]$Workers = 6,
     [int]$TargetPerCategory = 10000,
     [int]$MaxNewSourcesPerCategory = 0,
+    [string]$OutputDir = '',
+    [string]$ExcludeOutputDir = '',
     [switch]$DryRun
 )
 
@@ -52,6 +54,12 @@ try {
     )
     if ($MaxNewSourcesPerCategory -gt 0) {
         $arguments += @('--max-new-sources-per-category', $MaxNewSourcesPerCategory)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
+        $arguments += @('--output-dir', $OutputDir)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExcludeOutputDir)) {
+        $arguments += @('--exclude-output-dir', $ExcludeOutputDir)
     }
     if ($DryRun) {
         $arguments += '--dry-run'
