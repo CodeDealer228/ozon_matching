@@ -295,7 +295,7 @@ def main() -> None:
     write_lock = Lock()
     print_lock = Lock()
 
-    def process_row(position: int, row: object) -> None:
+    def process_row(position: int, row: object) -> str:
         identity = str(row.opportunity_sha256)
         payload = payload_by_index[int(row.pilot_row_index)]
         request_seed = args.seed + int(hashlib.sha256(identity.encode()).hexdigest()[:8], 16)
@@ -378,13 +378,16 @@ def main() -> None:
                 f"[{position}/{len(planned)}] {row.rule_id}: {record['request_status']}",
                 flush=True,
             )
+        return str(record["request_status"])
 
     indexed = list(enumerate(planned, 1))
     parallel_start = 0
+    aborted_after_warmup_error = False
     if indexed and explicit_cache:
-        process_row(*indexed[0])
+        first_status = process_row(*indexed[0])
         parallel_start = 1
-    work = indexed[parallel_start:]
+        aborted_after_warmup_error = first_status == "error"
+    work = [] if aborted_after_warmup_error else indexed[parallel_start:]
     if work:
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = [executor.submit(process_row, *value) for value in work]
@@ -480,6 +483,7 @@ def main() -> None:
         ),
         "reject_reasons": dict(sorted(rejects.items())),
         "uncertain_submissions": len(uncertain_after),
+        "aborted_after_warmup_error": aborted_after_warmup_error,
         "usage": usage,
         "automatic_retries": 0,
         "enable_thinking": False,
