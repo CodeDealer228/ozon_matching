@@ -1,11 +1,16 @@
 # A2 head-only ablation: итог эксперимента
 
-Дата: 2026-08-25  
-Kaggle kernel: `rvitvitskii/frida-a2-head-ablation`, version 2  
-Public sanitized results kernel:
-`rvitvitskii/frida-a2-head-ablation-public-validation-results`, version 2
+Дата: 2026-08-25
 
-Kernel commit: `b79ba0f`
+## Ссылки
+
+- [Публичный Kaggle kernel с validation-метриками, version 2](https://www.kaggle.com/code/rvitvitskii/frida-a2-head-ablation-public-validation-results)
+- [Приватный Kaggle training kernel, version 2](https://www.kaggle.com/code/rvitvitskii/frida-a2-head-ablation)
+- [Точный training-код рабочего запуска](https://github.com/CodeDealer228/ozon_matching/blob/b79ba0f/kaggle_kernels/frida-a2-head-ablation/frida_a2_head_ablation.py)
+- [Commit с исправлением рабочего training kernel `b79ba0f`](https://github.com/CodeDealer228/ozon_matching/commit/b79ba0f)
+- [Код публичного validation-results kernel](https://github.com/CodeDealer228/ozon_matching/blob/debd088/kaggle_kernels/frida-a2-head-ablation-public-results/frida_a2_head_ablation_public_results.py)
+- [Этот итоговый отчёт в ветке `synthetic`](https://github.com/CodeDealer228/ozon_matching/blob/synthetic/synthetic_research/A2_HEAD_ABLATION_RESULT_2026-08-25.md)
+- [Приватный Kaggle dataset с A2 training set](https://www.kaggle.com/datasets/rvitvitskii/a2-training-set-v1) — требуется доступ владельца
 
 ## Краткий вывод
 
