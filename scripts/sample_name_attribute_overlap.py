@@ -1,4 +1,4 @@
-"""Sample items and print title facts confirmed by attribute values.
+"""Sample human pairs and print intersections of item fact lemmas.
 
 Requires: pip install pymorphy3
 """
@@ -45,31 +45,39 @@ def lemma_set(text: object) -> set[str]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--items", type=Path, default=Path("data/items_human.parquet"))
+    parser.add_argument("--pairs", type=Path, default=Path("data/matches.parquet"))
     parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260825)
     parser.add_argument("--max-attributes-chars", type=int, default=1000)
     args = parser.parse_args()
 
-    items = pd.read_parquet(args.items, columns=["id", "category", "name", "attributes"])
-    sample = items[
-        items["name"].notna()
-        & items["attributes"].notna()
-        & items["attributes"].str.len().le(args.max_attributes_chars)
-    ].sample(args.count, random_state=args.seed)
-    for row in sample.itertuples(index=False):
+    items = pd.read_parquet(args.items, columns=["id", "category", "name", "attributes"]).set_index("id")
+    pairs = pd.read_parquet(args.pairs, columns=["id1", "id2", "target"]).sample(frac=1, random_state=args.seed)
+    shown = 0
+    for pair in pairs.itertuples(index=False):
+        if pair.id1 not in items.index or pair.id2 not in items.index:
+            continue
+        left, right = items.loc[pair.id1], items.loc[pair.id2]
+        if any(not isinstance(value, str) or len(value) > args.max_attributes_chars for value in (left["attributes"], right["attributes"])):
+            continue
         try:
-            attributes = json.loads(row.attributes)
+            left_values = " ".join(flatten_values(json.loads(left["attributes"])))
+            right_values = " ".join(flatten_values(json.loads(right["attributes"])))
         except json.JSONDecodeError:
             continue
-        name_tokens = lemma_set(row.name)
-        attribute_tokens = lemma_set(" ".join(flatten_values(attributes)))
+        left_tokens = lemma_set(f"{left['name']} {left_values}")
+        right_tokens = lemma_set(f"{right['name']} {right_values}")
         print(
-            f"\n{'=' * 80}\nid={row.id} | {row.category}\n"
-            f"Название: {row.name}\nАтрибуты: {row.attributes}\n"
-            f"Леммы названия: {sorted(name_tokens)}\n"
-            f"Леммы значений attributes: {sorted(attribute_tokens)}\n"
-            f"Пересечение: {sorted(name_tokens & attribute_tokens)}"
+            f"\n{'=' * 80}\ntarget={pair.target}\n"
+            f"Item 1: id={pair.id1} | {left['category']}\nНазвание: {left['name']}\nАтрибуты: {left['attributes']}\n"
+            f"\nItem 2: id={pair.id2} | {right['category']}\nНазвание: {right['name']}\nАтрибуты: {right['attributes']}\n"
+            f"\nПересечение лемм ({len(left_tokens & right_tokens)}): {sorted(left_tokens & right_tokens)}"
         )
+        shown += 1
+        if shown == args.count:
+            break
+    if shown != args.count:
+        raise RuntimeError(f"Found only {shown} valid pairs")
 
 
 if __name__ == "__main__":
