@@ -21,9 +21,11 @@ def flatten_values(value: object) -> list[str]:
 
 def token_set(text: object) -> set[str]:
     normalized = unicodedata.normalize("NFKC", str(text or "")).lower().replace("ё", "е")
+    normalized = re.sub(r"(?<=\d),(?=\d)", ".", normalized)
     return {
-        token.replace(",", ".")
-        for token in re.findall(r"\d+[.,]\d+|[0-9a-zа-я]+", normalized)
+        token
+        for token in normalized.replace("(", " ").replace(")", " ").replace("\n", " ").split(" ")
+        if token
     }
 
 
