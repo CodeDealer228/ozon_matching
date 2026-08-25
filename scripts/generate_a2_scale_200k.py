@@ -31,6 +31,7 @@ EXPECTED_VAL_FINGERPRINT = "847d04d081432cc081c2149b75271547bf5e25b14f9d8a580470
 EXPECTED_CATEGORY_COUNT = 20
 PROFILE = "a2_v4_all_categories_natural_two_candidate_rotating_models"
 PROMPT_VERSION = 2
+VALIDATOR_VERSION = 2
 MAX_ATTRIBUTES_CHARS = 3000
 MAX_COMPLETION_TOKENS = 512
 
@@ -224,6 +225,26 @@ def validate_candidate(row: object, candidate: str) -> tuple[bool, list[str], di
     if len(original_words) >= 3 and retention < 0.35:
         reasons.append("too_little_b_content_retained")
 
+    # Reject only a meaningful word visibly copied from A when neither B's
+    # title nor B's attributes support it.  This catches identity drift such
+    # as adding "oversize" from A, without a handcrafted stopword list and
+    # without rejecting ordinary inflection changes.
+    a_content = {token for token in word_tokens(title_a) if token.isalpha() and len(token) >= 5}
+    b_title_content = {token for token in word_tokens(original) if token.isalpha() and len(token) >= 5}
+    b_evidence = b_title_content | {
+        token for token in word_tokens(attrs_b) if token.isalpha() and len(token) >= 5
+    }
+    copied_a_only_words = sorted(
+        token
+        for token in candidate_words
+        if len(token) >= 5
+        and not _stem_supported(token, b_title_content)
+        and _stem_supported(token, a_content)
+        and not _stem_supported(token, b_evidence)
+    )
+    if copied_a_only_words:
+        reasons.append("copied_a_only_unsupported_word")
+
     candidate_tokens = word_tokens(candidate)
     repetition = 0.0
     if candidate_tokens:
@@ -236,6 +257,7 @@ def validate_candidate(row: object, candidate: str) -> tuple[bool, list[str], di
         "copied_a_only_numeric_mentions": copied_a_numbers,
         "missing_identifiers": missing_ids,
         "copied_a_only_identifiers": copied_a_ids,
+        "copied_a_only_unsupported_words": copied_a_only_words,
         "b_content_retention": retention,
         "max_token_repetition": repetition,
         "old_similarity_to_a": SequenceMatcher(None, normalize(title_a), original_normalized).ratio(),
@@ -415,9 +437,9 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=REPO_ROOT / "artifacts/synthetic_v2/a2_scale_200k/generation_v2",
+        default=REPO_ROOT / "artifacts/synthetic_v2/a2_scale_200k/generation_v3",
     )
-    parser.add_argument("--exclude-output-dir", type=Path)
+    parser.add_argument("--exclude-output-dir", type=Path, action="append", default=[])
     parser.add_argument("--target-per-category", type=int, default=10_000)
     parser.add_argument("--max-new-sources-per-category", type=int)
     parser.add_argument("--workers", type=int, default=6)
@@ -486,6 +508,7 @@ def main() -> None:
     config = {
         "profile": PROFILE,
         "prompt_version": PROMPT_VERSION,
+        "validator_version": VALIDATOR_VERSION,
         "source_pool_sha256": source_sha,
         "model_registry_sha256": registry_sha,
         "canonical_split_sha256": EXPECTED_SPLIT_SHA256,
@@ -499,23 +522,23 @@ def main() -> None:
         "max_completion_tokens": MAX_COMPLETION_TOKENS,
         "automatic_retries": 0,
         "explicit_cache": not args.no_explicit_cache,
-        "excluded_output_identity": None,
+        "excluded_output_identities": [],
     }
     externally_excluded: set[str] = set()
-    if args.exclude_output_dir:
-        exclude_dir = args.exclude_output_dir.resolve()
+    for exclude_value in args.exclude_output_dir:
+        exclude_dir = exclude_value.resolve()
         exclude_raw = exclude_dir / "raw_responses.jsonl"
         exclude_journal = exclude_dir / "request_journal.jsonl"
         for record in read_jsonl(exclude_raw):
             externally_excluded.add(str(record["source_orientation_sha256"]))
         for event in read_jsonl(exclude_journal):
             externally_excluded.add(str(event["source_orientation_sha256"]))
-        config["excluded_output_identity"] = {
+        config["excluded_output_identities"].append({
             "path_name": exclude_dir.name,
             "excluded_sources": len(externally_excluded),
             "raw_responses_sha256": file_sha256(exclude_raw) if exclude_raw.is_file() else None,
             "request_journal_sha256": file_sha256(exclude_journal) if exclude_journal.is_file() else None,
-        }
+        })
     if config_path.is_file() and json.loads(config_path.read_text(encoding="utf-8")) != config:
         raise RuntimeError("Generation config differs from existing output identity")
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

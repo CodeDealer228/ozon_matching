@@ -8,7 +8,7 @@ param(
     [int]$TargetPerCategory = 10000,
     [int]$MaxNewSourcesPerCategory = 0,
     [string]$OutputDir = '',
-    [string]$ExcludeOutputDir = '',
+    [string[]]$ExcludeOutputDir = @(),
     [switch]$DryRun
 )
 
@@ -58,8 +58,10 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
         $arguments += @('--output-dir', $OutputDir)
     }
-    if (-not [string]::IsNullOrWhiteSpace($ExcludeOutputDir)) {
-        $arguments += @('--exclude-output-dir', $ExcludeOutputDir)
+    foreach ($excludedDir in $ExcludeOutputDir) {
+        if (-not [string]::IsNullOrWhiteSpace($excludedDir)) {
+            $arguments += @('--exclude-output-dir', $excludedDir)
+        }
     }
     if ($DryRun) {
         $arguments += '--dry-run'

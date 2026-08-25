@@ -83,3 +83,24 @@ def test_prompt_forbids_merging_separate_ingredients() -> None:
     )
     system = a2.build_messages(source, explicit_cache=False)[0]["content"]
     assert "с куриной печенью" in system
+
+
+def test_rejects_unsupported_content_word_copied_from_a() -> None:
+    source = row(
+        "Лонгслив женский оверсайз",
+        "Кардиган Koton",
+        '{"Пол":"женский","Цвет":"черный"}',
+    )
+    accepted, reasons, _ = a2.validate_candidate(source, "Кардиган Koton женский оверсайз")
+    assert not accepted
+    assert "copied_a_only_unsupported_word" in reasons
+
+
+def test_accepts_content_word_supported_by_b_attributes() -> None:
+    source = row(
+        "Лонгслив женский черный",
+        "Кардиган Koton",
+        '{"Пол":"женский","Цвет":"черный"}',
+    )
+    accepted, reasons, _ = a2.validate_candidate(source, "Кардиган Koton женский черный")
+    assert accepted, reasons
