@@ -29,6 +29,29 @@ def token_set(text: object) -> set[str]:
     }
 
 
+def token_set_without_word_commas(text: object) -> set[str]:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower().replace("ё", "е")
+    normalized = re.sub(r"(?<=\d),(?=\d)", ".", normalized).replace(",", " ")
+    return {
+        token
+        for token in normalized.replace("(", " ").replace(")", " ").replace("\n", " ").split(" ")
+        if token
+    }
+
+
+def token_set_without_quotes(text: object) -> set[str]:
+    return token_set(str(text or "").replace("«", "").replace("»", "").replace('"', ""))
+
+
+def candidate_intersections(left: object, right: object) -> dict[str, list[str]]:
+    tokenizers = {
+        "current": token_set,
+        "without_word_commas": token_set_without_word_commas,
+        "without_quotes": token_set_without_quotes,
+    }
+    return {name: sorted(tokenizer(left) & tokenizer(right)) for name, tokenizer in tokenizers.items()}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--items", type=Path, default=Path("data/items_human.parquet"))
@@ -55,13 +78,17 @@ def main() -> None:
             right_values = " ".join(flatten_values(json.loads(right["attributes"])))
         except json.JSONDecodeError:
             continue
-        left_tokens = token_set(f"{left['name']} {left_values}")
-        right_tokens = token_set(f"{right['name']} {right_values}")
+        intersections = candidate_intersections(
+            f"{left['name']} {left_values}", f"{right['name']} {right_values}"
+        )
         reports.append(
             f"\n{'=' * 80}\ntarget={pair.target}\n"
             f"id_1={pair.id1} | category_1={left['category']}\nname_1: {left['name']}\nattr_1: {left['attributes']}\n"
             f"\nid_2={pair.id2} | category_2={right['category']}\nname_2: {right['name']}\nattr_2: {right['attributes']}\n"
-            f"\nПересечение токенов ({len(left_tokens & right_tokens)}): {sorted(left_tokens & right_tokens)}"
+            + "".join(
+                f"\nПересечение {name} ({len(tokens)}): {tokens}"
+                for name, tokens in intersections.items()
+            )
         )
         shown += 1
         if shown == args.count:

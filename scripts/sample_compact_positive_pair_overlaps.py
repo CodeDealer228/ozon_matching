@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from sample_name_attribute_overlap import flatten_values, token_set
+from sample_name_attribute_overlap import candidate_intersections, flatten_values
 
 
 def pair_char_count(left: object, right: object) -> int:
@@ -41,12 +41,17 @@ def main() -> None:
             right_values = " ".join(flatten_values(json.loads(right["attributes"])))
         except json.JSONDecodeError:
             continue
-        shared = sorted(token_set(f"{left['name']} {left_values}") & token_set(f"{right['name']} {right_values}"))
+        intersections = candidate_intersections(
+            f"{left['name']} {left_values}", f"{right['name']} {right_values}"
+        )
         reports.append(
             f"\n{'=' * 80}\ntarget={pair.target} | pair_chars={pair_chars}\n"
             f"id_1={pair.id1} | category_1={left['category']}\nname_1: {left['name']}\nattr_1: {left['attributes']}\n"
             f"\nid_2={pair.id2} | category_2={right['category']}\nname_2: {right['name']}\nattr_2: {right['attributes']}\n"
-            f"\nПересечение токенов ({len(shared)}): {shared}"
+            + "".join(
+                f"\nПересечение {name} ({len(tokens)}): {tokens}"
+                for name, tokens in intersections.items()
+            )
         )
         if len(reports) == args.count:
             break
