@@ -69,8 +69,8 @@ def main() -> None:
         right_tokens = lemma_set(f"{right['name']} {right_values}")
         print(
             f"\n{'=' * 80}\ntarget={pair.target}\n"
-            f"Item 1: id={pair.id1} | {left['category']}\nНазвание: {left['name']}\nАтрибуты: {left['attributes']}\n"
-            f"\nItem 2: id={pair.id2} | {right['category']}\nНазвание: {right['name']}\nАтрибуты: {right['attributes']}\n"
+            f"id_1={pair.id1} | category_1={left['category']}\nname_1: {left['name']}\nattr_1: {left['attributes']}\n"
+            f"\nid_2={pair.id2} | category_2={right['category']}\nname_2: {right['name']}\nattr_2: {right['attributes']}\n"
             f"\nПересечение лемм ({len(left_tokens & right_tokens)}): {sorted(left_tokens & right_tokens)}"
         )
         shown += 1
