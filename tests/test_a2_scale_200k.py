@@ -67,3 +67,8 @@ def test_provider_payload_has_attributes_b_but_no_ids() -> None:
     assert "attributes_b" in payload
     assert "111" not in payload
     assert "222" not in payload
+
+
+def test_seed_is_within_signed_32_bit_range() -> None:
+    seed = a2.bounded_seed("source", "qwen3.6-27b")
+    assert 0 <= seed < 2_147_483_647

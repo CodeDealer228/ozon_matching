@@ -48,6 +48,12 @@ def stable_hash(*values: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def bounded_seed(*values: object) -> int:
+    """Return a deterministic seed accepted by all registry models."""
+
+    return int(stable_hash(*values)[:8], 16) % 2_147_483_647
+
+
 def normalize(value: object) -> str:
     text = str(value or "").lower().replace("ё", "е")
     return " ".join(re.findall(r"[0-9a-zа-я]+", text))
@@ -529,7 +535,7 @@ def main() -> None:
 
     def request_one(row: object, model: str) -> dict[str, object]:
         source = str(row.source_orientation_sha256)
-        seed = int(stable_hash(source, model)[:8], 16)
+        seed = bounded_seed(source, model)
         append_jsonl(journal_path, {
             "event": "submitted", "source_orientation_sha256": source,
             "model": model, "submitted_at_unix": time.time(), "attempt_for_model": 1,
