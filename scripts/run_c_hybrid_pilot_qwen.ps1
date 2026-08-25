@@ -3,7 +3,7 @@ param(
     [string]$KeyFile = (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex-secrets\dashscope_api_key.dpapi'),
     [string]$BaseUrl = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     [string]$PythonExe = 'C:\Users\fitai\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
-    [string]$PyArrowPath = 'C:\Users\fitai\AppData\Local\Temp\codex_pyarrow_verify_24',
+    [string]$PyArrowPath = 'C:\Users\fitai\AppData\Local\Temp\codex_a2_pydeps',
     [int]$Workers = 6,
     [string]$OutputDir,
     [switch]$DryRun
