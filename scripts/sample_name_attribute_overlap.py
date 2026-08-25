@@ -52,7 +52,8 @@ def main() -> None:
     args = parser.parse_args()
 
     items = pd.read_parquet(args.items, columns=["id", "category", "name", "attributes"]).set_index("id")
-    pairs = pd.read_parquet(args.pairs, columns=["id1", "id2", "target"]).sample(frac=1, random_state=args.seed)
+    pairs = pd.read_parquet(args.pairs, columns=["id1", "id2", "target"])
+    pairs = pairs[pairs["target"].eq(1)].sample(frac=1, random_state=args.seed)
     shown = 0
     for pair in pairs.itertuples(index=False):
         if pair.id1 not in items.index or pair.id2 not in items.index:
