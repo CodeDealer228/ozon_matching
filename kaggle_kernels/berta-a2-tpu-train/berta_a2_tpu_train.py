@@ -186,6 +186,7 @@ def compact(cache, row):
 
 
 def allocate_pair_budget(a, b, budget):
+    if a + b <= budget: return a, b
     half = budget // 2
     if a <= half and b <= half: return a, b
     if a <= half: return a, budget - a
