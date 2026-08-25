@@ -14,7 +14,9 @@ identity-bearing признака товара. Например, исходна
 4. [`04_hybrid_local_audit_result.md`](04_hybrid_local_audit_result.md) —
    фактический результат локального аудита и состав первого пилота;
 5. [`05_hybrid_pilot_v1.md`](05_hybrid_pilot_v1.md) — точная исполняемая
-   спецификация первого пилота из 100 sources.
+   спецификация первого пилота из 100 sources;
+6. [`06_prompt_and_validator_v1.md`](06_prompt_and_validator_v1.md) — компактный
+   prompt и минимальный hard-safety validator.
 
 Текущая рекомендация — вариант 3 с ограничениями и очередностью из варианта 4.
 A2 и C не смешиваются до отдельных сравнительных training runs.
