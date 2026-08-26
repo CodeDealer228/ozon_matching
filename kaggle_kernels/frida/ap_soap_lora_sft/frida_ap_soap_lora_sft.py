@@ -17,6 +17,56 @@ compile surface by ~60x -- and SOAP_MAX_PRECOND_DIM is dropped from 1024 to 8 fo
 this run specifically (see below) so it degrades to plain decoupled Adam
 everywhere, deliberately removing eigh/qr (an already-confirmed TPU/XLA fragility
 via the argsort incident) as a variable while this hypothesis gets tested.
+
+libauc EVALUATED, NOT ADOPTED (2026-08-27)
+===========================================================================
+Checked whether the pip-installable `libauc` package (libauc.losses.
+AveragePrecisionLoss / libauc.losses.APLoss, libauc.optimizers.SOAP) could
+replace the custom StreamingAPLoss/SOAP below. Read both source files
+directly (pip install libauc==2.0.1, no --deps, then read losses/auc.py and
+optimizers/soap.py). Conclusion: keep the custom implementations. Concretely:
+
+  - `libauc.optimizers.SOAP` is NOT the same algorithm as this file's `SOAP`
+    class despite the shared name -- it is plain per-parameter Adam/SGD with
+    an optional epoch-decay regularizer (see its own `step()`: exp_avg/
+    exp_avg_sq, bias correction, addcdiv_ -- textbook Adam, no eigenbasis
+    anywhere). It optimizes libauc's own AveragePrecisionLoss specifically
+    (its docstring literally says so) and has nothing to do with the SOAP
+    paper (Vyas et al. 2409.11321, Shampoo-eigenbasis Adam) this file's own
+    `SOAP` class ports. Naming collision only -- adopting libauc's SOAP here
+    would silently drop the eigenbasis preconditioning entirely, the actual
+    point of using SOAP over plain Adam.
+  - `libauc.losses.AveragePrecisionLoss` (aliased `APLoss`) implements the
+    SAME algorithm family as this file's `StreamingAPLoss` (same paper, same
+    persistent per-row EMA state u_all/u_pos, same coefficient-times-
+    surrogate-loss construction) -- but its distributed-training path is
+    hardwired to `torch.distributed.nn.all_gather` (see its `forward`'s
+    `if self.distributed: ... torch.distributed.nn.all_gather(...)`), which
+    requires a `torch.distributed` process group. This project's TPU
+    replicas run under torch_xla/PJRT (`xmp.spawn`/`torch_xla.launch`), which
+    does NOT initialize `torch.distributed` -- there is no process group for
+    `is_distributed()` to find, so libauc's own distributed branch would
+    either silently take the single-device path (wrong: scores would never
+    be gathered across the 8 replicas, breaking the "one global category-
+    homogeneous batch" contract every other part of this kernel depends on)
+    or raise, depending on libauc's exact internals at that call. This
+    file's own `StreamingAPLoss` + `differentiable_all_gather` (see below)
+    already solves exactly this by hand-rolling the gather through
+    `xm.all_gather`/torch_xla's own autograd.Function pattern -- swapping in
+    libauc's loss would mean re-deriving that same TPU-specific plumbing
+    ANYWAY, while losing this file's own already-tested FP32 dtype
+    contracts, category-homogeneous anchor-position handling
+    (anchor_positions(), PER_CORE_POSITIVES), and reset_()/checkpoint
+    integration.
+  - Net: both libauc pieces are built for torch.distributed (GPU/NCCL)
+    training, not torch_xla/PJRT (TPU) training. The custom StreamingAPLoss/
+    SOAP pair below is a from-scratch TPU-native reimplementation of the
+    SAME underlying algorithms (same papers, same math) that already
+    accounts for this project's specific constraints (FP32 AP state despite
+    a BF16 forward, torch_xla's collective API instead of torch.distributed,
+    the argsort/eigh TPU fragility documented above). Migrating to libauc
+    would trade a working, project-tested implementation for one that needs
+    the same TPU-specific rework done again, for no algorithmic gain.
 """
 import copy
 import gc
@@ -96,6 +146,46 @@ AP_GAMMA = 0.9
 AP_SIGMOID_SCALE = 2.0
 AP_EPS = 1e-12
 
+LORA_PROBE_GRACE_STEPS = 8
+# REAL CRASH (2026-08-26, run #1, annkrasnoshchekova): the original
+# "LoRA parameter never changed" contract check ran at EXACTLY
+# start_step+2 and raised on a real, correctly-training run. Root cause,
+# worked out step by step:
+#   Step 1 (SOAP's own first-ever .step() call for EVERY parameter):
+#     only initializes GG/Q, applies NO update to anything (see SOAP.step's
+#     own "first-ever step only initializes GG/Q" comment) -- model
+#     unchanged after this call, for every parameter, by design.
+#   Step 2 (SOAP's second call): the FIRST real update lands for every
+#     parameter, using each parameter's OWN gradient from step 2's OWN
+#     backward pass -- which ran on step-1-frozen weights (step 1 updated
+#     nothing). LoRA's B matrix is zero-initialized (standard LoRA
+#     convention: the adapter starts as an exact identity), so dL/dB is
+#     already nonzero at step 2 (depends only on A_init and the batch) --
+#     B gets a real, nonzero update here. But dL/dA = scale * B^T @ dL/dy
+#     @ x^T is EXACTLY zero for as long as B is exactly zero (chain rule,
+#     not an approximation) -- and step 2's own forward pass still used
+#     the PRE-step-2 B (=0, untouched by step 1). So A's step-2 gradient
+#     is exactly 0 -> A's SOAP exp_avg/exp_avg_sq are built from an exact
+#     zero -> A's step-2 "update" is exactly 0, not just small.
+#   Step 3: NOW the forward pass finally sees the post-step-2 B (nonzero)
+#     for the first time -> dL/dA is finally nonzero -> A shows its first
+#     real, nonzero drift only after THIS step's optimizer.step() call.
+# So start_step+2 is PROVABLY, exactly one step too early for the LoRA-A
+# probe specifically (the head probe has no such zero-init gating and is
+# correctly checked at start_step+2, left unchanged below). FIX: check
+# across a grace WINDOW (start_step+2 .. start_step+1+LORA_PROBE_GRACE_
+# STEPS) instead of one hard step -- log every step's drift status
+# (diagnostics), confirm and stop checking as soon as ANY step in the
+# window shows real drift, and only raise once the window closes with
+# zero drift throughout. 8 steps gives 6 steps of margin beyond the
+# mathematically-proven earliest possible step (step 3) for real-world
+# noise (tiny warmup LR, bf16 forward rounding) while still catching the
+# actual failure this check defends against (PEFT + gradient checkpointing
+# silently dropping the whole gradient chain before it reaches ANY LoRA
+# matrix, which would leave A frozen forever, not just for one step) --
+# and stays cheap: a handful of small-tensor .cpu() syncs during the first
+# few seconds of a multi-hour run, same cost class as the smoke test's own
+# upfront checks.
 LOG_EVERY_STEPS = 20
 # Two real runs of this exact kernel got CANCEL_ACKNOWLEDGED (once at ~2h15m, once at
 # ~55m) with no error, no traceback, and Kaggle's own log capture going stale after only
@@ -1237,6 +1327,15 @@ def mp_fn(_index):
         if "lora_" in name and parameter.requires_grad
     )
     first_lora_probe = lora_probe_param.detach().cpu().clone()
+    lora_probe_confirmed = False
+    # See LORA_PROBE_GRACE_STEPS's own comment: A's gradient is PROVABLY
+    # exactly zero until B receives its own first real update (B is
+    # zero-init, dL/dA = scale*B^T@... = 0 while B=0), which itself only
+    # lands at start_step+2 (SOAP's first real step for every parameter,
+    # after step start_step+1's init-only step). So the window opens at
+    # start_step+2 (earliest step worth even checking) and must close by
+    # start_step+1+LORA_PROBE_GRACE_STEPS.
+    lora_probe_window_end = start_step + 1 + LORA_PROBE_GRACE_STEPS
     losses = []
     for offset, batch in enumerate(loader):
         global_step = start_step + offset
@@ -1257,27 +1356,45 @@ def mp_fn(_index):
             # SOAP's own first-ever step() call per parameter only initializes GG/Q and
             # applies no weight update (it must not precondition with the gradient that
             # built the basis) -- so the earliest step that can show real drift is the
-            # second one, not the first.
+            # second one, not the first. head.out has no zero-init gating (unlike LoRA's
+            # A matrix below), so it is correctly checked at this exact step.
             probe_after = model.classifier.out.weight.detach().cpu()
             changed = float((probe_after != first_probe).float().mean())
             max_delta = float((probe_after - first_probe).abs().max())
             if changed == 0.0 or max_delta == 0.0:
                 raise RuntimeError("real SOAP step changed no FP32 master weights")
-            # Head training alone doesn't prove LoRA is training -- PEFT + gradient
-            # checkpointing can silently drop every gradient before it reaches the encoder
-            # (see build_model_cpu's enable_input_require_grads note); catch that here,
-            # at step 2, instead of after hours of a head-only "LoRA" run.
+            log(rank, "DELTA", f"head.out changed={changed:.1%} max|delta|={max_delta:.3e}",
+                force=True)
+
+        # Head training alone doesn't prove LoRA is training -- PEFT + gradient
+        # checkpointing can silently drop every gradient before it reaches the encoder
+        # (see build_model_cpu's enable_input_require_grads note); catch that here
+        # instead of after hours of a head-only "LoRA" run. Checked over a GRACE WINDOW,
+        # not one hard step -- see LORA_PROBE_GRACE_STEPS's own comment for the exact
+        # math proving LoRA-A's first possible nonzero drift is one step later than
+        # head.out's (A's gradient is provably exactly zero until B, zero-init, receives
+        # its own first real update). Stops probing as soon as real drift is confirmed;
+        # only raises if the ENTIRE window closes with zero drift throughout.
+        if not lora_probe_confirmed and start_step + 2 <= final_step <= lora_probe_window_end:
             lora_after = lora_probe_param.detach().cpu()
             lora_changed = float((lora_after != first_lora_probe).float().mean())
             lora_max_delta = float((lora_after - first_lora_probe).abs().max())
-            if lora_changed == 0.0 or lora_max_delta == 0.0:
-                raise RuntimeError(
-                    f"LoRA parameter {lora_probe_name!r} never changed -- LoRA adapter is "
-                    "silently frozen"
-                )
-            log(rank, "DELTA", f"head.out changed={changed:.1%} max|delta|={max_delta:.3e}; "
-                f"lora[{lora_probe_name}] changed={lora_changed:.1%} "
-                f"max|delta|={lora_max_delta:.3e}", force=True)
+            if lora_changed > 0.0 and lora_max_delta > 0.0:
+                lora_probe_confirmed = True
+                log(rank, "DELTA", f"lora[{lora_probe_name}] changed={lora_changed:.1%} "
+                    f"max|delta|={lora_max_delta:.3e} confirmed at step={final_step:,} "
+                    f"({final_step - start_step}/{LORA_PROBE_GRACE_STEPS} steps into grace "
+                    "window)", force=True)
+            else:
+                log(rank, "DELTA_PROBE", f"lora[{lora_probe_name}] still unchanged at "
+                    f"step={final_step:,} ({final_step - start_step}/{LORA_PROBE_GRACE_STEPS} "
+                    "steps into grace window)", force=True)
+                if final_step == lora_probe_window_end:
+                    raise RuntimeError(
+                        f"LoRA parameter {lora_probe_name!r} never changed across the entire "
+                        f"{LORA_PROBE_GRACE_STEPS}-step grace window (steps {start_step + 2}.."
+                        f"{lora_probe_window_end}) -- LoRA adapter is silently frozen"
+                    )
 
         if final_step % LOG_EVERY_STEPS == 0:
             mean_loss = float(np.mean(losses[-LOG_EVERY_STEPS:]))
