@@ -9,9 +9,18 @@ import gc
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import time
 import traceback
 from pathlib import Path
+
+# Kaggle's TPU image does not include PEFT.  Install the exact version used by
+# this BERTA lineage before the module-level PEFT import; --no-deps preserves
+# the TPU image's already matched torch/transformers stack.
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install", "-q", "--no-deps", "peft==0.17.1",
+])
 
 import numpy as np
 import pandas as pd
