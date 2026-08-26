@@ -49,7 +49,7 @@ except Exception as exc:
     print(f"[WARN] optional torchao dispatcher patch failed: {exc}", flush=True)
 
 
-ARM = "C1"  # The only intended C1 -> T1 code change between kernel versions.
+ARM = "T1"  # The only intended C1 -> T1 code change between kernel versions.
 START = time.perf_counter()
 WORKING = Path("/kaggle/working")
 OUT = WORKING / f"berta_a2_tpu_{ARM.lower()}"
