@@ -117,6 +117,7 @@ import json
 import math
 import time
 import hashlib
+import resource
 import subprocess
 
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "polars", "peft"])
@@ -306,6 +307,36 @@ t_script_start = time.perf_counter()
 
 def _elapsed():
     return time.perf_counter() - t_script_start
+
+
+def _rss_mb():
+    """Peak (not current) resident-set size in MB so far this process, via
+    resource.getrusage -- the same direct-RSS-logging pattern this project's
+    own frida-percat-lora/frida-percat-lora-fullsft-last kernels adopted
+    after a real host-RAM OOM (SIGTERM -> BrokenProcessPool, no Python
+    traceback -- the exact failure signature rank-sft-a's own v1 hit,
+    see LLM_STABILIZER_FRACTION's docstring) made timing-only diagnosis
+    insufficient. ru_maxrss is cumulative-peak, monotonically increasing
+    for the process lifetime -- exactly what you want logged at every
+    stage transition to localize WHERE a slow memory climb happened,
+    since the crash itself leaves no Python-level evidence."""
+    try:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except Exception:
+        return -1.0
+
+
+def _log_stage(rank, stage, msg, t0=None, force=False):
+    """Like _log, but always appends peak RSS and (if t0 given) this
+    stage's own wall-clock duration -- use at every point where state
+    changes, a new object is created, a checkpoint is written, or a crash
+    is plausible (per direct instruction: log every such stage)."""
+    if rank != 0 and not force:
+        return
+    extra = f" rss={_rss_mb():.0f}MB"
+    if t0 is not None:
+        extra += f" dt={time.perf_counter() - t0:.1f}s"
+    print(f"[{_elapsed():8.1f}s][rank{rank}] {stage}: {msg}{extra}", flush=True)
 
 
 def _log(rank, stage, msg, force=False):
@@ -627,6 +658,7 @@ class FridaRankSftClassifier(nn.Module):
 
 
 def build_fresh_model(device, rank):
+    t0 = time.perf_counter()
     model = T5EncoderModel.from_pretrained(MODEL_NAME, dtype=torch.float32,
                                            attn_implementation="eager")
     model.gradient_checkpointing_enable(
@@ -635,21 +667,25 @@ def build_fresh_model(device, rank):
     for p in model.parameters():
         p.requires_grad = not USE_LORA_FALLBACK
     n_params = sum(p.numel() for p in model.parameters())
-    _log(rank, "MODEL", f"base built: {n_params:,} params (lora_fallback={USE_LORA_FALLBACK})",
-         force=True)
+    _log_stage(rank, "MODEL", f"base built: {n_params:,} params (lora_fallback={USE_LORA_FALLBACK})",
+              t0=t0, force=True)
     head = RankSftHead(hidden_dim)
     classifier = FridaRankSftClassifier(model, head)
 
     if USE_LORA_FALLBACK:
+        t0 = time.perf_counter()
         from peft import LoraConfig, get_peft_model
         lora_config = LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
                                  target_modules=LORA_TARGET_MODULES, bias="none")
         classifier.encoder = get_peft_model(classifier.encoder, lora_config)
         for p in classifier.classifier.parameters():
             p.requires_grad = True
-        _log(rank, "MODEL", "LoRA fallback ACTIVE -- base frozen, adapter+head trainable", force=True)
+        _log_stage(rank, "MODEL", "LoRA fallback ACTIVE -- base frozen, adapter+head trainable",
+                  t0=t0, force=True)
 
-    return classifier.to(device), hidden_dim
+    classifier = classifier.to(device)
+    _log_stage(rank, "MODEL", "moved to device", force=True)
+    return classifier, hidden_dim
 
 
 def make_param_groups(model, lr_scale=1.0):
@@ -839,9 +875,8 @@ def rebuild_rank_cache(model, human_train_frame, caches, pad_id, category_vocab,
         neg_ranks = ranks[len(pos_scores):]
         rank_tables[cat_id] = (pos_idx, neg_idx, pos_ranks, neg_ranks)
 
-    _log(rank, "RANKCACHE", f"rebuilt over {n:,} human-train rows in "
-                            f"{time.perf_counter() - t0:.1f}s, {len(rank_tables)}/"
-                            f"{len(category_vocab)} categories have both classes", force=True)
+    _log_stage(rank, "RANKCACHE", f"rebuilt over {n:,} human-train rows, {len(rank_tables)}/"
+                            f"{len(category_vocab)} categories have both classes", t0=t0, force=True)
     return rank_tables
 
 
@@ -865,6 +900,7 @@ def compute_metrics(probs, labels, categories, category_names):
 
 def evaluate(model, loader, valid_mask, device, category_names, world_size):
     model.eval()
+    t0 = time.perf_counter()
     all_logits, all_labels, all_categories = [], [], []
     mp_loader = pl_xla.MpDeviceLoader(loader, device)
     with torch.no_grad():
@@ -890,7 +926,7 @@ def evaluate(model, loader, valid_mask, device, category_names, world_size):
     categories_np = categories_g.cpu().numpy().astype(np.int64)[keep]
     macro, per_cat = compute_metrics(probs, labels_np, categories_np, category_names)
     model.train()
-    return {"macro_pr_auc": macro, "per_category": per_cat, "n": int(keep.sum())}
+    return {"macro_pr_auc": macro, "per_category": per_cat, "n": int(keep.sum()), "dt": time.perf_counter() - t0}
 
 
 # =====================================================================
@@ -914,6 +950,7 @@ def save_checkpoint(model, optimizer, scheduler, global_step, epoch, epoch_compl
                     val_macro_pr_auc, label, rank, val_per_category=None):
     if rank != 0:
         return
+    t0 = time.perf_counter()
     save_dir = os.path.join(OUTPUT_DIR, label)
     xm.mark_step()
     os.makedirs(save_dir, exist_ok=True)
@@ -944,8 +981,9 @@ def save_checkpoint(model, optimizer, scheduler, global_step, epoch, epoch_compl
             "bce_weight": BCE_WEIGHT,
             "use_lora_fallback": USE_LORA_FALLBACK,
         }, f, indent=2)
-    print(f"[SAVE] {label}: epoch={epoch} epoch_complete={epoch_complete} step={global_step} "
-          f"lr_scale={lr_scale} val_macro_pr_auc={val_macro_pr_auc}", flush=True)
+    _log_stage(rank, "SAVE", f"{label}: epoch={epoch} epoch_complete={epoch_complete} "
+                      f"step={global_step} lr_scale={lr_scale} val_macro_pr_auc={val_macro_pr_auc}",
+              t0=t0, force=True)
 
 
 # =====================================================================
@@ -1112,22 +1150,28 @@ def load_full_model_from_checkpoint(model, optimizer, checkpoint_dir, rank):
             _log(0, "WARN", f"[RESUME] optimizer state did not load ({type(e).__name__}: {e}) -- "
                             f"continuing with fresh AdamW state", force=True)
 
-    _log(rank, "RESUME", f"loaded {checkpoint_dir}, probe delta={delta:.2e}, "
+    _log_stage(rank, "RESUME", f"loaded {checkpoint_dir}, probe delta={delta:.2e}, "
                          f"optimizer_loaded={optimizer_loaded}", force=True)
     return delta
 
 
 def _load_shared_data():
-    print(f"[{_elapsed():8.1f}s][SETUP] loading all CPU-only data once, pre-fork ...", flush=True)
+    print(f"[{_elapsed():8.1f}s][SETUP] loading all CPU-only data once, pre-fork ..."
+          f" rss={_rss_mb():.0f}MB", flush=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    t0 = time.perf_counter()
     human_cache = load_v1_cache(HUMAN_CACHE_HINT, "human")
+    _log_stage(0, "SETUP", "human item cache loaded", t0=t0, force=True)
+    t0 = time.perf_counter()
     llm_cache = load_v1_cache(LLM_CACHE_HINT, "llm")
+    _log_stage(0, "SETUP", "llm item cache loaded", t0=t0, force=True)
     if human_cache["pad_id"] != llm_cache["pad_id"]:
         raise RuntimeError(f"[SETUP] pad_id differs between caches")
     caches = [human_cache, llm_cache]
     pad_id = human_cache["pad_id"]
 
+    t0 = time.perf_counter()
     split_path = _find_dataset_file(ITEM_SPLIT_PATH_HINT, "matches_item_disjoint_70_30_seed42.parquet")
     split_df = pl.read_parquet(split_path).to_pandas()
     category_vocab = sorted(split_df["category"].unique().tolist())
@@ -1139,17 +1183,22 @@ def _load_shared_data():
     val_fingerprint = hashlib.sha256(
         ",".join(f"{a}-{b}" for a, b in sorted(zip(human_val["id1"], human_val["id2"]))).encode("utf-8")
     ).hexdigest()[:16]
-    print(f"[{_elapsed():8.1f}s][SETUP] human(item-disjoint) train={len(human_train):,} "
-          f"val={len(human_val):,} val_fingerprint={val_fingerprint} categories={len(category_vocab)}",
-          flush=True)
+    _log_stage(0, "SETUP", f"human(item-disjoint) split loaded: train={len(human_train):,} "
+                          f"val={len(human_val):,} val_fingerprint={val_fingerprint} "
+                          f"categories={len(category_vocab)}", t0=t0, force=True)
 
+    t0 = time.perf_counter()
     human_train_frame = _build_frame(human_train["id1"], human_train["id2"], human_train["label"],
                                      human_train["cat_id"], 0, caches)
     val_frame = _build_frame(human_val["id1"], human_val["id2"], human_val["label"],
                              human_val["cat_id"], 0, caches)
     del split_df, human_val
     gc.collect()
+    _log_stage(0, "SETUP", f"human_train_frame + val_frame built "
+                          f"(human_train={len(human_train_frame['label']):,}, "
+                          f"val={len(val_frame['label']):,})", t0=t0, force=True)
 
+    t0 = time.perf_counter()
     llm_split_path = _find_dataset_file(LLM_SPLIT_PATH_HINT, "llm_train_val_split.parquet")
     llm_split_df = pl.read_parquet(llm_split_path).to_pandas()
     llm_split_df["cat_id"] = llm_split_df["category"].map(category_to_id).astype(np.int64)
@@ -1157,12 +1206,15 @@ def _load_shared_data():
     n_llm_total = len(llm_split_df)
     del llm_split_df
     gc.collect()
+    _log_stage(0, "SETUP", f"llm split loaded: llm_train(pre-subsample)={len(llm_train):,} "
+                          f"of n_llm_total={n_llm_total:,}", t0=t0, force=True)
 
     # char_len proxy: sum of item name+attribute char lengths is not
     # directly cached; use token-length (lengths array) as the char-len
     # stratification proxy -- monotonic with true char count for this
     # tokenizer/vocab and already available with zero extra cost (avoids
     # re-reading items.parquet's raw text just for a stratification axis).
+    t0 = time.perf_counter()
     llm_row1 = lookup_rows(llm_cache, llm_train["id1"].to_numpy(dtype=np.int64))
     llm_row2 = lookup_rows(llm_cache, llm_train["id2"].to_numpy(dtype=np.int64))
     llm_char_len_proxy = (llm_cache["lengths"][llm_row1].astype(np.int64)
@@ -1172,19 +1224,21 @@ def _load_shared_data():
     sel = stratified_llm_sample_v2(llm_train["target"].to_numpy(), llm_train["cat_id"].to_numpy(),
                                    llm_char_len_proxy, LLM_TRAIN_SUBSAMPLE_SIZE, SEED)
     llm_train = llm_train.iloc[sel].reset_index(drop=True)
-    print(f"[{_elapsed():8.1f}s][SETUP] llm-train subsampled (4-way stratified: category, "
-          f"pos-rate/target-level, label-balance, char-len proxy): {n_before:,} -> "
-          f"{len(llm_train):,} (requested {LLM_TRAIN_SUBSAMPLE_SIZE:,}, of {n_llm_total:,} total)",
-          flush=True)
+    _log_stage(0, "SETUP", f"llm-train subsampled (4-way stratified: category, "
+                          f"pos-rate/target-level, label-balance, char-len proxy): {n_before:,} -> "
+                          f"{len(llm_train):,} (requested {LLM_TRAIN_SUBSAMPLE_SIZE:,}, of "
+                          f"{n_llm_total:,} total)", t0=t0, force=True)
 
+    t0 = time.perf_counter()
     llm_train_frame = _build_frame(llm_train["id1"], llm_train["id2"], llm_train["target"],
                                    llm_train["cat_id"].to_numpy().astype(np.int64), 1, caches)
     del llm_train
     gc.collect()
 
     n_llm_train = len(llm_train_frame["label"])
-    print(f"[{_elapsed():8.1f}s][SETUP] human_train={len(human_train_frame['label']):,} "
-          f"(ranking scope) + llm_train={n_llm_train:,} (BCE-stabilizer-only scope)", flush=True)
+    _log_stage(0, "SETUP", f"llm_train_frame built: human_train={len(human_train_frame['label']):,} "
+                          f"(ranking scope) + llm_train={n_llm_train:,} (BCE-stabilizer-only scope)",
+              t0=t0, force=True)
 
     _SHARED.update(dict(
         caches=caches, pad_id=pad_id,
@@ -1194,7 +1248,7 @@ def _load_shared_data():
         val_fingerprint=val_fingerprint,
         n_llm_total=int(n_llm_total), n_llm_train=int(n_llm_train),
     ))
-    print(f"[{_elapsed():8.1f}s][SETUP] done -- ready for fork", flush=True)
+    _log_stage(0, "SETUP", "shared CPU data ready for fork", force=True)
 
 
 # =====================================================================
@@ -1216,7 +1270,7 @@ def _mp_fn(index):
     category_vocab = _SHARED["category_vocab"]
     n_categories = len(category_vocab)
 
-    _log(rank, "CONFIG", f"experiment={EXPERIMENT_NAME!r} world_size={world_size} "
+    _log_stage(rank, "CONFIG", f"experiment={EXPERIMENT_NAME!r} world_size={world_size} "
                          f"pair_max_length={PAIR_MAX_LENGTH} lr={LR} "
                          f"head_lr_peak={LR * HEAD_LR_PEAK_MULTIPLIER} bce_weight={BCE_WEIGHT} "
                          f"pos_fraction={POS_FRACTION_IN_BATCH} epochs={EPOCHS} "
@@ -1225,7 +1279,7 @@ def _mp_fn(index):
 
     model, hidden_dim = build_fresh_model(device, rank)
     total_batch = PER_CORE_TRAIN_BATCH * world_size
-    _log(rank, "BATCH", f"per_core_train={PER_CORE_TRAIN_BATCH} per_core_eval={PER_CORE_EVAL_BATCH} "
+    _log_stage(rank, "BATCH", f"per_core_train={PER_CORE_TRAIN_BATCH} per_core_eval={PER_CORE_EVAL_BATCH} "
                         f"total_train_batch={total_batch}", force=True)
 
     resume_dir, resume_state, is_same_experiment = _find_bce_checkpoint_source()
@@ -1234,11 +1288,12 @@ def _mp_fn(index):
                            "maxamsecret/frida-full-sft-w must be listed in dataset_sources")
     lr_scale = resume_state.get("lr_scale", 1.0) if is_same_experiment else 1.0
 
+    t0 = time.perf_counter()
     optimizer = torch.optim.AdamW(make_param_groups(model, lr_scale=lr_scale),
                                   weight_decay=WEIGHT_DECAY, betas=(0.9, 0.999), eps=1e-8)
     load_full_model_from_checkpoint(model, optimizer, resume_dir, rank)
-    _log(rank, "RESUME", f"source={'SAME experiment (own prior session)' if is_same_experiment else resume_dir} "
-                        f"is_same_experiment={is_same_experiment} lr_scale={lr_scale}", force=True)
+    _log_stage(rank, "RESUME", f"source={'SAME experiment (own prior session)' if is_same_experiment else resume_dir} "
+                        f"is_same_experiment={is_same_experiment} lr_scale={lr_scale}", t0=t0, force=True)
 
     n_train = len(human_train_frame["label"])
     steps_per_epoch = max(1, n_train // total_batch)
@@ -1254,9 +1309,9 @@ def _mp_fn(index):
         scheduler_path = os.path.join(resume_dir, "scheduler.pt")
         if os.path.isfile(scheduler_path):
             scheduler.load_state_dict(torch.load(scheduler_path, map_location="cpu"))
-            _log(rank, "RESUME", f"scheduler restored at step {scheduler.last_epoch}", force=True)
+            _log_stage(rank, "RESUME", f"scheduler restored at step {scheduler.last_epoch}", force=True)
 
-    _log(rank, "TRAIN", f"n_train(human, ranking scope)={n_train:,} steps/epoch={steps_per_epoch} "
+    _log_stage(rank, "TRAIN", f"n_train(human, ranking scope)={n_train:,} steps/epoch={steps_per_epoch} "
                         f"epoch_steps={epoch_steps} -> schedule_steps={total_steps} "
                         f"warmup={warmup_steps}", force=True)
 
@@ -1280,10 +1335,10 @@ def _mp_fn(index):
         try:
             save_checkpoint(model, optimizer, scheduler, global_step, epoch_num, False, lr_scale,
                             None, "last", rank)
-            _log(rank, "SAVE", f"quiet save ({reason}) epoch={epoch_num} step={global_step}",
+            _log_stage(rank, "SAVE", f"quiet save ({reason}) epoch={epoch_num} step={global_step}",
                  force=True)
         except Exception as e:
-            _log(rank, "ERROR", f"quiet save FAILED ({reason}): {type(e).__name__}: {e}", force=True)
+            _log_stage(rank, "ERROR", f"quiet save FAILED ({reason}): {type(e).__name__}: {e}", force=True)
 
     def do_full_checkpoint(epoch_num, label):
         nonlocal best_val
@@ -1292,9 +1347,9 @@ def _mp_fn(index):
             improved = m["macro_pr_auc"] > best_val
             if improved:
                 best_val = m["macro_pr_auc"]
-            _log(rank, "METRICS", f"{label}: epoch={epoch_num} step={global_step} "
+            _log_stage(rank, "METRICS", f"{label}: epoch={epoch_num} step={global_step} "
                                   f"val_macro_pr_auc={m['macro_pr_auc']:.4f} best={best_val:.4f} "
-                                  f"n_val={m['n']}", force=True)
+                                  f"n_val={m['n']} eval_dt={m['dt']:.1f}s", force=True)
             if rank == 0:
                 print(f"[METRICS] per_category: {json.dumps(m['per_category'], ensure_ascii=False)}",
                       flush=True)
@@ -1305,7 +1360,7 @@ def _mp_fn(index):
                                 m["macro_pr_auc"], "best", rank, val_per_category=m["per_category"])
             return True
         except Exception as e:
-            _log(rank, "ERROR", f"eval/checkpoint FAILED at epoch={epoch_num} step={global_step}: "
+            _log_stage(rank, "ERROR", f"eval/checkpoint FAILED at epoch={epoch_num} step={global_step}: "
                                 f"{type(e).__name__}: {e}", force=True)
             if rank == 0:
                 import traceback
@@ -1347,13 +1402,13 @@ def _mp_fn(index):
         loss.backward()
         xm.mark_step()
     except Exception:
-        _log(rank, "SMOKE", "FAILED during warm-up TRAIN step -- lower PER_CORE_TRAIN_BATCH "
+        _log_stage(rank, "SMOKE", "FAILED during warm-up TRAIN step -- lower PER_CORE_TRAIN_BATCH "
                             "(or flip USE_LORA_FALLBACK=True) and relaunch.", force=True)
         raise
     finally:
         optimizer.zero_grad(set_to_none=True)
-    _log(rank, "SMOKE", f"warm-up TRAIN step OK ({time.perf_counter() - t0:.1f}s, "
-                        f"loss={loss.item():.4f}, discarded)", force=True)
+    _log_stage(rank, "SMOKE", f"warm-up TRAIN step OK (loss={loss.item():.4f}, discarded)",
+              t0=t0, force=True)
 
     _log(rank, "SMOKE", f"warm-up EVAL step (batch={PER_CORE_EVAL_BATCH})", force=True)
     t0 = time.perf_counter()
@@ -1364,12 +1419,12 @@ def _mp_fn(index):
             model(input_ids=input_ids, attention_mask=attention_mask)
             xm.mark_step()
     except Exception:
-        _log(rank, "SMOKE", "FAILED during warm-up EVAL step -- lower PER_CORE_EVAL_BATCH.",
+        _log_stage(rank, "SMOKE", "FAILED during warm-up EVAL step -- lower PER_CORE_EVAL_BATCH.",
              force=True)
         raise
     finally:
         model.train()
-    _log(rank, "SMOKE", f"warm-up EVAL step OK ({time.perf_counter() - t0:.1f}s)", force=True)
+    _log_stage(rank, "SMOKE", "warm-up EVAL step OK", t0=t0, force=True)
 
     # Initial rank-cache build BEFORE any real training step, so step 1
     # already has real (not all-zero/uniform) hardness weights and a real
@@ -1384,7 +1439,7 @@ def _mp_fn(index):
     for epoch in range(1, EPOCHS + 1):
         if stopped:
             break
-        _log(rank, "EPOCH", f"starting epoch {epoch}/{EPOCHS}", force=True)
+        _log_stage(rank, "EPOCH", f"starting epoch {epoch}/{EPOCHS}", force=True)
         cat_cycle = rng.permutation(n_categories)
         cat_cursor = 0
 
@@ -1489,7 +1544,7 @@ def _mp_fn(index):
                 consecutive_step_failures = 0
             except Exception as e:
                 consecutive_step_failures += 1
-                _log(rank, "WARN", f"step failed and was skipped "
+                _log_stage(rank, "WARN", f"step failed and was skipped "
                                    f"({consecutive_step_failures}/{MAX_CONSECUTIVE_STEP_FAILURES} "
                                    f"consecutive): {type(e).__name__}: {e}")
                 try:
@@ -1512,7 +1567,8 @@ def _mp_fn(index):
                     print(f"[{_elapsed():8.1f}s] epoch={epoch} step={global_step}/{total_steps} "
                           f"cat={category_vocab[category_id]!r} loss={loss.item():.4f} "
                           f"loss_rank={loss_rank.item():.4f} loss_bce={loss_bce.item():.4f} "
-                          f"lr_backbone={scheduler.get_last_lr()[0]:.2e} elapsed_train={et:.0f}s",
+                          f"lr_backbone={scheduler.get_last_lr()[0]:.2e} elapsed_train={et:.0f}s "
+                          f"rss={_rss_mb():.0f}MB",
                           flush=True)
 
             elapsed_train = time.perf_counter() - train_start
@@ -1527,7 +1583,7 @@ def _mp_fn(index):
                 next_rank_cache_step = global_step + steps_per_half_epoch
 
             if elapsed_train > MAX_TRAIN_SECONDS:
-                _log(rank, "TRAIN", f"wall-clock cutoff ({elapsed_train:.0f}s > {MAX_TRAIN_SECONDS}s) "
+                _log_stage(rank, "TRAIN", f"wall-clock cutoff ({elapsed_train:.0f}s > {MAX_TRAIN_SECONDS}s) "
                                     f"-- stopping mid-epoch.", force=True)
                 do_quiet_save("wall-clock cutoff", epoch)
                 stopped = True
@@ -1539,7 +1595,7 @@ def _mp_fn(index):
         last_checkpoint_at = time.perf_counter() - train_start
         model.train()
 
-    _log(rank, "DONE", f"total wall-clock {_elapsed():.0f}s best_val_macro_pr_auc={best_val:.4f}",
+    _log_stage(rank, "DONE", f"total wall-clock {_elapsed():.0f}s best_val_macro_pr_auc={best_val:.4f}",
          force=True)
 
 
