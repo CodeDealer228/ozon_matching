@@ -291,6 +291,77 @@ CHECKPOINT_EVERY_SECONDS = 3600   # "сохраняем тихие чекпои�
                                    # per direct PROMPT.md instruction
 LOG_EVERY_STEPS = 50
 MAX_CONSECUTIVE_STEP_FAILURES = 20
+SYNC_SLOW_WARN_SECONDS = 8.0
+                                  # REAL CRASH #3 (2026-08-26, v3): the ONLY
+                                  # xm.mark_step() in the whole per-step
+                                  # training loop lived inside
+                                  # `if global_step % LOG_EVERY_STEPS == 0`
+                                  # (i.e. once every 50 steps), so each call
+                                  # had to compile+execute an ACCUMULATED
+                                  # 50-step lazy XLA graph (50x forward+
+                                  # backward+xm.optimizer_step, the latter
+                                  # itself an internal gradient all-reduce
+                                  # collective, so this was actually 50
+                                  # bundled collectives too) in one shot.
+                                  # v3's own log confirms this exactly: all
+                                  # 8 replicas printed identical "EPOCH:
+                                  # starting epoch 1/5" at 510.4s (the
+                                  # cat_rng fix's own lockstep control flow
+                                  # working correctly), then EIGHT identical
+                                  # "script.py:1598 DeprecationWarning"
+                                  # lines (the OLD every-50-steps mark_step)
+                                  # at ~587s, then ZERO further output --
+                                  # not even the very first "step=50/19340"
+                                  # print, which sits AFTER that mark_step
+                                  # call and therefore proves the hang was
+                                  # INSIDE mark_step itself, materializing
+                                  # that 50-step mega-graph -- for 544
+                                  # seconds until an external SIGTERM with
+                                  # no Python traceback (BrokenProcessPool
+                                  # downstream). This project's own proven
+                                  # kernels (full_sft_continue et al) never
+                                  # hit this because their MpDeviceLoader-
+                                  # based loops sync every batch for free
+                                  # (parallel_loader.py's own next() calls
+                                  # torch_xla.sync() internally -- see
+                                  # full_sft_continue's SIXTH REAL CRASH
+                                  # section); rank-sft-a's hand-rolled
+                                  # category-batched batch construction has
+                                  # no such loader-level sync, so it needs
+                                  # the same per-step discipline done
+                                  # EXPLICITLY. FIX: xm.mark_step() (via the
+                                  # _xla_sync() helper below, which also
+                                  # times and logs every call) now runs
+                                  # after EVERY optimizer step, not every
+                                  # LOG_EVERY_STEPS -- each call only ever
+                                  # has to materialize ONE step's graph,
+                                  # bounded and small, exactly the shape the
+                                  # smoke test already proves compiles in
+                                  # ~14s cold / well under a second warm.
+                                  # SYNC_SLOW_WARN_SECONDS flags any sync
+                                  # that takes anomalously long (excluding
+                                  # the expected one-time first-few-steps
+                                  # compile) so a REAL CRASH #4, whatever it
+                                  # turns out to be, leaves a loud, specific
+                                  # log line instead of silence.
+SYNC_WARMUP_STEPS_NO_WARN = 3
+                                  # the first few real steps legitimately
+                                  # include a one-time XLA compile (distinct
+                                  # from the smoke test's own separate
+                                  # compile, since real per-step batch
+                                  # content differs) -- don't flag those as
+                                  # SYNC_SLOW.
+COLLECTIVE_HEARTBEAT_SECONDS = 15.0
+                                  # rebuild_rank_cache()/evaluate() each run
+                                  # a multi-minute, previously SILENT
+                                  # inference loop (169s in v3's own log,
+                                  # with zero intermediate output) before
+                                  # their own final summary line -- if this
+                                  # ever hangs instead of merely running
+                                  # long, there is currently no way to tell
+                                  # the difference from the log alone. A
+                                  # periodic heartbeat during that loop
+                                  # closes that gap.
 
 PROJECTED_ROWS_PER_SEC = 100      # conservative guess: AdamW's extra state
                                    # traffic + the rank-cache forward passes
@@ -342,6 +413,98 @@ def _log_stage(rank, stage, msg, t0=None, force=False):
 def _log(rank, stage, msg, force=False):
     if rank == 0 or force:
         print(f"[{_elapsed():8.1f}s][rank{rank}] {stage}: {msg}", flush=True)
+
+
+# _SYNC_STATE is module-global (not per-rank-indexed -- each forked replica
+# gets its own process-local copy after torch_xla.launch's fork, so a plain
+# module dict is already per-replica in practice) tracking how many real
+# xm.mark_step() calls this replica has made, so the first few (expected,
+# one-time-compile) syncs don't trigger a false SYNC_SLOW warning.
+_SYNC_STATE = {"n_syncs": 0}
+
+
+def _xla_sync(xm_mod, rank, stage, log_every=False):
+    """Materializes the current lazily-accumulated XLA graph via
+    xm.mark_step(), with explicit enter/exit logging and duration tracking.
+
+    See SYNC_SLOW_WARN_SECONDS's own comment for the REAL CRASH #3 this
+    replaces (mark_step called only once per 50 steps -> one mark_step call
+    had to compile+execute an accumulated 50-step mega-graph -> 544s of
+    silence -> external SIGTERM, no traceback). Calling this after EVERY
+    step keeps each individual xm.mark_step() call bounded to one step's
+    graph -- but a bounded per-step sync can still, in principle, hang or
+    OOM on some later step for a DIFFERENT reason (a bigger batch shape
+    slipping through, a host-level memory leak, a future code change) --
+    the whole point of this helper is that if THAT ever happens again, the
+    log's last line is `SYNC: entering ... (stage)` naming exactly which
+    call site froze, not silence. `log_every=True` prints the enter/exit
+    pair unconditionally (use for one-off/rare sync points: smoke test,
+    save_checkpoint); `log_every=False` (the per-training-step default)
+    only prints when it's genuinely informative: the first few syncs
+    (one-time compile), any LOG_EVERY_STEPS-cadence step, or ANY sync that
+    is anomalously slow (SYNC_SLOW_WARN_SECONDS) regardless of cadence --
+    so a real problem is never silently absorbed into the "print nothing,
+    it's fine" majority case, while a healthy multi-thousand-step run
+    doesn't flood the log with one line per step.
+    """
+    n = _SYNC_STATE["n_syncs"]
+    is_warmup = n < SYNC_WARMUP_STEPS_NO_WARN
+    should_announce_enter = log_every or is_warmup
+    if should_announce_enter and rank == 0:
+        print(f"[{_elapsed():8.1f}s][rank{rank}] SYNC: entering xm.mark_step() "
+              f"({stage}, sync #{n})", flush=True)
+    t0 = time.perf_counter()
+    xm_mod.mark_step()
+    dt = time.perf_counter() - t0
+    _SYNC_STATE["n_syncs"] = n + 1
+    is_slow = (not is_warmup) and dt > SYNC_SLOW_WARN_SECONDS
+    if log_every or is_warmup or is_slow:
+        level = "SYNC_SLOW" if is_slow else ("SYNC_WARMUP" if is_warmup else "SYNC")
+        print(f"[{_elapsed():8.1f}s][rank{rank}] {level}: xm.mark_step() done "
+              f"({stage}, sync #{n}) dt={dt:.2f}s rss={_rss_mb():.0f}MB", flush=True)
+    return dt
+
+
+def _collective_lockstep_check(xm_mod, rank, device, local_value, stage):
+    """Defense-in-depth for REAL CRASH #2's failure class (2026-08-26, v2):
+    a per-replica control-flow divergence (there: different RNG streams
+    drawing different category permutations per replica) made global_step
+    (a per-replica LOCAL Python int) silently diverge rank-to-rank, so the
+    `if global_step >= next_rank_cache_step:` guard around
+    rebuild_rank_cache()'s own xm.all_gather() tripped on DIFFERENT wall-
+    clock steps on different replicas -- the replica(s) that arrived first
+    blocked forever waiting for the stragglers inside that collective,
+    silently, with no Python traceback (same externally-invisible SIGTERM
+    signature as every crash in this kernel's history). The per-epoch
+    category cycle is now driven by cat_rng (identically seeded on every
+    replica, see that variable's own comment) specifically to prevent this,
+    but this check is a cheap, ADDITIONAL trip-wire in front of every
+    remaining collective call site in this file: it all_reduce-SUMs
+    `local_value` (expected to be numerically IDENTICAL on every replica --
+    global_step here) and compares the sum against local_value*world_size;
+    any mismatch means at least one replica disagrees, and this raises with
+    a clear, attributable message INSTEAD of silently deadlocking in the
+    very next collective. The check itself is one more all_reduce, so it
+    cannot avoid a hang if replicas have ALREADY diverged so badly that even
+    entering this checkpoint itself differs across replicas (a
+    fundamentally different, structural bug) -- but for the actual failure
+    mode observed in this project (a local counter drifting by a few steps),
+    it converts a silent multi-hour stall into an immediate, named error.
+    """
+    tensor = torch.tensor([float(local_value)], dtype=torch.float64, device=device)
+    summed = xm_mod.all_reduce(xm_mod.REDUCE_SUM, tensor)
+    _xla_sync(xm_mod, rank, f"lockstep_check({stage})", log_every=True)
+    total = float(summed.cpu().item())
+    if local_value != 0:
+        inferred_world_size = total / local_value
+        if abs(inferred_world_size - round(inferred_world_size)) > 1e-6:
+            raise RuntimeError(
+                f"[rank{rank}] LOCKSTEP DIVERGENCE before {stage}: local_value={local_value} "
+                f"but all_reduce sum={total} is not an integer multiple of it -- at least one "
+                f"replica disagrees on {stage}'s control-flow state (see REAL CRASH #2). "
+                f"Stopping now instead of silently deadlocking in the next collective."
+            )
+    return total
 
 
 def _find_dataset_file(hint, filename):
@@ -835,18 +998,41 @@ def rebuild_rank_cache(model, human_train_frame, caches, pad_id, category_vocab,
     loader = DataLoader(dataset, batch_size=RANK_CACHE_BATCH, shuffle=False, drop_last=True,
                         collate_fn=collate_fn, num_workers=2)
     mp_loader = pl_xla.MpDeviceLoader(loader, device)  # SIXTH REAL CRASH fix, see docstring
+    n_batches_expected = len(loader)
+    _log_stage(rank, "RANKCACHE", f"starting inference pass over {n:,} rows "
+                             f"({n_batches_expected} batches of {RANK_CACHE_BATCH})", force=True)
 
     model.eval()
     all_logits = []
+    last_heartbeat = time.perf_counter()
     with torch.no_grad():
-        for input_ids, attention_mask, _labels, _cats, _scope in mp_loader:
+        for batch_idx, (input_ids, attention_mask, _labels, _cats, _scope) in enumerate(mp_loader):
             logits = model(input_ids=input_ids, attention_mask=attention_mask)
             all_logits.append(logits)
+            # COLLECTIVE_HEARTBEAT_SECONDS: this loop previously produced
+            # ZERO log output between "starting" and the final "rebuilt"
+            # line -- v3's own crash log showed a 169s gap here with no way
+            # to tell "still working" from "silently stuck" (this loop
+            # itself was NOT where v3's actual crash happened, but the same
+            # blind spot exists here and in evaluate() below, and either
+            # could hide a future hang the same way). A periodic heartbeat
+            # (wall-clock gated, not batch-count gated, so it fires at a
+            # predictable cadence regardless of per-batch speed) closes
+            # that gap for rank 0.
+            now = time.perf_counter()
+            if rank == 0 and now - last_heartbeat >= COLLECTIVE_HEARTBEAT_SECONDS:
+                print(f"[{_elapsed():8.1f}s][rank{rank}] RANKCACHE_HEARTBEAT: "
+                      f"batch {batch_idx + 1}/{n_batches_expected} "
+                      f"({(batch_idx + 1) / max(1, n_batches_expected) * 100:.0f}%) "
+                      f"elapsed={now - t0:.0f}s rss={_rss_mb():.0f}MB", flush=True)
+                last_heartbeat = now
     logits = torch.cat(all_logits, dim=0)
     valid = torch.as_tensor(shard_valid, dtype=torch.float32, device=device)
+    _log_stage(rank, "RANKCACHE", f"inference loop done, entering all_gather + sync "
+                             f"({time.perf_counter() - t0:.1f}s so far)", force=True)
     logits_g = xm.all_gather(logits, dim=0)
     valid_g = xm.all_gather(valid, dim=0)
-    xm.mark_step()
+    _xla_sync(xm, rank, "rebuild_rank_cache post-all_gather", log_every=True)
     model.train()
 
     keep = valid_g.cpu().numpy() > 0.5
@@ -898,27 +1084,42 @@ def compute_metrics(probs, labels, categories, category_names):
     return macro, per_cat
 
 
-def evaluate(model, loader, valid_mask, device, category_names, world_size):
+def evaluate(model, loader, valid_mask, device, category_names, world_size, rank=0):
     model.eval()
     t0 = time.perf_counter()
     all_logits, all_labels, all_categories = [], [], []
     mp_loader = pl_xla.MpDeviceLoader(loader, device)
+    n_batches_expected = len(loader)
+    _log_stage(rank, "EVAL", f"starting inference pass ({n_batches_expected} batches)", force=True)
+    last_heartbeat = time.perf_counter()
     with torch.no_grad():
-        for input_ids, attention_mask, batch_labels, batch_categories, _scope in mp_loader:
+        for batch_idx, (input_ids, attention_mask, batch_labels, batch_categories, _scope) in \
+                enumerate(mp_loader):
             logits = model(input_ids=input_ids.to(device), attention_mask=attention_mask.to(device))
             all_logits.append(logits)
             all_labels.append(batch_labels.to(device))
             all_categories.append(torch.as_tensor(batch_categories, device=device, dtype=torch.float32))
+            # Same COLLECTIVE_HEARTBEAT_SECONDS blind-spot fix as
+            # rebuild_rank_cache's own loop -- see that function's comment.
+            now = time.perf_counter()
+            if rank == 0 and now - last_heartbeat >= COLLECTIVE_HEARTBEAT_SECONDS:
+                print(f"[{_elapsed():8.1f}s][rank{rank}] EVAL_HEARTBEAT: "
+                      f"batch {batch_idx + 1}/{n_batches_expected} "
+                      f"({(batch_idx + 1) / max(1, n_batches_expected) * 100:.0f}%) "
+                      f"elapsed={now - t0:.0f}s rss={_rss_mb():.0f}MB", flush=True)
+                last_heartbeat = now
     logits = torch.cat(all_logits, dim=0)
     labels = torch.cat(all_labels, dim=0)
     categories = torch.cat(all_categories, dim=0)
     valid = torch.as_tensor(valid_mask, dtype=torch.float32, device=device)
 
+    _log_stage(rank, "EVAL", f"inference loop done, entering all_gather + sync "
+                        f"({time.perf_counter() - t0:.1f}s so far)", force=True)
     logits_g = xm.all_gather(logits, dim=0)
     labels_g = xm.all_gather(labels, dim=0)
     categories_g = xm.all_gather(categories, dim=0)
     valid_g = xm.all_gather(valid, dim=0)
-    xm.mark_step()
+    _xla_sync(xm, rank, "evaluate post-all_gather", log_every=True)
 
     keep = valid_g.cpu().numpy() > 0.5
     probs = torch.sigmoid(logits_g).cpu().numpy()[keep]
@@ -952,10 +1153,11 @@ def save_checkpoint(model, optimizer, scheduler, global_step, epoch, epoch_compl
         return
     t0 = time.perf_counter()
     save_dir = os.path.join(OUTPUT_DIR, label)
-    xm.mark_step()
+    _xla_sync(xm, rank, f"save_checkpoint({label})", log_every=True)
     os.makedirs(save_dir, exist_ok=True)
 
     encoder_to_save = model.encoder
+    t_io = time.perf_counter()
     torch.save({k: v.detach().cpu() for k, v in encoder_to_save.state_dict().items()},
               os.path.join(save_dir, "encoder.pt"))
     torch.save({k: v.detach().cpu() for k, v in model.classifier.state_dict().items()},
@@ -966,6 +1168,12 @@ def save_checkpoint(model, optimizer, scheduler, global_step, epoch, epoch_compl
     # scheduler.pt in real kernel output despite a clean-looking log line.
     torch.save(_to_cpu_state(optimizer.state_dict()), os.path.join(save_dir, "optimizer.pt"))
     torch.save(_to_cpu_state(scheduler.state_dict()), os.path.join(save_dir, "scheduler.pt"))
+    # Disk I/O logged separately from the sync above -- if a checkpoint
+    # save ever hangs (slow/degraded disk, disk-full mid-write), this is
+    # the specific stage that hung, distinguishable in the log from an XLA
+    # sync stall.
+    _log_stage(rank, "SAVE_IO", f"encoder+head+optimizer+scheduler written to {save_dir}",
+              t0=t_io, force=True)
 
     with open(os.path.join(save_dir, "train_state.json"), "w") as f:
         json.dump({
@@ -1375,7 +1583,7 @@ def _mp_fn(index):
     def do_full_checkpoint(epoch_num, label):
         nonlocal best_val
         try:
-            m = evaluate(model, val_loader, val_valid_mask, device, category_vocab, world_size)
+            m = evaluate(model, val_loader, val_valid_mask, device, category_vocab, world_size, rank)
             improved = m["macro_pr_auc"] > best_val
             if improved:
                 best_val = m["macro_pr_auc"]
@@ -1432,7 +1640,7 @@ def _mp_fn(index):
         loss_bce = bce_stabilizer(logits, fake_targets)
         loss = loss_rank + BCE_WEIGHT * loss_bce
         loss.backward()
-        xm.mark_step()
+        _xla_sync(xm, rank, "smoke_train_step", log_every=True)
     except Exception:
         _log_stage(rank, "SMOKE", "FAILED during warm-up TRAIN step -- lower PER_CORE_TRAIN_BATCH "
                             "(or flip USE_LORA_FALLBACK=True) and relaunch.", force=True)
@@ -1449,7 +1657,7 @@ def _mp_fn(index):
         input_ids, attention_mask = _synthetic_batch(PER_CORE_EVAL_BATCH, device)
         with torch.no_grad():
             model(input_ids=input_ids, attention_mask=attention_mask)
-            xm.mark_step()
+            _xla_sync(xm, rank, "smoke_eval_step", log_every=True)
     except Exception:
         _log_stage(rank, "SMOKE", "FAILED during warm-up EVAL step -- lower PER_CORE_EVAL_BATCH.",
              force=True)
@@ -1573,6 +1781,15 @@ def _mp_fn(index):
                 loss = loss_rank + BCE_WEIGHT * loss_bce
                 loss.backward()
                 xm.optimizer_step(optimizer)
+                # REAL CRASH #3 fix (see SYNC_SLOW_WARN_SECONDS's own
+                # comment): sync EVERY step, not every LOG_EVERY_STEPS, so
+                # each xm.mark_step() only ever has to materialize ONE
+                # step's graph instead of an accumulated 50-step one. This
+                # is the single most important line in this loop -- do not
+                # move it back inside the `% LOG_EVERY_STEPS == 0` guard.
+                stage_label = f"train_step epoch={epoch} step={global_step + 1}"
+                should_verbose_sync = (global_step + 1) % LOG_EVERY_STEPS == 0
+                sync_dt = _xla_sync(xm, rank, stage_label, log_every=should_verbose_sync)
                 scheduler.step()
                 global_step += 1
                 consecutive_step_failures = 0
@@ -1595,14 +1812,13 @@ def _mp_fn(index):
                 continue
 
             if global_step % LOG_EVERY_STEPS == 0:
-                xm.mark_step()
                 if rank == 0:
                     et = time.perf_counter() - train_start
                     print(f"[{_elapsed():8.1f}s] epoch={epoch} step={global_step}/{total_steps} "
                           f"cat={category_vocab[category_id]!r} loss={loss.item():.4f} "
                           f"loss_rank={loss_rank.item():.4f} loss_bce={loss_bce.item():.4f} "
                           f"lr_backbone={scheduler.get_last_lr()[0]:.2e} elapsed_train={et:.0f}s "
-                          f"rss={_rss_mb():.0f}MB",
+                          f"sync_dt={sync_dt:.2f}s rss={_rss_mb():.0f}MB",
                           flush=True)
 
             elapsed_train = time.perf_counter() - train_start
@@ -1612,6 +1828,15 @@ def _mp_fn(index):
                 model.train()
 
             if global_step >= next_rank_cache_step:
+                # Defense-in-depth trip-wire (see _collective_lockstep_check's
+                # own docstring for REAL CRASH #2): confirms every replica
+                # agrees on global_step BEFORE entering rebuild_rank_cache's
+                # own xm.all_gather collective, so a future control-flow
+                # divergence raises a named, attributable error here instead
+                # of silently deadlocking inside that collective.
+                _log_stage(rank, "LOCKSTEP", f"checking global_step={global_step} agreement "
+                                     f"across all replicas before rank-cache rebuild", force=True)
+                _collective_lockstep_check(xm, rank, device, global_step, "rebuild_rank_cache")
                 rank_tables = rebuild_rank_cache(model, human_train_frame, caches, pad_id,
                                                  category_vocab, device, world_size, rank, pools)
                 next_rank_cache_step = global_step + steps_per_half_epoch
