@@ -463,10 +463,19 @@ def main() -> None:
         )
         for candidate in candidates:
             left, right = items.loc[candidate["id1"]], items.loc[candidate["id2"]]
+            category_few_shots = [
+                *few_shots.get("__global__", []),
+                *few_shots.get(candidate["category"], []),
+            ]
             try:
                 completion = client.chat.completions.create(
                     model=args.model,
-                    messages=build_messages(left, right, candidate["offered_tokens"], few_shots.get(candidate["category"], [])),
+                    messages=build_messages(
+                        left,
+                        right,
+                        candidate["offered_tokens"],
+                        category_few_shots,
+                    ),
                     tools=[decision_tool(candidate["offered_tokens"], args.max_replacements)],
                     tool_choice={"type": "function", "function": {"name": TOOL_NAME}},
                     temperature=0.1,
