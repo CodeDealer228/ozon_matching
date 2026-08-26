@@ -291,6 +291,46 @@ CHECKPOINT_EVERY_SECONDS = 3600   # "сохраняем тихие чекпои�
                                    # per direct PROMPT.md instruction
 LOG_EVERY_STEPS = 50
 MAX_CONSECUTIVE_STEP_FAILURES = 20
+MAX_CONSECUTIVE_NONFINITE_LOSSES = 5
+                                  # REAL CRASH #4 (2026-08-26, v4): the training
+                                  # loop's own loss went NaN starting at the very
+                                  # first logged step (step 50) and stayed NaN for
+                                  # 1600+ further steps (~28 real minutes) with
+                                  # nothing stopping it -- xm.optimizer_step() has
+                                  # no opinion on whether a gradient is finite, so
+                                  # every one of those steps kept applying a NaN
+                                  # update, permanently corrupting the model a
+                                  # little more (in practice: instantly and
+                                  # completely, once ANY weight goes NaN, since
+                                  # matmuls propagate it everywhere downstream).
+                                  # The run only stopped because rebuild_rank_cache
+                                  # eventually ran inference over the now-NaN model,
+                                  # wrote NaN into pools.scores, and THAT surfaced as
+                                  # a bare "ValueError: Probabilities contain NaN"
+                                  # deep inside numpy's rng.choice -- a real Python
+                                  # traceback for the first time in this kernel's
+                                  # history, but attributing the failure to entirely
+                                  # the wrong call site, 1600 steps downstream of the
+                                  # actual cause. FIX: check loss.isfinite() BEFORE
+                                  # backward()/optimizer_step() on every single step
+                                  # (see the training loop's own NONFINITE_LOSS log);
+                                  # a non-finite loss is treated as a skipped step
+                                  # (matching the existing consecutive_step_failures
+                                  # circuit breaker's semantics) but tracked in its
+                                  # OWN counter and logged with full diagnostic
+                                  # context (loss_rank/loss_bce individually, which
+                                  # one went non-finite, category, step) so the log
+                                  # names the exact step and cause instead of a
+                                  # numpy internal error many minutes later. Kept
+                                  # deliberately stricter (5, not
+                                  # MAX_CONSECUTIVE_STEP_FAILURES's 20) than the
+                                  # generic step-failure breaker: a non-finite loss
+                                  # is not a transient/recoverable error like an OOM
+                                  # or a shape mismatch -- once weights go NaN they
+                                  # STAY NaN forever (no amount of further training
+                                  # recovers them), so there is no reason to tolerate
+                                  # nearly as many consecutive occurrences before
+                                  # stopping.
 SYNC_SLOW_WARN_SECONDS = 8.0
                                   # REAL CRASH #3 (2026-08-26, v3): the ONLY
                                   # xm.mark_step() in the whole per-step
@@ -505,6 +545,30 @@ def _collective_lockstep_check(xm_mod, rank, device, local_value, stage):
                 f"Stopping now instead of silently deadlocking in the next collective."
             )
     return total
+
+
+def _collective_any(xm_mod, rank, device, local_flag, stage):
+    """Returns True if local_flag is True on ANY replica (OR across all 8),
+    via the same all_reduce-then-sync pattern _collective_lockstep_check
+    uses. This is the REAL CRASH #4 fix's own synchronization primitive
+    (see MAX_CONSECUTIVE_NONFINITE_LOSSES's comment): a per-replica-local
+    "was this step's loss non-finite" decision must NOT gate a per-replica-
+    local skip of xm.optimizer_step -- that call is itself a collective
+    (an internal gradient all-reduce across all 8 replicas), so if even ONE
+    replica skips it while the other 7 enter it, those 7 block forever
+    waiting for the straggler that never arrives -- textbook REAL CRASH #2-
+    class TPU collective deadlock, just triggered by a NaN loss instead of
+    RNG divergence. FIX: every replica's own "my loss was non-finite" bit
+    is OR-reduced across all 8 BEFORE any replica decides whether to call
+    xm.optimizer_step this step -- so either all 8 replicas skip it
+    together (a rank whose OWN loss was perfectly finite still skips,
+    deliberately, to stay in lockstep with a sibling that had a bad batch)
+    or all 8 call it together. Never a partial call.
+    """
+    tensor = torch.tensor([1.0 if local_flag else 0.0], dtype=torch.float32, device=device)
+    summed = xm_mod.all_reduce(xm_mod.REDUCE_SUM, tensor)
+    _xla_sync(xm_mod, rank, f"collective_any({stage})", log_every=True)
+    return float(summed.cpu().item()) > 0.5
 
 
 def _find_dataset_file(hint, filename):
@@ -761,7 +825,36 @@ class CategoryPools:
             else:
                 dist = np.abs(s - 0.5) + 1e-3
                 w = (1.0 / dist) ** HARD_OVERSAMPLE_TEMPERATURE
-                w = w / w.sum()
+                w_sum = w.sum()
+                # REAL CRASH #4 (2026-08-26, v4) defense-in-depth: pools.scores
+                # got silently poisoned with NaN by a rank-cache rebuild run
+                # over a model whose weights had already gone NaN many steps
+                # earlier (root cause: an unguarded non-finite training loss
+                # was allowed to reach xm.optimizer_step, corrupting every
+                # weight it touched from that step onward) -- rng.choice's own
+                # error here (bare "ValueError: Probabilities contain NaN",
+                # 1600 steps and ~28 minutes after the actual corruption) was
+                # the ONLY visible symptom, with nothing in the log pointing
+                # at the real cause. The per-step finite-loss guard in the
+                # training loop below (see loss_is_finite's own comment) now
+                # stops training within MAX_CONSECUTIVE_STEP_FAILURES steps of
+                # the FIRST non-finite loss, long before a poisoned model could
+                # ever reach a rank-cache rebuild -- so this should no longer
+                # be reachable. Kept as a loud, attributable safety net (not a
+                # silent uniform-weight fallback, which would hide the same
+                # class of problem again) in case some OTHER path (e.g. a
+                # resume from an externally corrupted checkpoint) poisons
+                # pools.scores by a different route.
+                if not np.isfinite(w_sum) or w_sum <= 0:
+                    raise RuntimeError(
+                        f"[CategoryPools] hard-example weights are non-finite "
+                        f"(nan={int(np.isnan(w).sum())}, inf={int(np.isinf(w).sum())} of "
+                        f"{len(w)}) -- pools.scores was corrupted, almost certainly by a "
+                        "rank-cache rebuild over NaN model weights (see REAL CRASH #4). "
+                        "The per-step finite-loss guard should have stopped training long "
+                        "before this point; check the log for an earlier NONFINITE_LOSS entry."
+                    )
+                w = w / w_sum
             return rng.choice(pool, size=n, replace=replace, p=(w if not replace else None))
 
         pos = _weighted_pick(pos_pool, n_pos)
@@ -1463,6 +1556,20 @@ def _load_shared_data():
 # PER-REPLICA ENTRYPOINT
 # =====================================================================
 
+class _NonFiniteLossBudgetExceeded(RuntimeError):
+    """Internal control-flow signal for the training loop's REAL CRASH #4
+    circuit breaker (see MAX_CONSECUTIVE_NONFINITE_LOSSES's own comment).
+    Deliberately its OWN exception type, not a plain RuntimeError -- the
+    training loop's except-block re-raises this immediately on sight,
+    BEFORE it would otherwise be fed through the much more lenient
+    (20-strikes) consecutive_step_failures counter used for generic step
+    failures. Sharing that counter would let up to 20 MORE NaN-corrupting
+    optimizer steps run after the dedicated non-finite-loss budget was
+    already exceeded, defeating the entire point of a stricter breaker for
+    this specific, non-recoverable failure class.
+    """
+
+
 def _mp_fn(index):
     rank = xr.global_ordinal()
     world_size = xr.world_size()
@@ -1537,6 +1644,7 @@ def _mp_fn(index):
     last_checkpoint_at = 0.0
     stopped = False
     consecutive_step_failures = 0
+    consecutive_nonfinite_losses = 0  # see MAX_CONSECUTIVE_NONFINITE_LOSSES's own comment
     # REAL CRASH #2 (2026-08-26, v2, ~1130s -- ~552s of dead silence then an
     # external SIGTERM to all 8 replicas, no Python traceback -- diagnosed
     # from peak-RSS/duration logging added after v1's own crash, which
@@ -1780,6 +1888,60 @@ def _mp_fn(index):
                 loss_bce = bce_stabilizer(logits, batch_labels)
                 loss = loss_rank + BCE_WEIGHT * loss_bce
                 loss.backward()
+                # REAL CRASH #4 (2026-08-26, v4) fix: check BEFORE
+                # xm.optimizer_step, not after -- once a NaN/Inf gradient is
+                # applied to the weights, the corruption is immediate and
+                # permanent (every downstream matmul propagates it), so the
+                # check has to gate the update, not just report on it
+                # afterwards. loss.item() is a real device->host sync (same
+                # cost class as _xla_sync's own single-step materialization,
+                # see that helper's docstring) but this is exactly the kind
+                # of "small, frequent, worth it" sync this file's SYNC
+                # logging philosophy already accepts -- catching corruption
+                # BEFORE it happens is worth one extra scalar sync per step.
+                loss_value = loss.item()
+                local_nonfinite = not math.isfinite(loss_value)
+                if local_nonfinite:
+                    loss_rank_value = loss_rank.item()
+                    loss_bce_value = loss_bce.item()
+                    _log_stage(rank, "NONFINITE_LOSS",
+                        f"step={global_step + 1} cat={category_vocab[category_id]!r} "
+                        f"loss={loss_value} loss_rank={loss_rank_value} loss_bce={loss_bce_value}",
+                        force=True)
+                # xm.optimizer_step is itself a collective (an internal
+                # gradient all-reduce across all 8 replicas) -- a per-
+                # replica-LOCAL decision to skip it would let some replicas
+                # enter that collective while others don't, deadlocking the
+                # stragglers forever (REAL CRASH #2's failure class, new
+                # trigger). _collective_any() OR-reduces "was ANY replica's
+                # loss non-finite this step" across all 8 first, so every
+                # replica makes the IDENTICAL skip/proceed decision -- one
+                # replica's bad batch makes every replica sit this step out
+                # together, keeping global_step/consecutive_nonfinite_losses
+                # bit-identical across ranks (both later feed into the
+                # rank-cache-rebuild collective's own step-agreement check).
+                any_nonfinite = _collective_any(xm, rank, device, local_nonfinite,
+                                                f"nonfinite_loss_step{global_step + 1}")
+                if any_nonfinite:
+                    consecutive_nonfinite_losses += 1
+                    if not local_nonfinite:
+                        _log_stage(rank, "NONFINITE_LOSS",
+                            f"step={global_step + 1}: own loss was finite ({loss_value}) but a "
+                            "sibling replica's was not -- skipping optimizer_step in lockstep",
+                            force=True)
+                    _log_stage(rank, "NONFINITE_LOSS",
+                        f"step={global_step + 1}: "
+                        f"{consecutive_nonfinite_losses}/{MAX_CONSECUTIVE_NONFINITE_LOSSES} "
+                        "consecutive (cluster-wide) -- skipping optimizer_step to avoid "
+                        "corrupting weights", force=True)
+                    optimizer.zero_grad(set_to_none=True)
+                    if consecutive_nonfinite_losses >= MAX_CONSECUTIVE_NONFINITE_LOSSES:
+                        raise _NonFiniteLossBudgetExceeded(
+                            f"[rank{rank}] {consecutive_nonfinite_losses} consecutive non-finite "
+                            f"losses (cluster-wide) at step={global_step + 1} -- stopping before "
+                            "the model is corrupted any further (see REAL CRASH #4)."
+                        )
+                    continue
                 xm.optimizer_step(optimizer)
                 # REAL CRASH #3 fix (see SYNC_SLOW_WARN_SECONDS's own
                 # comment): sync EVERY step, not every LOG_EVERY_STEPS, so
@@ -1793,6 +1955,14 @@ def _mp_fn(index):
                 scheduler.step()
                 global_step += 1
                 consecutive_step_failures = 0
+                consecutive_nonfinite_losses = 0
+            except _NonFiniteLossBudgetExceeded:
+                # Deliberately NOT caught by the generic except-Exception
+                # branch below -- see _NonFiniteLossBudgetExceeded's own
+                # docstring for why this must propagate immediately instead
+                # of being absorbed into consecutive_step_failures's much
+                # more lenient (20-strikes) budget.
+                raise
             except Exception as e:
                 consecutive_step_failures += 1
                 _log_stage(rank, "WARN", f"step failed and was skipped "
