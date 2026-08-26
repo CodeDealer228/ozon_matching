@@ -1,0 +1,22 @@
+{
+  "id": "annkrasnoshchekova/frida-ap-soap-lora-sft",
+  "title": "FRIDA AP SOAP LoRA SFT",
+  "code_file": "frida_ap_soap_lora_sft.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "maxamsecret/frida-format-adapter-v4-188",
+    "maxamsecret/frida-item-disjoint-split",
+    "maxamsecret/frida-llm-train-val-split"
+  ],
+  "kernel_sources": [
+    "maxamsecret/frida-tokenize-items-v4"
+  ],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "TpuV5E8"
+}
