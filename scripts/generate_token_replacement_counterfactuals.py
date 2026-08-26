@@ -13,6 +13,7 @@ from typing import Any
 
 import pandas as pd
 
+from alibaba_model_quota_router import ModelQuotaRouter
 from sample_name_attribute_overlap import candidate_intersections, flatten_values
 
 
@@ -357,19 +358,33 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/token_replacement_counterfactual/pilot"))
     parser.add_argument("--few-shots", type=Path)
     parser.add_argument("--count", type=int, default=100)
+    parser.add_argument(
+        "--all-eligible",
+        action="store_true",
+        help="Process every eligible human-train positive instead of --count rows.",
+    )
     parser.add_argument("--seed", type=int, default=20260826)
     parser.add_argument("--max-offered-tokens", type=int, default=12)
     parser.add_argument("--max-replacements", type=int, default=2)
     parser.add_argument("--max-pair-chars", type=int, default=1200)
     parser.add_argument("--model")
+    parser.add_argument(
+        "--model-registry",
+        type=Path,
+        action="append",
+        default=[],
+        help="Ordered Alibaba model registry; may be repeated for an authorized extension.",
+    )
     parser.add_argument("--base-url", default=os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     if args.count <= 0 or args.max_offered_tokens <= 0 or args.max_replacements <= 0:
         raise ValueError("count_and_limits_must_be_positive")
-    if args.execute and not args.model:
-        raise ValueError("--model is required with --execute")
+    if args.model and args.model_registry:
+        raise ValueError("use_either_model_or_model_registry")
+    if args.execute and not (args.model or args.model_registry):
+        raise ValueError("--model or --model-registry is required with --execute")
     if args.execute and not os.environ.get("DASHSCOPE_API_KEY"):
         raise RuntimeError("DASHSCOPE_API_KEY is not set")
 
@@ -416,7 +431,7 @@ def main() -> None:
         if not tokens:
             continue
         category = str(left["category"])
-        if len(candidates_by_category[category]) >= args.count:
+        if not args.all_eligible and len(candidates_by_category[category]) >= args.count:
             continue
         candidates_by_category[category].append({
             "id1": pair.id1,
@@ -425,12 +440,15 @@ def main() -> None:
             "category": category,
             "offered_tokens": tokens,
         })
-        if sum(map(len, candidates_by_category.values())) >= args.count * 20:
+        if not args.all_eligible and sum(map(len, candidates_by_category.values())) >= args.count * 20:
             break
     candidates: list[dict[str, object]] = []
     category_offsets = defaultdict(int)
     categories = sorted(candidates_by_category)
-    while len(candidates) < args.count:
+    target_candidates = (
+        sum(map(len, candidates_by_category.values())) if args.all_eligible else args.count
+    )
+    while len(candidates) < target_candidates:
         added = False
         for category in categories:
             offset = category_offsets[category]
@@ -440,11 +458,11 @@ def main() -> None:
             candidates.append(rows[offset])
             category_offsets[category] += 1
             added = True
-            if len(candidates) == args.count:
+            if len(candidates) == target_candidates:
                 break
         if not added:
             break
-    if len(candidates) < args.count:
+    if not args.all_eligible and len(candidates) < args.count:
         raise RuntimeError(f"Found only {len(candidates)} eligible positive pairs")
 
     preview_path = args.output_dir / "request_preview.jsonl"
@@ -455,55 +473,93 @@ def main() -> None:
     if args.execute:
         from openai import OpenAI
 
+        router = (
+            ModelQuotaRouter(args.model_registry, args.output_dir / "model_events.jsonl")
+            if args.model_registry
+            else None
+        )
         client = OpenAI(
             api_key=os.environ["DASHSCOPE_API_KEY"],
             base_url=args.base_url.rstrip("/"),
             max_retries=0,
             timeout=args.timeout,
         )
+        all_models_exhausted = False
         for candidate in candidates:
             left, right = items.loc[candidate["id1"]], items.loc[candidate["id2"]]
             category_few_shots = [
                 *few_shots.get("__global__", []),
                 *few_shots.get(candidate["category"], []),
             ]
-            try:
-                completion = client.chat.completions.create(
-                    model=args.model,
-                    messages=build_messages(
-                        left,
-                        right,
-                        candidate["offered_tokens"],
-                        category_few_shots,
-                    ),
-                    tools=[decision_tool(candidate["offered_tokens"], args.max_replacements)],
-                    tool_choice={"type": "function", "function": {"name": TOOL_NAME}},
-                    temperature=0.1,
-                    max_tokens=256,
-                    extra_body={"enable_thinking": False},
-                )
-                decision = parse_tool_decision(
-                    completion.choices[0].message,
-                    candidate["offered_tokens"],
-                    args.max_replacements,
-                )
-                record = {
-                    **candidate,
-                    "request_status": "complete",
-                    "decision": decision,
-                    "model": args.model,
-                    "usage": completion.usage.model_dump() if completion.usage else {},
-                    "provider_request_id": getattr(completion, "_request_id", None) or completion.id,
-                }
-            except Exception as exc:
-                record = {
-                    **candidate,
-                    "request_status": "terminal_error",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc)[:1000],
-                    "model": args.model,
-                }
-            append_jsonl(journal_path, record)
+            while True:
+                model = router.current_model if router else args.model
+                if model is None:
+                    all_models_exhausted = True
+                    break
+                try:
+                    completion = client.chat.completions.create(
+                        model=model,
+                        messages=build_messages(
+                            left,
+                            right,
+                            candidate["offered_tokens"],
+                            category_few_shots,
+                        ),
+                        tools=[decision_tool(candidate["offered_tokens"], args.max_replacements)],
+                        tool_choice={"type": "function", "function": {"name": TOOL_NAME}},
+                        temperature=0.1,
+                        max_tokens=256,
+                        extra_body={"enable_thinking": False},
+                    )
+                except Exception as exc:
+                    classification = router.register_error(model, exc) if router else "terminal"
+                    if classification in {"quota", "model_unavailable"}:
+                        continue
+                    record = {
+                        **candidate,
+                        "request_status": (
+                            "uncertain_error" if classification == "uncertain" else "terminal_error"
+                        ),
+                        "error_classification": classification,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:1000],
+                        "model": model,
+                    }
+                else:
+                    try:
+                        decision = parse_tool_decision(
+                            completion.choices[0].message,
+                            candidate["offered_tokens"],
+                            args.max_replacements,
+                        )
+                    except Exception as exc:
+                        record = {
+                            **candidate,
+                            "request_status": "terminal_error",
+                            "error_classification": "invalid_structured_output",
+                            "error_type": type(exc).__name__,
+                            "error": str(exc)[:1000],
+                            "model": model,
+                            "usage": completion.usage.model_dump() if completion.usage else {},
+                            "provider_request_id": (
+                                getattr(completion, "_request_id", None) or completion.id
+                            ),
+                        }
+                    else:
+                        record = {
+                            **candidate,
+                            "request_status": "complete",
+                            "decision": decision,
+                            "model": model,
+                            "usage": completion.usage.model_dump() if completion.usage else {},
+                            "provider_request_id": (
+                                getattr(completion, "_request_id", None) or completion.id
+                            ),
+                        }
+                append_jsonl(journal_path, record)
+                break
+            if all_models_exhausted:
+                break
 
     records = read_jsonl(journal_path)
     synthetic_items, synthetic_pairs = materialize(records, items)
@@ -515,8 +571,22 @@ def main() -> None:
         synthetic_pairs.to_parquet(pairs_path, index=False)
         for path in (items_path, pairs_path):
             output_files[path.name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
+    usage_by_model: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for record in records:
+        if not isinstance(record.get("usage"), dict):
+            continue
+        model = str(record.get("model", "unknown"))
+        for key, value in record["usage"].items():
+            if isinstance(value, int):
+                usage_by_model[model][str(key)] += value
+    router_snapshot = router.snapshot() if args.execute and args.model_registry else None
+    stopped_for_quota = bool(args.execute and router_snapshot and router_snapshot["current_model"] is None)
     manifest = {
-        "status": "complete" if args.execute else "dry_run_complete",
+        "status": (
+            "all_registered_model_quotas_exhausted"
+            if stopped_for_quota
+            else "complete" if args.execute else "dry_run_complete"
+        ),
         "execute": args.execute,
         "source": "human_positive_pairs_only",
         "source_pairs_sha256": sha256_file(args.pairs),
@@ -527,12 +597,17 @@ def main() -> None:
         "labels_sent_to_provider": False,
         "validation_sent_to_provider": False,
         "eligible_candidates": len(candidates),
+        "all_eligible_mode": args.all_eligible,
         "journal_records": len(records),
+        "model_router": router_snapshot,
+        "usage_by_model": {model: dict(values) for model, values in usage_by_model.items()},
         "synthetic_items": len(synthetic_items),
         "synthetic_pairs": len(synthetic_pairs),
         "positive_synthetic_pairs": int(synthetic_pairs["target"].eq(1).sum()) if not synthetic_pairs.empty else 0,
         "negative_synthetic_pairs": int(synthetic_pairs["target"].eq(0).sum()) if not synthetic_pairs.empty else 0,
         "request_preview_sha256": sha256_file(preview_path),
+        "model_registry_sha256": [sha256_file(path) for path in args.model_registry],
+        "few_shots_sha256": sha256_file(args.few_shots) if args.few_shots else None,
         "outputs": output_files,
     }
     (args.output_dir / "generation_manifest.json").write_text(
