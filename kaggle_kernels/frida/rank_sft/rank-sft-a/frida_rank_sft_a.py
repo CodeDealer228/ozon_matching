@@ -190,7 +190,51 @@ LR_MIN_RATIO = 0.05
 
 BCE_WEIGHT = 0.05                # per PROMPT.md: L = L_rank + 0.05 * L_BCE
 POS_FRACTION_IN_BATCH = 0.25     # 25% positives / 75% negatives per direct
-                                  # instruction
+                                  # instruction -- applies to the HUMAN-rank
+                                  # portion of a step's batch only (see
+                                  # LLM_STABILIZER_FRACTION below)
+LLM_STABILIZER_FRACTION = 0.3
+                                  # REAL CRASH (2026-08-26, v1): the first
+                                  # training step, right after "EPOCH:
+                                  # starting epoch 1/5" printed on all 8
+                                  # ranks, hung silently for ~9 minutes then
+                                  # every replica got an external SIGTERM
+                                  # (BrokenProcessPool, no Python traceback)
+                                  # -- the exact "unvalidated new XLA program
+                                  # shape" signature this project's own
+                                  # kaggle-experiment-safety skill warns
+                                  # about. Root cause: v1's per-step batch
+                                  # concatenated PER_CORE_TRAIN_BATCH human
+                                  # rows PLUS UP TO PER_CORE_TRAIN_BATCH MORE
+                                  # llm-stabilizer rows on top (see FILES.md
+                                  # note below) -- a batch of up to 2x
+                                  # PER_CORE_TRAIN_BATCH rows that the early
+                                  # smoke test never exercised (the smoke
+                                  # test only ever forwarded a synthetic
+                                  # batch sized exactly PER_CORE_TRAIN_BATCH).
+                                  # That larger, never-compiled shape hit its
+                                  # first real XLA compile mid-run instead of
+                                  # during the ~1-2 minute smoke-test window,
+                                  # on the full-FT + gradient-checkpointing +
+                                  # AdamW memory budget this kernel is
+                                  # already tight on (see PER_CORE_TRAIN_BATCH
+                                  # itself) -- consistent with either a slow
+                                  # first-time compile exceeding Kaggle's
+                                  # session-liveness timeout, or a host-level
+                                  # OOM-kill outside Python's own exception
+                                  # handling, both externally visible only as
+                                  # a bare SIGTERM. FIX: the LLM-stabilizer
+                                  # rows are now carved OUT of
+                                  # PER_CORE_TRAIN_BATCH (not added on top),
+                                  # so every step's total batch size is
+                                  # EXACTLY PER_CORE_TRAIN_BATCH, every
+                                  # epoch, every category -- byte-identical
+                                  # to the shape the smoke test already
+                                  # validates. 0.3 reserves a real, non-
+                                  # trivial slice for the "маленький
+                                  # стабилизатор" BCE term while keeping most
+                                  # of the batch on the actual ranking
+                                  # objective PROMPT.md prioritizes.
 HARD_OVERSAMPLE_TEMPERATURE = 2.0
                                   # softmax temperature over |score - 0.5
                                   # decision-boundary distance|^-1 when
@@ -503,10 +547,20 @@ class CategoryPools:
         def _weighted_pick(pool, n):
             if len(pool) == 0:
                 return np.empty(0, dtype=np.int64)
-            n = min(n, len(pool)) if len(pool) < n else n
-            # Hardness = closeness to the 0.5 decision boundary -> higher
-            # weight. Falls back to uniform when scores haven't been
-            # populated yet (first half-epoch, before any rank-cache pass).
+            # REAL BUG (found 2026-08-26 alongside the LLM-batch-size crash,
+            # same root class): this used to clamp `n = min(n, len(pool))`
+            # BEFORE computing `replace = n > len(pool)` -- after that
+            # clamp, `n <= len(pool)` was true by construction, so `replace`
+            # was ALWAYS False and _weighted_pick silently returned FEWER
+            # than `n` rows whenever a category's pool was smaller than
+            # requested. That produces a SMALLER, never-smoke-tested batch
+            # shape for small categories -- exactly the kind of unvalidated
+            # new XLA program this project's own kaggle-experiment-safety
+            # skill warns against (see LLM_STABILIZER_FRACTION's own crash
+            # writeup for the sibling incident this caused). Fixed: decide
+            # `replace` from the ORIGINAL requested n first, then always
+            # return exactly n rows.
+            replace = n > len(pool)
             s = self.scores[pool]
             if not np.any(s):
                 w = np.ones(len(pool), dtype=np.float64)
@@ -514,7 +568,6 @@ class CategoryPools:
                 dist = np.abs(s - 0.5) + 1e-3
                 w = (1.0 / dist) ** HARD_OVERSAMPLE_TEMPERATURE
                 w = w / w.sum()
-            replace = n > len(pool)
             return rng.choice(pool, size=n, replace=replace, p=(w if not replace else None))
 
         pos = _weighted_pick(pos_pool, n_pos)
@@ -1347,8 +1400,21 @@ def _mp_fn(index):
             # each sampled row's RANK within the cached full-category order
             # (searchsorted against pos_idx/neg_idx, both built from the
             # same frame so the mapping is exact).
-            n_pos_step = max(1, round(PER_CORE_TRAIN_BATCH * POS_FRACTION_IN_BATCH))
-            n_neg_step = PER_CORE_TRAIN_BATCH - n_pos_step
+            #
+            # FIXED SHAPE, ALWAYS EXACTLY PER_CORE_TRAIN_BATCH ROWS (see
+            # LLM_STABILIZER_FRACTION's own comment on the REAL CRASH this
+            # replaces): human ranking rows and LLM BCE-stabilizer rows
+            # share ONE fixed-size budget, never added on top of each other.
+            n_llm_step = max(0, round(PER_CORE_TRAIN_BATCH * LLM_STABILIZER_FRACTION))
+            n_human_step = PER_CORE_TRAIN_BATCH - n_llm_step
+            # Clamped so n_pos_step + n_neg_step == n_human_step EXACTLY
+            # regardless of PER_CORE_TRAIN_BATCH's value (guards the same
+            # "silently wrong batch size" bug class fixed above, in case
+            # this constant is ever lowered enough for two independent
+            # max(1, ...) floors to overshoot n_human_step).
+            n_pos_step = max(1, min(n_human_step - 1, round(n_human_step * POS_FRACTION_IN_BATCH))) \
+                        if n_human_step >= 2 else n_human_step
+            n_neg_step = n_human_step - n_pos_step
             step_pos, step_neg = pools.sample(category_id, rng, n_pos_step, n_neg_step)
             if len(step_pos) == 0 or len(step_neg) == 0:
                 continue
@@ -1360,13 +1426,26 @@ def _mp_fn(index):
             delta_ap_w = pairwise_delta_ap(step_pos_ranks, step_neg_ranks, len(pos_idx), len(neg_idx))
 
             # BCE-stabilizer rows: matched category slice of the LLM 3M
-            # subsample, same total_batch-sized addition, kept separate in
-            # the forward pass concat so ONE forward covers both terms (per
-            # PROMPT.md: "Никаких дополнительных forward-pass нет").
+            # subsample, carved out of PER_CORE_TRAIN_BATCH above (not added
+            # on top -- see LLM_STABILIZER_FRACTION's REAL CRASH comment),
+            # kept separate in the forward pass concat so ONE forward covers
+            # both terms (per PROMPT.md: "Никаких дополнительных forward-
+            # pass нет"). If this category's LLM pool is smaller than the
+            # reserved n_llm_step (rare small-category tail case), the
+            # shortfall is backfilled from extra human negatives so every
+            # step's total row count stays EXACTLY PER_CORE_TRAIN_BATCH --
+            # never a smaller, newly-shaped batch that would need its own
+            # fresh XLA compile mid-run.
             llm_cat_pool = llm_pools_by_cat[category_id]
-            n_llm_step = min(PER_CORE_TRAIN_BATCH, len(llm_cat_pool)) if len(llm_cat_pool) else 0
-            llm_step_idx = rng.choice(llm_cat_pool, size=n_llm_step, replace=False) if n_llm_step else \
+            n_llm_avail = min(n_llm_step, len(llm_cat_pool))
+            llm_step_idx = rng.choice(llm_cat_pool, size=n_llm_avail, replace=False) if n_llm_avail else \
                           np.empty(0, dtype=np.int64)
+            llm_shortfall = n_llm_step - n_llm_avail
+            if llm_shortfall > 0:
+                extra_neg_pool = pools.neg_idx[category_id]
+                if len(extra_neg_pool):
+                    extra_neg = rng.choice(extra_neg_pool, size=llm_shortfall, replace=True)
+                    step_neg = np.concatenate([step_neg, extra_neg])
 
             all_row_idx = np.concatenate([step_pos, step_neg, llm_step_idx])
             all_scope = np.concatenate([
