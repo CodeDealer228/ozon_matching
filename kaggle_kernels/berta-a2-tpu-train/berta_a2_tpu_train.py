@@ -15,11 +15,13 @@ import time
 import traceback
 from pathlib import Path
 
-# Kaggle's TPU image does not include PEFT.  Install the exact version used by
-# this BERTA lineage before the module-level PEFT import; --no-deps preserves
-# the TPU image's already matched torch/transformers stack.
+# Kaggle's TPU image does not include PEFT and its bundled transformers is too
+# old for this BERTA lineage.  Install the exact, repo-proven compatible set
+# before module-level imports; --no-deps preserves the TPU torch/XLA stack.
 subprocess.check_call([
-    sys.executable, "-m", "pip", "install", "-q", "--no-deps", "peft==0.17.1",
+    sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--force-reinstall",
+    "huggingface-hub==0.36.0", "transformers==4.57.6",
+    "tokenizers==0.22.2", "peft==0.17.1",
 ])
 
 import numpy as np
