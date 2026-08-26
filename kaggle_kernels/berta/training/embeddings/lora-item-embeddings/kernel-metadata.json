@@ -4,7 +4,7 @@
   "code_file": "berta_lora_item_embeddings.py",
   "language": "python",
   "kernel_type": "script",
-  "is_private": true,
+  "is_private": false,
   "enable_gpu": true,
   "enable_tpu": false,
   "enable_internet": true,

@@ -1,11 +1,11 @@
 {
   "id": "maxamsecret/fasttext-category-similarity-probe-pilot",
   "id_no": 130827531,
-  "title": "fastText category similarity probe (Аптека pilot)",
+  "title": "fastText category similarity probe (\u0410\u043f\u0442\u0435\u043a\u0430 pilot)",
   "code_file": "fasttext_category_similarity_probe.py",
   "language": "python",
   "kernel_type": "script",
-  "is_private": true,
+  "is_private": false,
   "enable_gpu": false,
   "enable_tpu": false,
   "enable_internet": true,
