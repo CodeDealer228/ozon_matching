@@ -45,6 +45,8 @@ SHA-256 файла:
 автоматически не повторяется, чтобы не получить скрытый дубль. Обычная ошибка
 валидации также не переключает модель. События исчерпания пишутся в
 `model_events.jsonl`, поэтому после перезапуска уже исчерпанные модели пропускаются.
+Перед каждым обращением также сохраняется запись `submitted`; если процесс аварийно
+завершится во время запроса, такая пара не будет автоматически отправлена повторно.
 
 Основной реестр содержит девять моделей до 32B. После него разрешено ранее
 согласованное расширение из двух 35B-A3B моделей. 80B в реестр не входит.
@@ -71,6 +73,7 @@ python scripts\generate_token_replacement_counterfactuals.py `
   --model-registry synthetic_research\token_replacement_counterfactual_discussions\model_rotation_v1.json `
   --model-registry synthetic_research\token_replacement_counterfactual_discussions\model_rotation_extension_35b_v1.json `
   --all-eligible `
+  --workers 8 `
   --output-dir artifacts\token_replacement_counterfactual\max_baseline_rotation_v1 `
   --execute
 ```

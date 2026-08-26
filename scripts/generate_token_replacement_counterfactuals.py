@@ -7,7 +7,8 @@ import hashlib
 import json
 import os
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -345,6 +346,59 @@ def load_few_shots(
     return sanitized
 
 
+def request_candidate(
+    client: object,
+    candidate: dict[str, object],
+    left: pd.Series,
+    right: pd.Series,
+    category_few_shots: list[dict[str, object]],
+    model: str,
+    max_replacements: int,
+) -> tuple[str, dict[str, object] | None, Exception | None]:
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=build_messages(
+                left,
+                right,
+                candidate["offered_tokens"],
+                category_few_shots,
+            ),
+            tools=[decision_tool(candidate["offered_tokens"], max_replacements)],
+            tool_choice={"type": "function", "function": {"name": TOOL_NAME}},
+            temperature=0.1,
+            max_tokens=256,
+            extra_body={"enable_thinking": False},
+        )
+    except Exception as exc:
+        return "provider_error", None, exc
+    common = {
+        **candidate,
+        "model": model,
+        "usage": completion.usage.model_dump() if completion.usage else {},
+        "provider_request_id": getattr(completion, "_request_id", None) or completion.id,
+    }
+    try:
+        decision = parse_tool_decision(
+            completion.choices[0].message,
+            candidate["offered_tokens"],
+            max_replacements,
+        )
+    except Exception as exc:
+        return "terminal", {
+            **common,
+            "request_status": "terminal_error",
+            "error_classification": "invalid_structured_output",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:1000],
+        }, None
+    return "complete", {
+        **common,
+        "request_status": "complete",
+        "decision": decision,
+    }, None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--items", type=Path, default=Path("data/items_human.parquet"))
@@ -377,9 +431,17 @@ def main() -> None:
     )
     parser.add_argument("--base-url", default=os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--progress-every", type=int, default=100)
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
-    if args.count <= 0 or args.max_offered_tokens <= 0 or args.max_replacements <= 0:
+    if (
+        args.count <= 0
+        or args.max_offered_tokens <= 0
+        or args.max_replacements <= 0
+        or args.workers <= 0
+        or args.progress_every <= 0
+    ):
         raise ValueError("count_and_limits_must_be_positive")
     if args.model and args.model_registry:
         raise ValueError("use_either_model_or_model_registry")
@@ -485,81 +547,71 @@ def main() -> None:
             timeout=args.timeout,
         )
         all_models_exhausted = False
-        for candidate in candidates:
-            left, right = items.loc[candidate["id1"]], items.loc[candidate["id2"]]
-            category_few_shots = [
-                *few_shots.get("__global__", []),
-                *few_shots.get(candidate["category"], []),
-            ]
-            while True:
+        pending = deque(candidates)
+        terminal_count = 0
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            while pending:
                 model = router.current_model if router else args.model
                 if model is None:
                     all_models_exhausted = True
                     break
-                try:
-                    completion = client.chat.completions.create(
-                        model=model,
-                        messages=build_messages(
-                            left,
-                            right,
-                            candidate["offered_tokens"],
-                            category_few_shots,
-                        ),
-                        tools=[decision_tool(candidate["offered_tokens"], args.max_replacements)],
-                        tool_choice={"type": "function", "function": {"name": TOOL_NAME}},
-                        temperature=0.1,
-                        max_tokens=256,
-                        extra_body={"enable_thinking": False},
-                    )
-                except Exception as exc:
-                    classification = router.register_error(model, exc) if router else "terminal"
-                    if classification in {"quota", "model_unavailable"}:
-                        continue
-                    record = {
+                batch = [pending.popleft() for _ in range(min(args.workers, len(pending)))]
+                futures = {}
+                for candidate in batch:
+                    append_jsonl(journal_path, {
                         **candidate,
-                        "request_status": (
-                            "uncertain_error" if classification == "uncertain" else "terminal_error"
-                        ),
-                        "error_classification": classification,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc)[:1000],
+                        "request_status": "submitted",
                         "model": model,
-                    }
-                else:
-                    try:
-                        decision = parse_tool_decision(
-                            completion.choices[0].message,
-                            candidate["offered_tokens"],
-                            args.max_replacements,
-                        )
-                    except Exception as exc:
+                    })
+                    left, right = items.loc[candidate["id1"]], items.loc[candidate["id2"]]
+                    category_few_shots = [
+                        *few_shots.get("__global__", []),
+                        *few_shots.get(candidate["category"], []),
+                    ]
+                    future = executor.submit(
+                        request_candidate,
+                        client,
+                        candidate,
+                        left,
+                        right,
+                        category_few_shots,
+                        model,
+                        args.max_replacements,
+                    )
+                    futures[future] = candidate
+                requeue: list[dict[str, object]] = []
+                for future in as_completed(futures):
+                    candidate = futures[future]
+                    outcome, record, error = future.result()
+                    if outcome == "provider_error":
+                        assert error is not None
+                        classification = router.register_error(model, error) if router else "terminal"
+                        if classification in {"quota", "model_unavailable"}:
+                            requeue.append(candidate)
+                            continue
                         record = {
                             **candidate,
-                            "request_status": "terminal_error",
-                            "error_classification": "invalid_structured_output",
-                            "error_type": type(exc).__name__,
-                            "error": str(exc)[:1000],
-                            "model": model,
-                            "usage": completion.usage.model_dump() if completion.usage else {},
-                            "provider_request_id": (
-                                getattr(completion, "_request_id", None) or completion.id
+                            "request_status": (
+                                "uncertain_error"
+                                if classification == "uncertain"
+                                else "terminal_error"
                             ),
-                        }
-                    else:
-                        record = {
-                            **candidate,
-                            "request_status": "complete",
-                            "decision": decision,
+                            "error_classification": classification,
+                            "error_type": type(error).__name__,
+                            "error": str(error)[:1000],
                             "model": model,
-                            "usage": completion.usage.model_dump() if completion.usage else {},
-                            "provider_request_id": (
-                                getattr(completion, "_request_id", None) or completion.id
-                            ),
                         }
-                append_jsonl(journal_path, record)
-                break
-            if all_models_exhausted:
-                break
+                    assert record is not None
+                    append_jsonl(journal_path, record)
+                    terminal_count += 1
+                for candidate in reversed(requeue):
+                    pending.appendleft(candidate)
+                if terminal_count and terminal_count % args.progress_every < len(batch):
+                    print(json.dumps({
+                        "terminal_records_this_run": terminal_count,
+                        "remaining_candidates": len(pending),
+                        "model": router.current_model if router else model,
+                    }, ensure_ascii=False, sort_keys=True), flush=True)
 
     records = read_jsonl(journal_path)
     synthetic_items, synthetic_pairs = materialize(records, items)
