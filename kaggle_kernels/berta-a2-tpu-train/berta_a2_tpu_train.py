@@ -283,7 +283,7 @@ def build_model(device, merge_root, rank):
     ])
     gathered = xm.all_gather(flat_sum)
     xm.mark_step()
-    matrix = gathered.cpu().numpy().reshape(xr.world_size(), 3)
+    matrix = gathered.detach().cpu().numpy().reshape(xr.world_size(), 3)
     if not np.allclose(matrix, matrix[0], rtol=0, atol=1e-5):
         raise RuntimeError(f"Cross-rank model initialization mismatch: {matrix.tolist()}")
     set_seed(DATA_SEED + rank)
