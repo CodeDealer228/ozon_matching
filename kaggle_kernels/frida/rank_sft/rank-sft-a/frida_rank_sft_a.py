@@ -1329,6 +1329,38 @@ def _mp_fn(index):
     last_checkpoint_at = 0.0
     stopped = False
     consecutive_step_failures = 0
+    # REAL CRASH #2 (2026-08-26, v2, ~1130s -- ~552s of dead silence then an
+    # external SIGTERM to all 8 replicas, no Python traceback -- diagnosed
+    # from peak-RSS/duration logging added after v1's own crash, which
+    # ruled out a slow OOM: RSS was flat and no single stage's own timer
+    # was still running when the silence started). v2 used ONE rng seeded
+    # SEED+rank for BOTH (a) the per-epoch category cycle
+    # (cat_cycle = rng.permutation(n_categories)) AND (b) per-step example
+    # sampling. (a) is CONTROL FLOW shared by a collective op further down
+    # (rebuild_rank_cache() calls xm.all_gather, which every one of the 8
+    # TPU replicas must enter in the SAME global_step or the ones that
+    # arrive first block forever waiting for the stragglers -- a classic
+    # TPU collective deadlock, not a crash Python can see or report). Since
+    # each replica's rng was seeded differently (SEED+rank), each replica
+    # drew a DIFFERENT category permutation for the same epoch, so the
+    # `if category_id not in rank_tables: continue` / `if len(step_pos)
+    # == 0 ...: continue` skip conditions fired on DIFFERENT steps on
+    # different replicas -- global_step (a per-replica local counter)
+    # silently diverged rank-to-rank, so `if global_step >=
+    # next_rank_cache_step` tripped at different wall-clock moments on
+    # different replicas -> the collective all_gather inside
+    # rebuild_rank_cache() deadlocked. FIX: split into two independent
+    # generators. cat_rng is seeded IDENTICALLY on every replica (no +rank)
+    # and is the ONLY source of the per-epoch category permutation, so
+    # every replica walks the exact same category sequence in the exact
+    # same order -> every replica's global_step advances/skips in lockstep
+    # -> the collective is always entered by all 8 replicas on the same
+    # step. rng (still SEED+rank) is kept for everything that varies
+    # per-replica WITHOUT affecting control flow -- which example rows get
+    # sampled within a category -- safe because _weighted_pick (see its
+    # own REAL BUG fix) now always returns exactly the requested count, so
+    # no rng draw here can ever change whether a step is skipped.
+    cat_rng = np.random.default_rng(SEED)
     rng = np.random.default_rng(SEED + rank)
 
     def do_quiet_save(reason, epoch_num):
@@ -1440,7 +1472,9 @@ def _mp_fn(index):
         if stopped:
             break
         _log_stage(rank, "EPOCH", f"starting epoch {epoch}/{EPOCHS}", force=True)
-        cat_cycle = rng.permutation(n_categories)
+        # cat_rng (SAME seed on every replica, no +rank) -- see REAL CRASH #2
+        # comment above for why this must NOT be per-replica.
+        cat_cycle = cat_rng.permutation(n_categories)
         cat_cursor = 0
 
         for _local_step in range(steps_per_epoch):
