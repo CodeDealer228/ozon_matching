@@ -93,6 +93,21 @@ class ModelQuotaRouter:
         with self._lock:
             return next((model for model in self.models if model not in self.exhausted), None)
 
+    @property
+    def available_models(self) -> list[str]:
+        with self._lock:
+            return [model for model in self.models if model not in self.exhausted]
+
+    def choose_model(self, offset: int = 0, exclude: Iterable[str] = ()) -> str | None:
+        excluded = set(exclude)
+        with self._lock:
+            available = [
+                model
+                for model in self.models
+                if model not in self.exhausted and model not in excluded
+            ]
+            return available[offset % len(available)] if available else None
+
     def register_error(self, model: str, error: BaseException) -> str:
         """Persist an exact rotation event and return the error classification."""
         classification = classify_provider_error(error)

@@ -25,6 +25,9 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     }), encoding="utf-8")
     router = ModelQuotaRouter([registry], events)
     assert router.current_model == "new"
+    assert router.available_models == ["new", "fallback"]
+    assert router.choose_model(1) == "fallback"
+    assert router.choose_model(0, exclude={"new"}) == "fallback"
     quota = ProviderError(429, "AllocationQuota.FreeTierOnly", "free quota exhausted")
     assert classify_provider_error(quota) == "quota"
     assert router.register_error("new", quota) == "quota"
