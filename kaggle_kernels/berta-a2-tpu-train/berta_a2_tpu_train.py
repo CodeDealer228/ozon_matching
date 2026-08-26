@@ -359,6 +359,18 @@ def evaluate(model, loader, device, rank, step):
     model.train(); return result
 
 
+def cpu_checkpoint_tree(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {k: cpu_checkpoint_tree(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [cpu_checkpoint_tree(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(cpu_checkpoint_tree(v) for v in value)
+    return value
+
+
 def save_checkpoint(model, optimizer, scheduler, step, metrics, rank, kind="eval"):
     if rank != 0: return
     xm.mark_step(); dest = OUT / f"checkpoint_step_{step:04d}_{kind}"; dest.mkdir(parents=True, exist_ok=True)
@@ -367,7 +379,10 @@ def save_checkpoint(model, optimizer, scheduler, step, metrics, rank, kind="eval
     safetensors_save_file(state, adapter / "adapter_model.safetensors")
     model.encoder.peft_config["default"].save_pretrained(adapter)
     torch.save({k:v.detach().cpu() for k,v in model.head.state_dict().items()}, dest / "classifier.pt")
-    xm.save(optimizer.state_dict(), dest / "optimizer.pt"); xm.save(scheduler.state_dict(), dest / "scheduler.pt")
+    torch.save(cpu_checkpoint_tree(optimizer.state_dict()), dest / "optimizer.pt")
+    torch.save(cpu_checkpoint_tree(scheduler.state_dict()), dest / "scheduler.pt")
+    if not (dest / "optimizer.pt").is_file() or not (dest / "scheduler.pt").is_file():
+        raise RuntimeError(f"Checkpoint state save failed at step={step}")
     atomic_json(dest / "train_state.json", {"arm": ARM, "global_step": step,
                                              "metrics": metrics, "save_kind": kind})
 
