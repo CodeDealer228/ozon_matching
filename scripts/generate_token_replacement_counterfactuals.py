@@ -316,13 +316,32 @@ def read_jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
-def load_few_shots(path: Path | None) -> dict[str, list[dict[str, object]]]:
+def load_few_shots(
+    path: Path | None, max_replacements: int
+) -> dict[str, list[dict[str, object]]]:
     if path is None:
         return {}
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or any(not isinstance(rows, list) for rows in value.values()):
-        raise ValueError("few_shots_must_map_category_to_list")
-    return value
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise ValueError("invalid_few_shot_schema_version")
+    categories = value.get("categories")
+    if not isinstance(categories, dict):
+        raise ValueError("few_shots_need_categories")
+    sanitized: dict[str, list[dict[str, object]]] = {}
+    for category, rows in categories.items():
+        if not isinstance(category, str) or not isinstance(rows, list):
+            raise ValueError("invalid_few_shot_category")
+        sanitized[category] = []
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("input"), dict):
+                raise ValueError("invalid_few_shot_row")
+            example_input = row["input"]
+            tokens = example_input.get("offered_tokens")
+            if not isinstance(tokens, list) or not tokens or any(not isinstance(token, str) for token in tokens):
+                raise ValueError("invalid_few_shot_offered_tokens")
+            decision = validate_decision(row.get("decision"), tokens, max_replacements)
+            sanitized[category].append({"input": example_input, "decision": decision})
+    return sanitized
 
 
 def main() -> None:
@@ -373,7 +392,7 @@ def main() -> None:
         validation = pd.read_parquet(args.validation_pairs, columns=["id1", "id2"])
         validation_ids.update(validation["id1"])
         validation_ids.update(validation["id2"])
-    few_shots = load_few_shots(args.few_shots)
+    few_shots = load_few_shots(args.few_shots, args.max_replacements)
     existing = read_jsonl(journal_path)
     completed = {str(row["source_pair_sha256"]) for row in existing}
 

@@ -1,9 +1,12 @@
 import json
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
 from generate_token_replacement_counterfactuals import (
     decision_tool,
+    load_few_shots,
     materialize,
     mutate_item,
     offered_tokens,
@@ -86,3 +89,33 @@ assert len(synthetic_items) == 4
 assert len(synthetic_pairs) == 4
 assert synthetic_pairs["target"].value_counts().to_dict() == {1: 2, 0: 2}
 assert set(synthetic_pairs["variant"]) <= {"both_replaced", "left_only", "right_only"}
+
+
+with tempfile.TemporaryDirectory() as tmp_dir:
+    path = Path(tmp_dir) / "few_shots.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "categories": {
+            "Автотовары": [{
+                "source_reference_local_only": {"id1": 1, "id2": 2},
+                "input": {
+                    "category": "Автотовары",
+                    "item_1": {"name": "a", "attributes": {}},
+                    "item_2": {"name": "b", "attributes": {}},
+                    "offered_tokens": ["lynxauto"],
+                },
+                "decision": {
+                    "status": "replace",
+                    "replacements": [{
+                        "source_token": "lynxauto",
+                        "replacement_token": "Masuma",
+                    }],
+                    "skip_reason": "",
+                },
+                "reviewer_note_local_only": "private note",
+            }],
+        },
+    }, ensure_ascii=False), encoding="utf-8")
+    loaded = load_few_shots(path, 2)
+    assert loaded["Автотовары"][0]["decision"]["status"] == "replace"
+    assert set(loaded["Автотовары"][0]) == {"input", "decision"}
