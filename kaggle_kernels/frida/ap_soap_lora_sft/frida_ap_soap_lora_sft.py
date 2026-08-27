@@ -120,7 +120,37 @@ LORA_ALPHA = 32
 LORA_DROPOUT = 0.10
 LORA_TARGET_MODULES = ["q", "k", "v", "o", "wi_0", "wi_1", "wo"]
 
-PEAK_LR = 2e-6
+PEAK_LR = 2e-6          # head only -- classifier.out is already trained (loaded from
+                        # head_path), so it gets the SAME conservative peak used by the
+                        # full-SFT sibling kernel (frida_ap_soap_full_sft.py's own
+                        # PEAK_LR=2e-6), which fine-tunes this exact head end-to-end.
+LORA_LR = 3e-4          # LoRA adapters only. REAL BUG (2026-08-26/27, run #1+#2,
+                        # annkrasnoshchekova): make_optimizer() originally put LoRA's A/B
+                        # matrices in the SAME param groups as the head, both driven by
+                        # PEAK_LR=2e-6 -- a value copied verbatim from full_sft's own
+                        # full-finetune LR (where EVERY parameter, including the encoder
+                        # body, is already pretrained and needs only gentle nudging).
+                        # LoRA's B matrix is zero-initialized by construction (see
+                        # LORA_PROBE_GRACE_STEPS's own comment): the adapter starts
+                        # contributing exactly zero to the forward pass and must "catch
+                        # up" through a rank-16 bottleneck from scratch, which standard
+                        # LoRA practice (Hu et al. 2106.09685) handles with an LR one to
+                        # two orders of magnitude above a full-finetune LR specifically
+                        # because of this cold start -- not a smaller LR like a
+                        # near-converged full-finetune parameter would want. At
+                        # PEAK_LR=2e-6 with 5% warmup, step 2's actual LR was
+                        # ~2e-6*0.28 =~ 5.6e-7; combined with SOAP's own first-step-is-
+                        # init-only behavior and the B=0 gating, lora_A's weight showed
+                        # literally 0.0 max|delta| across the entire 8-step grace window
+                        # (run #2 log) -- not a timing-window problem (run #1's diagnosis)
+                        # but the adapter moving far too slowly for ANY probe window to
+                        # observe, at any width. FIX: give LoRA its own param groups at
+                        # LORA_LR=3e-4 -- the SAME value already validated on this exact
+                        # base architecture with this exact LoRA config (r=16, alpha=32,
+                        # same target_modules) by
+                        # kaggle_kernels/frida/lora/lora-sft-human-only-10-epochs
+                        # (confirmed nonzero gradients on all 336 LoRA tensors there).
+                        # The head keeps its own separate, much lower PEAK_LR unchanged.
 MIN_LR_RATIO = 0.20
 WARMUP_RATIO = 0.05
 WEIGHT_DECAY = 0.02
@@ -906,26 +936,41 @@ def load_shared_data():
 
 
 def make_optimizer(model):
-    decay, no_decay = [], []
-    for parameter in model.parameters():
+    # Separate LoRA-adapter parameters from head parameters so each family
+    # can run its own LR: LoRA needs LORA_LR (cold-start, rank-16 bottleneck)
+    # while the head needs the much lower PEAK_LR (already trained). See
+    # LORA_LR's own comment for the full incident this fixes.
+    lora_decay, lora_no_decay, head_decay, head_no_decay = [], [], [], []
+    for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue  # frozen LoRA base weights -- SOAP.step() would just skip these (no .grad)
                       # anyway, but excluding them keeps its per-parameter Python loop to the
                       # ~13M trainable params instead of iterating ~823M dead entries every step.
-        (decay if parameter.ndim > 1 else no_decay).append(parameter)
+        is_lora = "lora_" in name
+        bucket_decay = (lora_decay if is_lora else head_decay)
+        bucket_no_decay = (lora_no_decay if is_lora else head_no_decay)
+        (bucket_decay if parameter.ndim > 1 else bucket_no_decay).append(parameter)
+    n_lora = sum(p.numel() for p in lora_decay + lora_no_decay)
+    n_head = sum(p.numel() for p in head_decay + head_no_decay)
+    if n_lora == 0:
+        raise RuntimeError("make_optimizer found zero LoRA parameters -- 'lora_' name match failed")
+    log(0, "OPTIMIZER", f"param groups: lora={n_lora:,} params @ lr_scale=1.0 (peak={LORA_LR:.1e}), "
+        f"head={n_head:,} params @ lr_scale={PEAK_LR / LORA_LR:.4f} (peak={PEAK_LR:.1e})", force=True)
     return SOAP([
-        {"params": decay, "weight_decay": WEIGHT_DECAY},
-        {"params": no_decay, "weight_decay": 0.0},
-    ], lr=PEAK_LR)
+        {"params": lora_decay, "weight_decay": WEIGHT_DECAY, "lr_scale": 1.0, "name": "lora_decay"},
+        {"params": lora_no_decay, "weight_decay": 0.0, "lr_scale": 1.0, "name": "lora_no_decay"},
+        {"params": head_decay, "weight_decay": WEIGHT_DECAY, "lr_scale": PEAK_LR / LORA_LR, "name": "head_decay"},
+        {"params": head_no_decay, "weight_decay": 0.0, "lr_scale": PEAK_LR / LORA_LR, "name": "head_no_decay"},
+    ], lr=LORA_LR)
 
 
-def scheduled_lr(step, total_steps):
+def scheduled_lr(step, total_steps, peak_lr=LORA_LR):
     warmup_steps = max(1, round(total_steps * WARMUP_RATIO))
     if step < warmup_steps:
-        return PEAK_LR * (0.1 + 0.9 * (step + 1) / warmup_steps)
+        return peak_lr * (0.1 + 0.9 * (step + 1) / warmup_steps)
     progress = min((step - warmup_steps) / max(1, total_steps - warmup_steps), 1.0)
     ratio = MIN_LR_RATIO + (1.0 - MIN_LR_RATIO) * 0.5 * (1.0 + math.cos(math.pi * progress))
-    return PEAK_LR * ratio
+    return peak_lr * ratio
 
 
 def make_train_loader(rank, start_step, one_step=False):
@@ -1107,7 +1152,8 @@ def save_checkpoint(model, optimizer, ap_loss, global_step, metric, per_category
             torch.save(to_cpu_state(optimizer.state_dict()), os.path.join(destination, "optimizer.pt"))
             torch.save(
                 {"global_step": global_step, "total_steps": len(_SHARED["plan"]),
-                 "peak_lr": PEAK_LR, "warmup_ratio": WARMUP_RATIO, "min_lr_ratio": MIN_LR_RATIO},
+                 "peak_lr_lora": LORA_LR, "peak_lr_head": PEAK_LR,
+                 "warmup_ratio": WARMUP_RATIO, "min_lr_ratio": MIN_LR_RATIO},
                 os.path.join(destination, "scheduler.pt"),
             )
             torch.save(to_cpu_state(ap_loss.state_dict()), os.path.join(destination, "ap_state.pt"))
@@ -1120,8 +1166,9 @@ def save_checkpoint(model, optimizer, ap_loss, global_step, metric, per_category
                 plan_fingerprint=_SHARED["plan_fingerprint"],
                 val_fingerprint=_SHARED["val_fingerprint"], world_size=WORLD_SIZE,
                 per_core_batch=PER_CORE_TRAIN_BATCH, pair_max_length=PAIR_MAX_LENGTH,
-                lr=PEAK_LR, optimizer=f"SOAP (max_precond_dim={SOAP_MAX_PRECOND_DIM}, "
-                                       f"freq={SOAP_PRECONDITION_FREQUENCY}; FP32 master)",
+                lr_lora=LORA_LR, lr_head=PEAK_LR,
+                optimizer=f"SOAP (max_precond_dim={SOAP_MAX_PRECOND_DIM}, "
+                          f"freq={SOAP_PRECONDITION_FREQUENCY}; FP32 master)",
                 ap_state_dtype="float32", metric_is_quiet=metric is None,
             )
             atomic_json(os.path.join(destination, "train_state.json"), state)
@@ -1339,9 +1386,12 @@ def mp_fn(_index):
     losses = []
     for offset, batch in enumerate(loader):
         global_step = start_step + offset
-        lr = scheduled_lr(global_step, len(_SHARED["plan"]))
+        lora_lr = scheduled_lr(global_step, len(_SHARED["plan"]))
         for group in optimizer.param_groups:
-            group["lr"] = lr
+            # Each group's own lr_scale (set in make_optimizer: 1.0 for LoRA,
+            # PEAK_LR/LORA_LR for the head) rides the SAME warmup/cosine shape --
+            # only the peak differs per family. See LORA_LR's own comment.
+            group["lr"] = lora_lr * group["lr_scale"]
         optimizer.zero_grad(set_to_none=True)
         loss, _scores, _labels, _categories, _rows = ap_forward(
             model, ap_loss, batch, anchors
@@ -1398,8 +1448,10 @@ def mp_fn(_index):
 
         if final_step % LOG_EVERY_STEPS == 0:
             mean_loss = float(np.mean(losses[-LOG_EVERY_STEPS:]))
+            head_lr = lora_lr * (PEAK_LR / LORA_LR)
             log(rank, "TRAIN", f"step={final_step:,}/{len(_SHARED['plan']):,} "
-                f"lr={lr:.3e} AP-surrogate={mean_loss:.6g} {mem_info(device)}", force=True)
+                f"lr_lora={lora_lr:.3e} lr_head={head_lr:.3e} AP-surrogate={mean_loss:.6g} "
+                f"{mem_info(device)}", force=True)
             quiet_due = time.perf_counter() - _START >= next_quiet_at
             if collective_flag(rank, quiet_due, device):
                 new_quiet_dir = save_checkpoint(
