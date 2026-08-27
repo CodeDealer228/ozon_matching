@@ -91,3 +91,48 @@ Version 2.1 keeps the same two batched model calls but tightens candidate constr
 
 A second disjoint 200-source run is required before using an ETA for the full 12k
 generation.
+
+## Disjoint v2.1 benchmark result
+
+The role-aware run used 200 new sources, 10 per category, and completed all provider
+work in 47.28 seconds. Local bank preparation took another 52.31 seconds and is paid
+once per process. Because each category had 10 rows, the benchmark used 40 batches
+(8+2 per category); long full runs mostly use full eight-row batches.
+
+Results before the final conservative dependency filter:
+
+- attempted sources: 200;
+- completed sources: 190;
+- terminal sources: 10, both Electronics validator batches affected by a safe-to-fix
+  `status=skip` plus stale operation IDs formatting inconsistency;
+- accepted operations: 163;
+- materialized pairs: 326 (163 positive + 163 negative);
+- locally non-applicable operations: 0;
+- observed throughput: 15,229 attempted sources/hour;
+- raw operations/source: 0.815.
+
+The representative per-category audit was materially better than v2.0: examples
+included `domino -> contex` for condoms, `h1n -> q8n-4k` for Zoom recorders,
+`100штук -> 200штук` for ball-pit balls and `саи160к -> саи250а` for Resanta welding
+machines. It also exposed a smaller remaining failure mode: changing a brand while
+leaving a brand-specific article, or changing an article to one belonging to another
+brand.
+
+The full-run code therefore rejects those identity-dependency conflicts before the
+model sees them. Applying the same rule conservatively to the completed benchmark
+retains 127 operations, or 0.635 operations per attempted source. At that lower-bound
+yield, 6,000 operations (12,000 balanced pairs) require about 9,449 source attempts.
+After excluding diagnostic and benchmark sources, the strict source pack still has
+about 11,460 unused sources, so the total target remains feasible.
+
+### ETA
+
+- mathematical API estimate at the conservative yield: about 37 minutes;
+- practical estimate including bank construction, uneven category tails, checkpoint
+  writes and ordinary model rotation: **45–75 minutes**;
+- risk envelope if several provider quotas expire during the run: up to roughly two
+  hours.
+
+This estimate is based on actual end-to-end provider latency, not a theoretical call
+count. The 12k run must stop per category at exactly 300 accepted operations and must
+not include the v2.0 diagnostic rows.

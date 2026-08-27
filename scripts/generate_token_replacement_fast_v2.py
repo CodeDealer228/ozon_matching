@@ -36,7 +36,7 @@ CONTEXT_RE = re.compile(r"[A-Za-zА-Яа-я0-9-]{3,}")
 VALUE_RE = re.compile(r"[A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9./_-]{0,63}")
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 PROMPT_VERSION = 2
-CANDIDATE_BANK_VERSION = 4
+CANDIDATE_BANK_VERSION = 5
 CONTEXT_STOPWORDS = {
     "для", "или", "при", "без", "под", "над", "товар", "товара", "набор",
     "цвет", "размер", "штук", "шт", "арт", "модель", "бренд", "комплект",
@@ -210,6 +210,26 @@ def role_values(item: dict[str, object], role: str, source_token: str) -> list[s
     return values
 
 
+def identity_values(left: pd.Series, right: pd.Series, role: str) -> set[str]:
+    output: set[str] = set()
+    for item in (left, right):
+        attributes = json.loads(str(item["attributes"]))
+        for key, value in attribute_leaves(attributes):
+            if key_role(key) != role:
+                continue
+            value_text = str(value).strip()
+            candidates = (
+                [value_text]
+                if role == "brand" and len(VALUE_RE.findall(value_text)) == 1
+                else VALUE_RE.findall(value_text)
+            )
+            for candidate in candidates:
+                cleaned = str(candidate).strip(".,;:!?()[]{}\"'")
+                if cleaned and cleaned.casefold() not in BAD_BRAND_VALUES:
+                    output.add(cleaned)
+    return output
+
+
 def public_item(item: pd.Series, max_attribute_chars: int = 700) -> dict[str, object]:
     return compact_rag_item(
         {"name": str(item["name"]), "attributes": json.loads(str(item["attributes"]))},
@@ -242,6 +262,7 @@ class BankEntry:
     context: frozenset[str]
     source_pair_sha256: str
     evidence_name: str
+    evidence_text: str
 
 
 class ReplacementBank:
@@ -273,6 +294,7 @@ class ReplacementBank:
                         context,
                         str(row["source_pair_sha256"]),
                         str(left["name"]),
+                        f"{left['name']} {left['attributes']}",
                     )
                 )
                 self.frequencies[(category, role, token_type, token.casefold())] += 1
@@ -338,6 +360,7 @@ class ReplacementBank:
                 "source_role": source_role,
                 "candidate_source": "contextual_human_train_bank",
                 "evidence_name": entry.evidence_name[:240],
+                "_evidence_text": entry.evidence_text,
                 "bank_frequency": self.frequencies[
                     (category, source_role, token_type, entry.token.casefold())
                 ],
@@ -358,6 +381,8 @@ def build_operations(
     right = items.loc[row["id2"]]
     context = context_tokens(f"{left['name']} {right['name']}")
     offered = [str(token) for token in row["offered_tokens"][:source_token_limit]]
+    source_brand_values = identity_values(left, right, "brand")
+    source_article_values = identity_values(left, right, "article")
     operations: list[dict[str, object]] = []
     for source in offered:
         source_role = infer_source_role(left, right, source)
@@ -391,6 +416,7 @@ def build_operations(
                         "source_role": source_role,
                         "candidate_source": "retrieved_hard_negative",
                         "evidence_name": str(evidence_item.get("name", ""))[:240],
+                        "_evidence_text": json.dumps(evidence_item, ensure_ascii=False),
                         "bank_frequency": 1,
                         "context_overlap": len(context & context_tokens(str(evidence_item.get("name", "")))),
                     })
@@ -407,12 +433,27 @@ def build_operations(
                 continue
             seen_targets.add(folded)
             candidates.append(candidate)
-        for candidate in candidates[:candidates_per_token]:
+        accepted_for_source = 0
+        for candidate in candidates:
+            evidence_text = str(candidate.get("_evidence_text", ""))
+            if source_role == "article" and source_brand_values and not any(
+                replace_text(evidence_text, brand, "__probe__")[1] > 0
+                for brand in source_brand_values
+            ):
+                continue
+            if source_role == "brand" and source_article_values and not any(
+                replace_text(evidence_text, article, "__probe__")[1] > 0
+                for article in source_article_values
+            ):
+                continue
             operations.append({
                 "operation_id": f"op{len(operations)}",
                 "source_token": source,
-                **candidate,
+                **{key: value for key, value in candidate.items() if not key.startswith("_")},
             })
+            accepted_for_source += 1
+            if accepted_for_source >= candidates_per_token:
+                break
     return operations
 
 
@@ -485,15 +526,22 @@ def validate_batch_decisions(
             raise ValueError("invalid_batch_types")
         allowed = {str(op["operation_id"]): op for op in rows[slot]["candidate_operations"]}
         if status == "skip":
-            if operation_ids:
-                raise ValueError("invalid_batch_skip")
             output[slot] = {
                 "status": "skip",
                 "replacements": [],
-                "skip_reason": skip_reason.strip() or "model_skip",
+                "skip_reason": skip_reason.strip() or (
+                    "model_skip_with_ignored_operations" if operation_ids else "model_skip"
+                ),
             }
             continue
-        if not 1 <= len(operation_ids) <= max_replacements or len(set(operation_ids)) != len(operation_ids):
+        if not operation_ids:
+            output[slot] = {
+                "status": "skip",
+                "replacements": [],
+                "skip_reason": "replace_without_operations",
+            }
+            continue
+        if len(operation_ids) > max_replacements or len(set(operation_ids)) != len(operation_ids):
             raise ValueError("invalid_batch_replacement_count")
         if any(not isinstance(operation_id, str) or operation_id not in allowed for operation_id in operation_ids):
             raise ValueError("operation_not_allowed")

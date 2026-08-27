@@ -63,6 +63,11 @@ tolerant = {
 tolerant_decisions = validate_batch_decisions(tolerant, rows, 2)
 assert tolerant_decisions[0]["replacements"][0]["source_token"] == "lynxauto"
 assert tolerant_decisions[1]["skip_reason"] == "model_skip"
+tolerant["decisions"][1]["operation_ids"] = ["op0"]
+assert (
+    validate_batch_decisions(tolerant, rows, 2)[1]["skip_reason"]
+    == "model_skip_with_ignored_operations"
+)
 
 source_rows = [
     {"category": "A", "source_pair_sha256": "a"},
@@ -78,8 +83,8 @@ assert [batch[0]["category"] for batch in batches[:2]] == ["A", "B"]
 bank = ReplacementBank.__new__(ReplacementBank)
 bank.entries = {
     ("A", "article", "model"): [
-        BankEntry("w71295", "model", "article", frozenset({"фильтр", "масляный"}), "x", "фильтр масляный w71295"),
-        BankEntry("ab123", "model", "article", frozenset({"другое"}), "y", "другой товар ab123"),
+        BankEntry("w71295", "model", "article", frozenset({"фильтр", "масляный"}), "x", "фильтр масляный w71295", "lynxauto фильтр масляный w71295"),
+        BankEntry("ab123", "model", "article", frozenset({"другое"}), "y", "другой товар ab123", "другой товар ab123"),
     ]
 }
 bank.postings = {
