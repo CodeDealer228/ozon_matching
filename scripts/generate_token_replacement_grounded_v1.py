@@ -26,6 +26,7 @@ from judge_token_replacement_grounded_bundles import (
     build_bundle,
     identity_fields,
     local_bundle_rejection,
+    name_context,
     process_batch,
     stable_hash,
 )
@@ -38,29 +39,72 @@ from repair_token_replacement_identity_bundles import (
 PIPELINE_VERSION = 1
 
 
-def full_target_cards(
-    source_row: dict[str, object],
-    items: pd.DataFrame,
-    name_index: dict[tuple[str, str], list[int]],
-) -> list[pd.Series]:
-    excluded = {int(source_row["id1"]), int(source_row["id2"])}
-    output: list[pd.Series] = []
-    seen: set[int] = set()
-    for example in source_row["rag_examples"]:
-        if example.get("relation") != "different_product":
-            continue
-        for key in ("item_1", "item_2"):
-            evidence = example[key]
-            name_key = (
-                str(source_row["category"]),
-                str(evidence.get("name", "")).casefold(),
-            )
-            for item_id in name_index.get(name_key, [])[:3]:
-                if item_id in excluded or item_id in seen:
-                    continue
-                seen.add(item_id)
-                output.append(items.loc[item_id])
-    return output
+class CatalogIndex:
+    def __init__(self, items: pd.DataFrame):
+        self.name_index: dict[tuple[str, str], list[int]] = defaultdict(list)
+        self.contexts: dict[int, frozenset[str]] = {}
+        self.postings: dict[tuple[str, str], list[int]] = defaultdict(list)
+        for item in items.itertuples(index=False):
+            item_id = int(item.id)
+            category = str(item.category)
+            self.name_index[(category, str(item.name).casefold())].append(item_id)
+            public = {"name": str(item.name), "attributes": str(item.attributes)}
+            if not identity_fields(public):
+                continue
+            context = frozenset(name_context(public))
+            if not context:
+                continue
+            self.contexts[item_id] = context
+            for token in context:
+                self.postings[(category, token)].append(item_id)
+
+    def candidates(
+        self,
+        source_row: dict[str, object],
+        left: pd.Series,
+        right: pd.Series,
+        items: pd.DataFrame,
+        limit: int = 30,
+    ) -> list[pd.Series]:
+        category = str(source_row["category"])
+        excluded = {int(source_row["id1"]), int(source_row["id2"])}
+        output_ids: list[int] = []
+        seen: set[int] = set(excluded)
+        for example in source_row["rag_examples"]:
+            if example.get("relation") != "different_product":
+                continue
+            for key in ("item_1", "item_2"):
+                evidence_name = str(example[key].get("name", "")).casefold()
+                for item_id in self.name_index.get((category, evidence_name), [])[:3]:
+                    if item_id not in seen:
+                        seen.add(item_id)
+                        output_ids.append(item_id)
+        common_context = name_context(left) & name_context(right)
+        if len(common_context) < 2:
+            common_context = name_context(left) | name_context(right)
+        offered_words = {
+            token
+            for value in source_row["offered_tokens"]
+            for token in name_context({"name": str(value), "attributes": "{}"})
+        }
+        query = common_context - offered_words
+        query_tokens = sorted(
+            query,
+            key=lambda token: (len(self.postings.get((category, token), [])), token),
+        )[:8]
+        candidate_ids: set[int] = set()
+        for token in query_tokens:
+            candidate_ids.update(self.postings.get((category, token), [])[:4000])
+        ranked = []
+        minimum_overlap = 2 if len(query) >= 2 else 1
+        for item_id in candidate_ids - seen:
+            overlap = len(query & set(self.contexts.get(item_id, ())))
+            if overlap >= minimum_overlap:
+                ranked.append((-overlap, item_id))
+        for _, item_id in sorted(ranked)[:limit]:
+            seen.add(item_id)
+            output_ids.append(item_id)
+        return [items.loc[item_id] for item_id in output_ids[:limit]]
 
 
 def target_tokens(target: pd.Series, role: str, source_token: str) -> list[str]:
@@ -86,9 +130,7 @@ def prepare_rows(
     excluded_source_pairs: set[str],
 ) -> tuple[list[dict[str, object]], Counter[str]]:
     source_rows = read_jsonl(source_pack)
-    name_index: dict[tuple[str, str], list[int]] = defaultdict(list)
-    for item in items.itertuples(index=False):
-        name_index[(str(item.category), str(item.name).casefold())].append(int(item.id))
+    catalog = CatalogIndex(items)
     output: list[dict[str, object]] = []
     rejected: Counter[str] = Counter()
     for source_row in source_rows:
@@ -98,7 +140,7 @@ def prepare_rows(
             continue
         left = items.loc[int(source_row["id1"])]
         right = items.loc[int(source_row["id2"])]
-        cards = full_target_cards(source_row, items, name_index)
+        cards = catalog.candidates(source_row, left, right, items)
         if not cards:
             rejected["no_full_rag_target_card"] += 1
             continue
@@ -250,6 +292,7 @@ def main() -> None:
     parser.add_argument("--source-pack", type=Path, required=True)
     parser.add_argument("--items", type=Path, default=Path("data/items_human.parquet"))
     parser.add_argument("--exclude-pairs", type=Path, action="append", default=[])
+    parser.add_argument("--prepared-input", type=Path)
     parser.add_argument("--model-registry", type=Path, action="append", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--count", type=int, default=200)
@@ -271,9 +314,20 @@ def main() -> None:
     for path in args.exclude_pairs:
         frame = pd.read_parquet(path, columns=["source_pair_sha256"])
         excluded_source_pairs.update(frame["source_pair_sha256"].astype(str))
-    prepared, deterministic_rejections = prepare_rows(
-        args.source_pack, items, excluded_source_pairs
-    )
+    if args.prepared_input:
+        prepared = json.loads(args.prepared_input.read_text(encoding="utf-8"))
+        source_by_hash = {
+            str(row["source_pair_sha256"]): row for row in read_jsonl(args.source_pack)
+        }
+        for row in prepared:
+            source = source_by_hash[str(row["source_pair_sha256"])]
+            row["id1"] = int(source["id1"])
+            row["id2"] = int(source["id2"])
+        deterministic_rejections = Counter({"loaded_from_prepared_input": len(prepared)})
+    else:
+        prepared, deterministic_rejections = prepare_rows(
+            args.source_pack, items, excluded_source_pairs
+        )
     journal = args.output_dir / "selection_journal.jsonl"
     records = read_jsonl(journal)
     attempted = {
