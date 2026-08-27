@@ -44,6 +44,25 @@ ARTICLE_KEY_RE = re.compile(
 FORBIDDEN_MODEL_KEY_PARTS = (
     "автомобил", "совместим", "поддерживаем", "назначение", "тип",
 )
+LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9+._/-]*")
+SAFE_RESIDUAL_LATIN = {
+    "black", "white", "red", "blue", "green", "gray", "grey", "silver",
+    "gold", "pink", "beige", "brown", "orange", "yellow", "purple",
+    "transparent", "dark", "light", "matte", "glossy", "for", "with",
+}
+PROTECTED_SPEC_KEY_PARTS = (
+    "цвет", "размер", "памят", "объем", "объём", "емкость", "ёмкость",
+    "мощност", "напряж", "комплектац", "количество", "вес", "масса",
+    "длина", "ширина", "высота", "диаметр", "разрешение", "процессор",
+)
+CYRILLIC_TO_LATIN = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e",
+    "ё": "e", "ж": "zh", "з": "z", "и": "i", "й": "i", "к": "k",
+    "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+    "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "c",
+    "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "",
+    "э": "e", "ю": "yu", "я": "ya",
+})
 
 
 def stable_hash(value: object) -> str:
@@ -260,6 +279,53 @@ def apply_bundle(item: pd.Series, mappings: list[dict[str, str]]) -> dict[str, o
     return {"name": name, "attributes": changed_attributes}
 
 
+def latinize(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold().translate(CYRILLIC_TO_LATIN))
+
+
+def local_bundle_rejection(
+    row: dict[str, object], bundle: dict[str, object], left: pd.Series, right: pd.Series
+) -> str | None:
+    replacement = str(row["replacement_token"])
+    target_name = str(bundle["target_card"]["name"])
+    if not contains(target_name, replacement):
+        return "replacement_missing_from_target_name"
+    source_specs: dict[str, set[str]] = defaultdict(set)
+    target_specs: dict[str, set[str]] = defaultdict(set)
+    for item, destination in ((left, source_specs), (right, source_specs), (bundle["target_card"], target_specs)):
+        attributes = item["attributes"]
+        if isinstance(attributes, str):
+            attributes = parse_attributes(attributes)
+        for key, value in attribute_leaves(attributes):
+            normalized_key = normalize_key(key)
+            if any(fragment in normalized_key for fragment in PROTECTED_SPEC_KEY_PARTS):
+                destination[normalized_key].add(normalize_key(str(value)))
+    for key in source_specs.keys() & target_specs.keys():
+        if source_specs[key].isdisjoint(target_specs[key]):
+            return "grounded_target_spec_conflict:" + key
+    if row["source_role"] != "brand":
+        return None
+    source_brand = latinize(str(row["source_token"]))
+    preview_text = f"{bundle['preview_name_1']} {bundle['preview_name_2']}"
+    for token in re.findall(r"[A-Za-zА-Яа-я0-9+._/-]+", preview_text):
+        if source_brand and latinize(token) == source_brand:
+            return "old_brand_alias_remains"
+    source_latin = {
+        token.casefold()
+        for token in LATIN_TOKEN_RE.findall(f"{left['name']} {right['name']}")
+    }
+    target_latin = {token.casefold() for token in LATIN_TOKEN_RE.findall(target_name)}
+    mapped_source_latin = {
+        token.casefold()
+        for mapping in bundle["mappings"]
+        for token in LATIN_TOKEN_RE.findall(mapping["source_span"])
+    }
+    unsupported = source_latin - target_latin - mapped_source_latin - SAFE_RESIDUAL_LATIN
+    if unsupported:
+        return "unsupported_source_identity_tokens:" + ",".join(sorted(unsupported)[:5])
+    return None
+
+
 def prepare_rows(
     generation_dir: Path, source_pack: Path, items: pd.DataFrame
 ) -> tuple[list[dict[str, object]], Counter[str]]:
@@ -290,6 +356,10 @@ def prepare_rows(
                 continue
             bundle["preview_name_1"] = preview_1["name"]
             bundle["preview_name_2"] = preview_2["name"]
+            rejection = local_bundle_rejection(row, bundle, left, right)
+            if rejection is not None:
+                rejected[rejection.split(":", 1)[0]] += 1
+                continue
             bundles.append(bundle)
         if not bundles:
             rejected["no_deterministic_grounded_bundle"] += 1
@@ -498,7 +568,7 @@ def main() -> None:
     for path in [journal, *args.exclude_journal]:
         for record in read_jsonl(path):
             attempted.update(str(value) for value in record.get("operation_sha256s", []))
-    selected = balanced_sample(
+    selected = [] if args.count == 0 else balanced_sample(
         [row for row in prepared if row["operation_sha256"] not in attempted], args.count
     )
     preview = [{
@@ -541,7 +611,25 @@ def main() -> None:
         for record in records if record.get("request_status") == "complete"
         for result in record.get("results", [])
     ]
-    chosen = [row for row in results if row["decision"]["status"] == "choose"]
+    prepared_by_operation = {
+        str(row["operation_sha256"]): {
+            str(bundle["bundle_id"]): bundle for bundle in row["bundles"]
+        }
+        for row in prepared
+    }
+    chosen = []
+    stale_chosen = 0
+    for row in results:
+        if row["decision"]["status"] != "choose":
+            continue
+        current_bundle = prepared_by_operation.get(str(row["operation_sha256"]), {}).get(
+            str(row["decision"]["bundle_id"])
+        )
+        if current_bundle is None:
+            stale_chosen += 1
+            continue
+        row["selected_bundle"] = current_bundle
+        chosen.append(row)
     with (args.output_dir / "chosen_bundles.jsonl").open("w", encoding="utf-8") as handle:
         for row in chosen:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
@@ -555,6 +643,7 @@ def main() -> None:
         "selected_this_run": len(selected),
         "completed_results": len(results),
         "chosen": len(chosen),
+        "chosen_removed_by_stricter_local_audit": stale_chosen,
         "skipped": len(results) - len(chosen),
         "terminal_batches": sum(record.get("request_status") == "terminal_error" for record in records),
         "ids_sent": False,

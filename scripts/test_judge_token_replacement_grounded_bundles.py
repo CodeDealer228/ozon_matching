@@ -7,6 +7,7 @@ from judge_token_replacement_grounded_bundles import (
     build_bundle,
     identity_fields,
     identity_kind,
+    local_bundle_rejection,
     parse_decisions,
 )
 
@@ -85,8 +86,36 @@ def test_model_can_only_choose_offered_bundle() -> None:
     assert parse_decisions(message, [row])[0]["bundle_id"] == "bundle_ok"
 
 
+def test_brand_bundle_rejects_old_alias_and_unsupported_line() -> None:
+    left = item("xiaomi mi mini backpack", {"бренд": "xiaomi"})
+    right = item("рюкзак ксиоми mi mini", {"бренд": "xiaomi"})
+    bundle = {
+        "target_card": {"name": "рюкзак piquadro urban", "attributes": {"бренд": "piquadro"}},
+        "mappings": [{"kind": "brand", "source_span": "xiaomi", "target_span": "piquadro"}],
+        "preview_name_1": "piquadro mi mini backpack",
+        "preview_name_2": "рюкзак ксиоми mi mini",
+    }
+    row = {"source_role": "brand", "source_token": "xiaomi", "replacement_token": "piquadro"}
+    assert local_bundle_rejection(row, bundle, left, right) is not None
+
+
+def test_bundle_rejects_grounded_target_spec_conflict() -> None:
+    left = item("kaimana uk-21 ppm фиолетовая", {"бренд": "kaimana", "модель": "uk-21 ppm", "цвет товара": "фиолетовый"})
+    right = item("укулеле kaimana uk-21 ppm", {"бренд": "kaimana", "модель": "uk-21 ppm", "цвет товара": "фиолетовый"})
+    bundle = {
+        "target_card": {"name": "kaimana uk-21 pkm розовая", "attributes": {"бренд": "kaimana", "модель": "uk-21 pkm", "цвет товара": "розовый"}},
+        "mappings": [{"kind": "model", "source_span": "uk-21 ppm", "target_span": "uk-21 pkm"}],
+        "preview_name_1": "kaimana uk-21 pkm фиолетовая",
+        "preview_name_2": "укулеле kaimana uk-21 pkm",
+    }
+    row = {"source_role": "article", "source_token": "uk-21 ppm", "replacement_token": "uk-21 pkm"}
+    assert local_bundle_rejection(row, bundle, left, right) == "grounded_target_spec_conflict:цвет товара"
+
+
 if __name__ == "__main__":
     test_identity_kind_excludes_compatibility_model()
     test_apply_bundle_never_changes_specs()
     test_brand_bundle_uses_grounded_model_and_article()
     test_model_can_only_choose_offered_bundle()
+    test_brand_bundle_rejects_old_alias_and_unsupported_line()
+    test_bundle_rejects_grounded_target_spec_conflict()
