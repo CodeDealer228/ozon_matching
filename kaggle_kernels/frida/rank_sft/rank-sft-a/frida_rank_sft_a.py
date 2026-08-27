@@ -284,6 +284,55 @@ PER_CORE_TRAIN_BATCH = 10
 PER_CORE_EVAL_BATCH = 64
 RANK_CACHE_BATCH = 96             # inference-only (no grad), can run larger
 
+GRAD_CLIP_NORM = 1.0
+                                  # This project's own reports/frida_percat_tpu_
+                                  # nan_postmortem.md documents the actual root
+                                  # cause of a materially identical prior TPU NaN
+                                  # incident (frida-percat-lora, 17/20 categories
+                                  # diverged): the old percat loop checked ONLY
+                                  # loss.isfinite() before backward(), never the
+                                  # GRADIENT after it -- an occasional non-finite
+                                  # gradient on a single rank (bf16 backward
+                                  # overflow, a degenerate batch, etc.) still went
+                                  # through xm.optimizer_step's cross-rank
+                                  # all-reduce untouched, poisoning every
+                                  # replica's parameters AND AdamW moments in one
+                                  # shot; only the NEXT step's forward then
+                                  # surfaced it as loss=NaN, by which point the
+                                  # damage was already permanent and cluster-wide.
+                                  # v5's own REAL CRASH #4 fix (checking loss.
+                                  # isfinite() before optimizer_step) closes the
+                                  # exact same gap this project already hit once
+                                  # before -- but per the postmortem's own
+                                  # explicit finding (section 1.1: "обычное
+                                  # среднее конечных gradients само по себе не
+                                  # превращается в NaN... причиной мог быть
+                                  # optimizer update предыдущего шага" and "loss
+                                  # стал NaN до текущего backward не доказывает,
+                                  # что первопричина в текущем forward"), a
+                                  # finite LOSS does not guarantee a finite
+                                  # GRADIENT -- this file's loss functions
+                                  # (ranknet_deltaap_loss/bce_stabilizer) are
+                                  # numerically well-behaved in FP32, but the
+                                  # bf16 backward pass through the shared FRIDA
+                                  # encoder is exactly where the percat incident's
+                                  # actual poisoned gradients came from, and nothing
+                                  # here checks that path directly. The project's
+                                  # own PROVEN fix (section 4, "Защитный механизм,
+                                  # который стоит сохранить": clip_grad_norm_ with
+                                  # error_if_nonfinite=False, kept in the FINAL
+                                  # successful format-v4 kernel even after the
+                                  # more expensive full replica-vote guard was
+                                  # removed) is added below as the same cheap,
+                                  # always-on insurance: clip_grad_norm_ itself
+                                  # never raises on a non-finite gradient
+                                  # (error_if_nonfinite=False), but the norm it
+                                  # RETURNS is checked, giving the exact same
+                                  # "was the gradient too pathological to safely
+                                  # apply" signal the postmortem's own final
+                                  # architecture relies on -- now checked
+                                  # alongside loss.isfinite(), not instead of it.
+
 EPOCHS = 5                        # per PROMPT.md: "рассчитываем на 5 полных эпох"
 
 MAX_TRAIN_SECONDS = 30600         # 8.5h -- Kaggle's TPU session cap is 9h
@@ -1888,25 +1937,46 @@ def _mp_fn(index):
                 loss_bce = bce_stabilizer(logits, batch_labels)
                 loss = loss_rank + BCE_WEIGHT * loss_bce
                 loss.backward()
-                # REAL CRASH #4 (2026-08-26, v4) fix: check BEFORE
-                # xm.optimizer_step, not after -- once a NaN/Inf gradient is
-                # applied to the weights, the corruption is immediate and
-                # permanent (every downstream matmul propagates it), so the
-                # check has to gate the update, not just report on it
-                # afterwards. loss.item() is a real device->host sync (same
-                # cost class as _xla_sync's own single-step materialization,
-                # see that helper's docstring) but this is exactly the kind
-                # of "small, frequent, worth it" sync this file's SYNC
-                # logging philosophy already accepts -- catching corruption
-                # BEFORE it happens is worth one extra scalar sync per step.
-                loss_value = loss.item()
-                local_nonfinite = not math.isfinite(loss_value)
+                # REAL CRASH #4 fix (v5) checked loss.isfinite() before
+                # optimizer_step, which closes the "loss=NaN corrupts every
+                # replica via the all-reduce" gap -- but per this project's
+                # own reports/frida_percat_tpu_nan_postmortem.md (the
+                # frida-percat-lora incident, 17/20 categories diverged): a
+                # FINITE loss does NOT guarantee a finite GRADIENT. The
+                # postmortem's own root-cause finding is explicit -- "loss
+                # стал NaN до текущего backward не доказывает, что
+                # первопричина в текущем forward" -- an occasional non-finite
+                # gradient from THIS step's bf16 backward (independent of
+                # whatever this step's own loss value was) can still poison
+                # every replica's parameters via xm.optimizer_step's
+                # cross-rank all-reduce, only surfacing as loss=NaN on some
+                # LATER step. clip_grad_norm_(error_if_nonfinite=False) is
+                # the postmortem's own proven fix (section 4: the one
+                # protective mechanism it explicitly says to keep), kept in
+                # this project's FINAL successful format-v4 percat kernel
+                # even after the more expensive full replica-vote guard was
+                # removed as impractically slow. It never raises on a
+                # non-finite gradient itself; the norm it RETURNS is what
+                # gets checked, alongside loss, before deciding whether this
+                # step's update is safe to apply.
+                trainable_parameters = [p for group in optimizer.param_groups for p in group["params"]]
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    trainable_parameters, GRAD_CLIP_NORM, error_if_nonfinite=False, foreach=False)
+                # One combined host sync for both scalars (loss AND grad_norm)
+                # instead of two separate .item() calls -- same "small,
+                # frequent, worth it" sync budget this file's SYNC logging
+                # philosophy already accepts (see _xla_sync's own docstring),
+                # just not doubled for no reason.
+                loss_value, grad_norm_value = torch.stack(
+                    [loss.detach(), grad_norm.detach()]).cpu().tolist()
+                local_nonfinite = not (math.isfinite(loss_value) and math.isfinite(grad_norm_value))
                 if local_nonfinite:
                     loss_rank_value = loss_rank.item()
                     loss_bce_value = loss_bce.item()
                     _log_stage(rank, "NONFINITE_LOSS",
                         f"step={global_step + 1} cat={category_vocab[category_id]!r} "
-                        f"loss={loss_value} loss_rank={loss_rank_value} loss_bce={loss_bce_value}",
+                        f"loss={loss_value} loss_rank={loss_rank_value} loss_bce={loss_bce_value} "
+                        f"grad_norm={grad_norm_value}",
                         force=True)
                 # xm.optimizer_step is itself a collective (an internal
                 # gradient all-reduce across all 8 replicas) -- a per-
@@ -1914,20 +1984,22 @@ def _mp_fn(index):
                 # enter that collective while others don't, deadlocking the
                 # stragglers forever (REAL CRASH #2's failure class, new
                 # trigger). _collective_any() OR-reduces "was ANY replica's
-                # loss non-finite this step" across all 8 first, so every
-                # replica makes the IDENTICAL skip/proceed decision -- one
-                # replica's bad batch makes every replica sit this step out
-                # together, keeping global_step/consecutive_nonfinite_losses
-                # bit-identical across ranks (both later feed into the
-                # rank-cache-rebuild collective's own step-agreement check).
+                # loss OR grad_norm non-finite this step" across all 8 first,
+                # so every replica makes the IDENTICAL skip/proceed decision
+                # -- one replica's bad batch makes every replica sit this
+                # step out together, keeping global_step/
+                # consecutive_nonfinite_losses bit-identical across ranks
+                # (both later feed into the rank-cache-rebuild collective's
+                # own step-agreement check).
                 any_nonfinite = _collective_any(xm, rank, device, local_nonfinite,
                                                 f"nonfinite_loss_step{global_step + 1}")
                 if any_nonfinite:
                     consecutive_nonfinite_losses += 1
                     if not local_nonfinite:
                         _log_stage(rank, "NONFINITE_LOSS",
-                            f"step={global_step + 1}: own loss was finite ({loss_value}) but a "
-                            "sibling replica's was not -- skipping optimizer_step in lockstep",
+                            f"step={global_step + 1}: own loss/grad_norm were finite "
+                            f"(loss={loss_value}, grad_norm={grad_norm_value}) but a sibling "
+                            "replica's was not -- skipping optimizer_step in lockstep",
                             force=True)
                     _log_stage(rank, "NONFINITE_LOSS",
                         f"step={global_step + 1}: "
@@ -1938,8 +2010,9 @@ def _mp_fn(index):
                     if consecutive_nonfinite_losses >= MAX_CONSECUTIVE_NONFINITE_LOSSES:
                         raise _NonFiniteLossBudgetExceeded(
                             f"[rank{rank}] {consecutive_nonfinite_losses} consecutive non-finite "
-                            f"losses (cluster-wide) at step={global_step + 1} -- stopping before "
-                            "the model is corrupted any further (see REAL CRASH #4)."
+                            f"losses/gradients (cluster-wide) at step={global_step + 1} -- "
+                            "stopping before the model is corrupted any further "
+                            "(see REAL CRASH #4)."
                         )
                     continue
                 xm.optimizer_step(optimizer)
