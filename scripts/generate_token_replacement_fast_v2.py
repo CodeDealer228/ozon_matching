@@ -9,7 +9,7 @@ import math
 import os
 import re
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -914,6 +914,7 @@ def main() -> None:
     parser.add_argument("--candidates-per-token", type=int, default=6)
     parser.add_argument("--max-replacements", type=int, default=2)
     parser.add_argument("--model-pool-width", type=int, default=4)
+    parser.add_argument("--target-operations-per-category", type=int, default=0)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--base-url", default=os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--execute", action="store_true")
@@ -978,6 +979,7 @@ def main() -> None:
         "model_pool_width": args.model_pool_width,
         "generator_calls_per_batch": 1,
         "validator_calls_per_nonempty_batch": 1,
+        "target_operations_per_category": args.target_operations_per_category,
         "ids_sent": False,
         "labels_sent": False,
         "validation_sent": False,
@@ -1023,33 +1025,99 @@ def main() -> None:
             timeout=args.timeout,
         )
         router = ModelQuotaRouter(args.model_registry, args.output_dir / "model_events.jsonl")
+        existing_complete, _ = filter_locally_applicable(flatten_complete(existing), items)
+        live_operations: Counter[str] = Counter()
+        for row in existing_complete:
+            if row["decision"]["status"] == "replace":
+                live_operations[str(row["category"])] += len(row["decision"]["replacements"])
+        batch_queues: dict[str, deque[list[dict[str, object]]]] = defaultdict(deque)
+        for batch in batches:
+            batch_queues[str(batch[0]["category"])].append(batch)
+        total_batches = len(batches)
+        completed_batches = 0
+        batch_index = 0
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {}
-            for batch_index, batch in enumerate(batches):
-                source_hashes = [row["source_pair_sha256"] for row in batch]
-                append_jsonl(journal, {
-                    "request_status": "submitted",
-                    "batch_sha256": stable_hash(source_hashes),
-                    "source_pair_sha256s": source_hashes,
-                    "category": batch[0]["category"],
-                })
-                future = executor.submit(
-                    process_batch,
-                    batch,
-                    items,
-                    few_shots,
-                    client,
-                    router,
-                    args.max_replacements,
-                    batch_index,
-                    args.model_pool_width,
-                )
-                futures[future] = batch_index
-            completed_batches = 0
-            for future in as_completed(futures):
-                append_jsonl(journal, future.result())
-                completed_batches += 1
-                print(json.dumps({"completed_batches": completed_batches, "total_batches": len(batches)}), flush=True)
+            while router.available_models:
+                active_categories = [
+                    category
+                    for category, queue in batch_queues.items()
+                    if queue
+                    and (
+                        args.target_operations_per_category <= 0
+                        or live_operations[category] < args.target_operations_per_category
+                    )
+                ]
+                if not active_categories:
+                    break
+                active_categories.sort(key=lambda category: (live_operations[category], category))
+                wave_categories = active_categories[: args.workers]
+                futures = {}
+                for category in wave_categories:
+                    batch = batch_queues[category].popleft()
+                    source_hashes = [row["source_pair_sha256"] for row in batch]
+                    append_jsonl(journal, {
+                        "request_status": "submitted",
+                        "batch_sha256": stable_hash(source_hashes),
+                        "source_pair_sha256s": source_hashes,
+                        "category": category,
+                    })
+                    future = executor.submit(
+                        process_batch,
+                        batch,
+                        items,
+                        few_shots,
+                        client,
+                        router,
+                        args.max_replacements,
+                        batch_index,
+                        args.model_pool_width,
+                    )
+                    batch_index += 1
+                    futures[future] = category
+                for future in as_completed(futures):
+                    category = futures[future]
+                    record = future.result()
+                    if record.get("request_status") == "complete":
+                        filtered_results, local_rejections = filter_locally_applicable(
+                            record.get("results", []), items
+                        )
+                        record["results"] = filtered_results
+                        record["local_rejections"] = local_rejections
+                    if (
+                        args.target_operations_per_category > 0
+                        and record.get("request_status") == "complete"
+                    ):
+                        remaining = max(
+                            0,
+                            args.target_operations_per_category - live_operations[category],
+                        )
+                        for row in record.get("results", []):
+                            decision = row.get("decision", {})
+                            if decision.get("status") != "replace":
+                                continue
+                            kept = decision["replacements"][:remaining]
+                            remaining -= len(kept)
+                            if kept:
+                                decision["replacements"] = kept
+                                live_operations[category] += len(kept)
+                            else:
+                                row["decision"] = {
+                                    "status": "skip",
+                                    "replacements": [],
+                                    "skip_reason": "category_target_reached",
+                                }
+                    append_jsonl(journal, record)
+                    completed_batches += 1
+                print(json.dumps({
+                    "completed_batches": completed_batches,
+                    "total_candidate_batches": total_batches,
+                    "accepted_operations": sum(live_operations.values()),
+                    "categories_at_target": sum(
+                        args.target_operations_per_category > 0
+                        and live_operations[category] >= args.target_operations_per_category
+                        for category in batch_queues
+                    ),
+                }), flush=True)
 
     elapsed = time.perf_counter() - run_started
     if args.finalize_only and journal.exists():
@@ -1106,8 +1174,19 @@ def main() -> None:
         if record.get("request_status") in {"complete", "terminal_error"}
     }
     unresolved_batches = sorted(submitted_batches - terminal_batch_hashes)
+    source_categories = sorted({str(row["category"]) for row in source_rows})
+    target_reached = bool(args.target_operations_per_category) and all(
+        operations_by_category[category] >= args.target_operations_per_category
+        for category in source_categories
+    )
     manifest = {
-        "status": "complete" if not unresolved_batches else "stopped_with_uncertain_batches",
+        "status": (
+            "stopped_with_uncertain_batches"
+            if unresolved_batches
+            else "target_complete"
+            if target_reached
+            else "complete"
+        ),
         "execute": args.execute,
         "prompt_version": PROMPT_VERSION,
         "candidate_bank_version": CANDIDATE_BANK_VERSION,
@@ -1122,6 +1201,8 @@ def main() -> None:
         "local_rejected_operations": len(local_rejections),
         "terminal_batches": sum(record.get("request_status") == "terminal_error" for record in records),
         "accepted_operations": accepted_operations,
+        "target_operations_per_category": args.target_operations_per_category,
+        "target_reached": target_reached,
         "operations_by_category": dict(sorted(operations_by_category.items())),
         "decision_counts": dict(sorted(decision_counts.items())),
         "synthetic_pairs": pair_yield,
