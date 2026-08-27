@@ -596,7 +596,7 @@ def _collective_lockstep_check(xm_mod, rank, device, local_value, stage):
     return total
 
 
-def _collective_any(xm_mod, rank, device, local_flag, stage):
+def _collective_any(xm_mod, rank, device, local_flag, stage, log_every=True):
     """Returns True if local_flag is True on ANY replica (OR across all 8),
     via the same all_reduce-then-sync pattern _collective_lockstep_check
     uses. This is the REAL CRASH #4 fix's own synchronization primitive
@@ -608,15 +608,33 @@ def _collective_any(xm_mod, rank, device, local_flag, stage):
     waiting for the straggler that never arrives -- textbook REAL CRASH #2-
     class TPU collective deadlock, just triggered by a NaN loss instead of
     RNG divergence. FIX: every replica's own "my loss was non-finite" bit
-    is OR-reduced across all 8 BEFORE any replica decides whether to call
-    xm.optimizer_step this step -- so either all 8 replicas skip it
-    together (a rank whose OWN loss was perfectly finite still skips,
-    deliberately, to stay in lockstep with a sibling that had a bad batch)
-    or all 8 call it together. Never a partial call.
+
+    log_every controls ONLY the routine enter/exit print pair (see
+    _xla_sync's own docstring) -- an anomalously slow call (>
+    SYNC_SLOW_WARN_SECONDS) always logs regardless of this flag, so
+    diagnostic coverage for an actual hang is unaffected. REAL CRASH #5
+    (2026-08-27, v5): this call used to hardcode log_every=True, so it
+    printed an unconditional enter/exit pair on EVERY training step (on
+    top of the main per-step sync's own, much lighter every-
+    LOG_EVERY_STEPS cadence) -- tens of thousands of extra print(...,
+    flush=True) calls over a multi-hour run for a step that is a no-op
+    99.9% of the time (all-finite is the overwhelmingly common case).
+    v5 failed silently after 8790.3s with zero persisted output (Kaggle's
+    own session-output API returned no files at all for that version, and
+    the web UI could not even inspect the terminated container) -- unlike
+    every prior crash in this file's history, there is no log to point at
+    a specific cause this time. Excess per-step I/O is a real, verifiable-
+    in-code source of pipeline slowdown/overhead on a busy multi-hour loop
+    regardless of whether it was THIS crash's actual trigger, so it is
+    fixed now rather than left in place while re-diagnosing blind. Callers
+    now pass the SAME should_verbose_sync cadence the main per-step sync
+    already uses, so this call site's routine logging volume drops
+    ~50x (every step -> every LOG_EVERY_STEPS) while its anomaly detection
+    (SYNC_SLOW) stays exactly as sensitive as before.
     """
     tensor = torch.tensor([1.0 if local_flag else 0.0], dtype=torch.float32, device=device)
     summed = xm_mod.all_reduce(xm_mod.REDUCE_SUM, tensor)
-    _xla_sync(xm_mod, rank, f"collective_any({stage})", log_every=True)
+    _xla_sync(xm_mod, rank, f"collective_any({stage})", log_every=log_every)
     return float(summed.cpu().item()) > 0.5
 
 
@@ -1694,6 +1712,30 @@ def _mp_fn(index):
     stopped = False
     consecutive_step_failures = 0
     consecutive_nonfinite_losses = 0  # see MAX_CONSECUTIVE_NONFINITE_LOSSES's own comment
+    last_train_heartbeat = time.perf_counter()
+                                  # REAL CRASH #5 (2026-08-27, v5): unlike v1-v4, this crash
+                                  # (silent kill at 8790.3s) left NO log at all -- Kaggle's own
+                                  # session-output API returned zero files for that version, and
+                                  # the web UI could not even inspect the terminated container.
+                                  # Every log line in this loop was previously step-count-gated
+                                  # (LOG_EVERY_STEPS), so a hang partway between two logged steps
+                                  # -- or a hang so early/slow that not even one LOG_EVERY_STEPS
+                                  # boundary was ever reached -- produces the exact same "silence
+                                  # since the last printed line" signature whether the run is
+                                  # merely slow or genuinely stuck, with no way to tell which from
+                                  # the log alone. rebuild_rank_cache()/evaluate() already learned
+                                  # this lesson (see COLLECTIVE_HEARTBEAT_SECONDS) after v3's own
+                                  # 169s silent gap; the main training loop itself never got the
+                                  # same treatment because REAL CRASH #3's fix (sync every step)
+                                  # was assumed sufficient. It clearly is not a complete substitute
+                                  # for a wall-clock heartbeat: a per-step sync only proves a
+                                  # given step COMPLETED, it prints nothing while still IN
+                                  # progress. FIX: an unconditional, wall-clock-gated heartbeat
+                                  # (same COLLECTIVE_HEARTBEAT_SECONDS cadence, same rank-0-only
+                                  # policy) right at the top of every step's loop body -- so the
+                                  # next time this happens, the log's last line names the exact
+                                  # step/category/wall-clock the run was still alive at, instead
+                                  # of silence with no timestamp to anchor a diagnosis on.
     # REAL CRASH #2 (2026-08-26, v2, ~1130s -- ~552s of dead silence then an
     # external SIGTERM to all 8 replicas, no Python traceback -- diagnosed
     # from peak-RSS/duration logging added after v1's own crash, which
@@ -1843,6 +1885,13 @@ def _mp_fn(index):
         cat_cursor = 0
 
         for _local_step in range(steps_per_epoch):
+            now = time.perf_counter()
+            if rank == 0 and now - last_train_heartbeat >= COLLECTIVE_HEARTBEAT_SECONDS:
+                print(f"[{_elapsed():8.1f}s][rank{rank}] TRAIN_HEARTBEAT: "
+                      f"epoch={epoch} local_step={_local_step}/{steps_per_epoch} "
+                      f"global_step={global_step} elapsed_train={now - train_start:.0f}s "
+                      f"rss={_rss_mb():.0f}MB", flush=True)
+                last_train_heartbeat = now
             category_id = int(cat_cycle[cat_cursor % n_categories])
             cat_cursor += 1
             if category_id not in rank_tables:
@@ -1927,6 +1976,12 @@ def _mp_fn(index):
             batch_labels = batch_labels_t.to(device)
 
             n_pos_batch, n_neg_batch = len(step_pos), len(step_neg)
+            # Computed once, up front, so BOTH sync points this step (the
+            # nonfinite-check collective below AND the main post-optimizer
+            # sync further down) share the identical logging cadence --
+            # see _collective_any's own REAL CRASH #5 comment for why this
+            # must not default to "log every step".
+            should_verbose_sync = (global_step + 1) % LOG_EVERY_STEPS == 0
             try:
                 optimizer.zero_grad(set_to_none=True)
                 logits = model(input_ids=input_ids, attention_mask=attention_mask)
@@ -1992,7 +2047,8 @@ def _mp_fn(index):
                 # (both later feed into the rank-cache-rebuild collective's
                 # own step-agreement check).
                 any_nonfinite = _collective_any(xm, rank, device, local_nonfinite,
-                                                f"nonfinite_loss_step{global_step + 1}")
+                                                f"nonfinite_loss_step{global_step + 1}",
+                                                log_every=should_verbose_sync)
                 if any_nonfinite:
                     consecutive_nonfinite_losses += 1
                     if not local_nonfinite:
@@ -2023,7 +2079,6 @@ def _mp_fn(index):
                 # is the single most important line in this loop -- do not
                 # move it back inside the `% LOG_EVERY_STEPS == 0` guard.
                 stage_label = f"train_step epoch={epoch} step={global_step + 1}"
-                should_verbose_sync = (global_step + 1) % LOG_EVERY_STEPS == 0
                 sync_dt = _xla_sync(xm, rank, stage_label, log_every=should_verbose_sync)
                 scheduler.step()
                 global_step += 1
