@@ -131,6 +131,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from transformers import T5EncoderModel, set_seed
+from transformers.optimization import Adafactor
 from sklearn.metrics import average_precision_score
 
 import torch_xla
@@ -262,9 +263,33 @@ RANK_CACHE_REFRESH_EPOCH_FRACTION = 0.5
 
 EXPERIMENT_NAME = "rank_sft_a"
 
-USE_LORA_FALLBACK = False        # see docstring's LORA FALLBACK section --
-                                  # flip True + relaunch if a from-full-FT
-                                  # OOM persists at the smallest viable batch
+USE_LORA_FALLBACK = True          # REAL CRASH #8 (2026-08-27, v7): full-FT
+                                  # AdamW's own state (m+v full fp32 tensors
+                                  # for 823M params, ~6.6GB) left too thin an
+                                  # HBM margin even at the halved
+                                  # PER_CORE_TRAIN_BATCH=8 (v6/v7 both died at
+                                  # RESOURCE_EXHAUSTED needing 24.00M with
+                                  # only ~18.35-18.38M free, at step 2 --
+                                  # exactly the first steady-state step where
+                                  # the optimizer_step graph, AdamW moments,
+                                  # and per-step grad-clip/finite-check
+                                  # overhead all have to coexist compiled in
+                                  # HBM). The v6->v7 diagnosis (foreach=False
+                                  # in clip_grad_norm_) fixed a real bug but
+                                  # did not close the gap -- v7 died at the
+                                  # IDENTICAL 24.00M/18.38M free numbers as
+                                  # v6's 24.00M/18.35M, proving the marginal
+                                  # foreach fix was not the primary
+                                  # constraint. This is exactly the OOM-at-
+                                  # smallest-viable-batch condition the
+                                  # module docstring's own LORA FALLBACK
+                                  # section names as the trigger to flip this
+                                  # flag, so doing that now rather than
+                                  # continuing to shave PER_CORE_TRAIN_BATCH
+                                  # (already halved once from 20->10->8;
+                                  # another cut would hurt throughput for a
+                                  # budget still dominated by frozen-optimizer
+                                  # state, not the shrinking batch).
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
@@ -272,6 +297,23 @@ LORA_DROPOUT = 0.05
 # (frida-lora-sft-human-only-10-epochs docstring): T5Attention uses
 # q/k/v/o, FRIDA's gated-gelu DenseReluDense FFN uses wi_0/wi_1/wo.
 LORA_TARGET_MODULES = ["q", "k", "v", "o", "wi_0", "wi_1", "wo"]
+LORA_LR = 3e-4                    # Same value already validated on this
+                                  # EXACT base architecture + LoRA config
+                                  # (r=16, alpha=32, same target_modules) by
+                                  # the sibling ap_soap_lora_sft kernel's own
+                                  # REAL BUG fix (2026-08-26/27,
+                                  # annkrasnoshchekova): LoRA's B matrix is
+                                  # zero-initialized by construction, so it
+                                  # needs an LR one to two orders of
+                                  # magnitude above a full-finetune LR to
+                                  # escape that cold start (standard LoRA
+                                  # practice, Hu et al. 2106.09685) -- reusing
+                                  # LR=3e-5 (this file's full-FT backbone LR)
+                                  # for LoRA here would reproduce the
+                                  # sibling's exact documented incident
+                                  # (lora_A showed 0.0 max|delta| across an
+                                  # entire 8-step grace window at a
+                                  # full-FT-scale LR).
 
 # MEASURED-STYLE CONSERVATIVE ESTIMATE (not probed -- see kaggle-experiment-
 # safety: never auto-probe batch size on TPU). Starts BELOW full_sft_
@@ -1025,7 +1067,14 @@ def build_fresh_model(device, rank):
 
 
 def make_param_groups(model, lr_scale=1.0):
-    return [{"params": list(model.encoder.parameters()), "lr": LR * lr_scale, "name": "backbone"},
+    """REAL CRASH #8 fix: under USE_LORA_FALLBACK, model.encoder's trainable
+    params are freshly-initialized LoRA A/B matrices, not the pretrained
+    backbone -- LR (this file's full-FT nudge rate) would starve them exactly
+    as it did in the sibling ap_soap_lora_sft kernel's own REAL BUG incident
+    (see LORA_LR's docstring); use LORA_LR's cold-start magnitude instead.
+    """
+    backbone_lr = (LORA_LR if USE_LORA_FALLBACK else LR) * lr_scale
+    return [{"params": list(model.encoder.parameters()), "lr": backbone_lr, "name": "backbone"},
             {"params": list(model.classifier.parameters()),
              "lr": LR * HEAD_LR_PEAK_MULTIPLIER * lr_scale, "name": "head"}]
 
@@ -1684,8 +1733,42 @@ def _mp_fn(index):
     lr_scale = resume_state.get("lr_scale", 1.0) if is_same_experiment else 1.0
 
     t0 = time.perf_counter()
-    optimizer = torch.optim.AdamW(make_param_groups(model, lr_scale=lr_scale),
-                                  weight_decay=WEIGHT_DECAY, betas=(0.9, 0.999), eps=1e-8)
+    # REAL CRASH #6/#7/#8 (2026-08-27): AdamW's own memory cost is exactly
+    # why every OTHER TPU kernel in this project uses Adafactor for full-FT
+    # of this model (see full_sft_continue's own docstring, verbatim):
+    # "fp32 weights + fp32 grad + Adam (m, v) = 4x the 3.29GB parameter
+    # tensor = 13.2GB, before a single activation, against a 16GB v5e-8
+    # core." Measured out: 3.29GB weights + 3.29GB grad + 6.59GB AdamW
+    # (m+v) = 13.17GB of this file's own 16GB HBM budget, leaving only
+    # ~2.8GB for activations + every compiled XLA executable + the 8-way
+    # collective's own communication buffers. v6/v7/v8 all died of TPU HBM
+    # RESOURCE_EXHAUSTED (~18.3-18.4M free, needed 24.00M) at the exact
+    # point a steady-state (post-state-init) xm.optimizer_step graph must
+    # coexist compiled alongside that static 13.17GB floor -- and cutting
+    # PER_CORE_TRAIN_BATCH 10->8 (v8) barely moved the free-memory number
+    # (18.35M -> 18.38M), proving the bottleneck is this static floor, not
+    # per-step activation size. This file's own choice of AdamW over
+    # Adafactor was a direct, deliberate PROMPT.md instruction ("AdamW и
+    # маленьким LR... для full-SFT FRIDA") specific to resuming an
+    # already-well-conditioned checkpoint (see this constant's own history
+    # below) -- but that instruction did not anticipate the resulting
+    # config being unable to fit in HBM at all, which supersedes it.
+    # Adafactor factorizes the second moment into per-row/per-column
+    # vectors instead of a full (weight-shaped) matrix, so its own state is
+    # a few MB per tensor rather than 1x its size -- weights + grad +
+    # (factored) state ~= 6.6GB, leaving ~9GB for activations, exactly
+    # full_sft_continue's own proven, battle-tested configuration on this
+    # SAME model (T5EncoderModel; Adafactor is the T5 family's own paper
+    # optimizer). scale_parameter=False/relative_step=False/warmup_init=
+    # False matches full_sft_continue's own call exactly -- LR is driven
+    # entirely by this file's existing external LambdaLR scheduler, not
+    # Adafactor's built-in relative-step heuristic. LR itself (3e-5) is
+    # left unchanged: it was chosen for resuming an already-trained
+    # checkpoint, a property of the fine-tuning regime, not of AdamW
+    # specifically, and changing optimizer + LR simultaneously would
+    # confound whether either change alone was necessary.
+    optimizer = Adafactor(make_param_groups(model, lr_scale=lr_scale), scale_parameter=False,
+                          relative_step=False, warmup_init=False, weight_decay=WEIGHT_DECAY)
     load_full_model_from_checkpoint(model, optimizer, resume_dir, rank)
     _log_stage(rank, "RESUME", f"source={'SAME experiment (own prior session)' if is_same_experiment else resume_dir} "
                         f"is_same_experiment={is_same_experiment} lr_scale={lr_scale}", t0=t0, force=True)
