@@ -28,10 +28,12 @@ from generate_token_replacement_counterfactuals import (
 )
 from generate_token_replacement_fast_v2 import (
     ReplacementBank,
+    attribute_leaves,
     build_operations,
-    flatten_complete,
     infer_source_role,
+    key_role,
     public_item,
+    token_roles,
 )
 
 
@@ -67,16 +69,14 @@ def offered_source_spans(
     source_row: dict[str, object], left: pd.Series, right: pd.Series, source_token: str
 ) -> list[str]:
     values = [source_token]
-    for token in source_row.get("offered_tokens", []):
-        token = str(token)
-        if infer_source_role(left, right, token) in {"brand", "article"}:
-            values.append(token)
     for item in (left, right):
         attributes = parse_attributes(item["attributes"])
-        for key, value in attributes.items():
-            folded_key = str(key).casefold()
-            if any(part in folded_key for part in ("бренд", "модель", "артик", "партномер")):
-                values.extend(span_candidates(str(value), max_words=3, limit=12))
+        for key, value in attribute_leaves(attributes):
+            if key_role(key) not in {"brand", "article"}:
+                continue
+            value_text = str(value).strip()
+            values.append(value_text)
+            values.extend(span_candidates(value_text, max_words=3, limit=12))
     output: list[str] = []
     seen: set[str] = set()
     combined = f"{left['name']} {left['attributes']} {right['name']} {right['attributes']}"
@@ -90,6 +90,17 @@ def offered_source_spans(
         seen.add(folded)
         output.append(value)
     return output[:30]
+
+
+def explicit_identity_role(left: pd.Series, right: pd.Series, token: str) -> str | None:
+    roles: set[str] = set()
+    for item in (left, right):
+        roles.update(token_roles(parse_attributes(item["attributes"]), token))
+    if "brand" in roles:
+        return "brand"
+    if "article" in roles:
+        return "article"
+    return None
 
 
 def risky_operations(
@@ -120,8 +131,8 @@ def risky_operations(
         )
         if matched is None:
             raise RuntimeError(f"operation_metadata_not_reconstructed:{row.operation_sha256}")
-        role = str(matched["source_role"])
-        if role not in {"brand", "article"}:
+        role = explicit_identity_role(left, right, str(row.source_token))
+        if role is None:
             continue
         evidence_name = str(matched.get("evidence_name", "")).strip()
         target_spans = span_candidates(evidence_name, max_words=3, limit=80)
@@ -225,7 +236,10 @@ def messages(rows: list[dict[str, object]]) -> list[dict[str, str]]:
         "Never change memory, color, size, quantity, region, processor, screen, battery, camera, or "
         "other specifications. Every mapping must use exactly one offered source_span and one offered "
         "target_span grounded in the human-train evidence name. For a brand replacement, also replace "
-        "dependent family/model spans when they would otherwise belong to the old brand. Preserve "
+        "dependent family/model spans when they would otherwise belong to the old brand. The original "
+        "source_token must map exactly to the original replacement_token; never expand a brand into a "
+        "brand plus product description. Additional mappings may only replace offered model/article "
+        "identity spans. Never replace generic product words. Preserve "
         "missing fields: do not add a model to a card that did not mention it. Choose skip when the "
         "evidence is insufficient or a coherent minimal identity bundle cannot be formed. Choose keep "
         "only when the existing one-token operation is already coherent. Return only the tool call."
@@ -297,6 +311,15 @@ def parse_decisions(message: object, rows: list[dict[str, object]]) -> list[dict
                 continue
             seen.add(source.casefold())
             clean.append({"source_span": source, "target_span": target})
+        required_mapping = {
+            "source_span": rows[slot]["source_token"],
+            "target_span": rows[slot]["replacement_token"],
+        }
+        if status == "repair" and required_mapping not in clean:
+            status = "skip"
+            clean = []
+        elif status == "repair" and len(clean) == 1:
+            status = "keep"
         output[slot] = {
             "status": status if clean or status == "skip" else "skip",
             "mappings": clean,
@@ -357,15 +380,19 @@ def process_batch(
             "elapsed_seconds": time.perf_counter() - started,
         }
     assert completion is not None
+    message = completion.choices[0].message
     try:
-        decisions = parse_decisions(completion.choices[0].message, batch)
+        decisions = parse_decisions(message, batch)
     except Exception as exc:
+        calls = getattr(message, "tool_calls", None)
+        raw_arguments = getattr(calls[0].function, "arguments", "") if calls else ""
         return {
             "request_status": "terminal_error",
             "batch_sha256": batch_hash,
             "operation_sha256s": [row["operation_sha256"] for row in batch],
             "model": model,
             "error": {"classification": "invalid_structured_output", "error": str(exc)},
+            "raw_arguments": str(raw_arguments)[:12000],
             "elapsed_seconds": time.perf_counter() - started,
         }
     results: list[dict[str, object]] = []
@@ -410,6 +437,7 @@ def main() -> None:
     parser.add_argument("--source-pack", type=Path, required=True)
     parser.add_argument("--items", type=Path, default=Path("data/items_human.parquet"))
     parser.add_argument("--model-registry", type=Path, action="append", required=True)
+    parser.add_argument("--exclude-journal", type=Path, action="append", default=[])
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--count", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=5)
@@ -434,6 +462,9 @@ def main() -> None:
         for record in existing
         for value in record.get("operation_sha256s", [])
     }
+    for excluded_journal in args.exclude_journal:
+        for record in read_jsonl(excluded_journal):
+            attempted.update(str(value) for value in record.get("operation_sha256s", []))
     rows = [row for row in all_risky_rows if row["operation_sha256"] not in attempted]
     selected = balanced_sample(rows, args.count)
     preview = [{key: row[key] for key in (
