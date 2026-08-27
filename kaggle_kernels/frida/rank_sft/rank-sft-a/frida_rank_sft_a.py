@@ -1533,23 +1533,75 @@ def _find_bce_checkpoint_source():
     return None, None, False
 
 
+def _remap_state_dict_for_lora(state_dict):
+    """REAL CRASH #9 (2026-08-27, v9): peft's get_peft_model() replaces every
+    LoRA-target Linear module (q/k/v/o/wi_0/wi_1/wo, per LORA_TARGET_MODULES)
+    with a lora.Linear wrapper that stores the ORIGINAL frozen weight under a
+    NEW `.base_layer` path segment (e.g. `...SelfAttention.q.weight` becomes
+    `...SelfAttention.q.base_layer.weight`) -- confirmed experimentally
+    against this project's actual peft version (0.20.0) with a real
+    T5EncoderModel + this exact LoraConfig. A pre-LoRA full-FT checkpoint's
+    keys (like the one this file resumes from) still use the OLD path, so
+    target_module.load_state_dict(checkpoint, strict=False) silently drops
+    EVERY target-module weight into `missing`/`unexpected` and leaves them
+    at their random LoRA-init values -- q/k/v/o/wi_0/wi_1/wo across all
+    layers would have trained from scratch, not from the resumed checkpoint,
+    with NO error (strict=False swallows it) if this file's own probe
+    (below) hadn't happened to use a bare dict[...] lookup that raised
+    KeyError instead of silently reading a stale pre-load value. Rewriting
+    each target module's key to insert `.base_layer` before `.weight`
+    (verified experimentally: `missing` then contains ONLY the expected
+    lora_A/lora_B keys -- which correctly stay at LoRA's own zero/Kaiming
+    init, never present in a pre-LoRA checkpoint -- and `unexpected` is
+    empty) restores the intended behavior: the frozen base carries the
+    resumed checkpoint's weights, only the LoRA adapters start fresh.
+    """
+    remapped = {}
+    for key, value in state_dict.items():
+        parts = key.rsplit(".", 2)
+        if len(parts) == 3 and parts[1] in LORA_TARGET_MODULES and parts[2] == "weight":
+            key = f"{parts[0]}.{parts[1]}.base_layer.{parts[2]}"
+        remapped[key] = value
+    return remapped
+
+
 def load_full_model_from_checkpoint(model, optimizer, checkpoint_dir, rank):
     encoder_path = os.path.join(checkpoint_dir, "encoder.pt")
     head_path = os.path.join(checkpoint_dir, "head.pt")
 
+    # REAL CRASH #9: probe_name must exist under base_model.model's ACTUAL
+    # post-wrap parameter names. q is a LORA_TARGET_MODULES entry, so under
+    # LoRA its real path carries the extra .base_layer segment (see
+    # _remap_state_dict_for_lora's own docstring for the experimental
+    # verification). Getting this wrong previously crashed with a bare
+    # KeyError (v9) -- which, ironically, was safer than the alternative
+    # bug it would otherwise have masked (see below).
     probe_target = model.encoder.base_model if USE_LORA_FALLBACK else model.encoder
-    probe_name = "encoder.block.0.layer.0.SelfAttention.q.weight"
+    probe_name = ("encoder.block.0.layer.0.SelfAttention.q.base_layer.weight" if USE_LORA_FALLBACK
+                  else "encoder.block.0.layer.0.SelfAttention.q.weight")
     if USE_LORA_FALLBACK:
-        # LoRA-wrapped encoder's frozen base still holds this param under
-        # the same relative name inside base_model.model.
         before = dict(probe_target.model.named_parameters())[probe_name].detach().clone().float()
     else:
         before = dict(model.encoder.named_parameters())[probe_name].detach().clone().float()
 
     encoder_sd = torch.load(encoder_path, map_location="cpu")
+    if USE_LORA_FALLBACK:
+        encoder_sd = _remap_state_dict_for_lora(encoder_sd)
     target_module = probe_target.model if USE_LORA_FALLBACK else model.encoder
     missing, unexpected = target_module.load_state_dict(encoder_sd, strict=False)
-    if not USE_LORA_FALLBACK and (missing or unexpected):
+    if USE_LORA_FALLBACK:
+        # Under LoRA, `missing` SHOULD contain exactly the lora_A/lora_B
+        # keys (never present in a pre-LoRA full-FT checkpoint -- they stay
+        # at LoRA's own init) and NOTHING else; `unexpected` should always
+        # be empty (every checkpoint key must land on a real parameter after
+        # remapping). Any OTHER missing key means a target-module weight
+        # silently failed to load -- exactly the silent-corruption bug this
+        # fix closes -- so it must be a hard error, not a warning.
+        unexpected_missing = [m for m in missing if "lora_A" not in m and "lora_B" not in m]
+        if unexpected_missing or unexpected:
+            raise RuntimeError(f"[RESUME] LoRA encoder state_dict mismatch after remap: "
+                               f"unexpected_missing={unexpected_missing} unexpected={unexpected}")
+    elif missing or unexpected:
         raise RuntimeError(f"[RESUME] encoder state_dict mismatch: missing={missing} unexpected={unexpected}")
     del encoder_sd
 
