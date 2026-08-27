@@ -1944,33 +1944,67 @@ def _mp_fn(index):
             llm_step_idx = rng.choice(llm_cat_pool, size=n_llm_avail, replace=False) if n_llm_avail else \
                           np.empty(0, dtype=np.int64)
             llm_shortfall = n_llm_step - n_llm_avail
+            # REAL CRASH #6 (2026-08-27, v6): the shortfall backfill used to be
+            # concatenated straight onto step_neg, growing n_neg_batch (see
+            # n_pos_batch/n_neg_batch below, which slice pos_logits/neg_logits)
+            # on ANY step where this category's own LLM pool was smaller than
+            # n_llm_step -- a frequent small-category tail case given
+            # LLM_STABILIZER_FRACTION=0.3 reserves 3 of PER_CORE_TRAIN_BATCH=10
+            # rows per step. Despite this file's own "FIXED SHAPE, ALWAYS
+            # EXACTLY PER_CORE_TRAIN_BATCH ROWS" docstring two screens up, that
+            # invariant only covered the TOTAL row count fed to the model (which
+            # the smoke test also validates) -- NOT the internal pos/neg split
+            # boundary that ranknet_deltaap_loss's pos_logits/neg_logits slicing
+            # depends on. Any category hitting a shortfall produced a batch
+            # shape XLA had never compiled before, triggering a brand-new
+            # mid-run compile (the v6 log's own SYNC_SLOW entries confirm this:
+            # 23-26s xm.mark_step() calls at exactly this call site, an order of
+            # magnitude slower than a normal step's 0.02s -- a real compile, not
+            # a slow step). Each distinct shape leaves its own compiled
+            # executable permanently resident in TPU HBM; enough distinct
+            # category/shortfall combinations across a run exhausts it --
+            # v6 died with RESOURCE_EXHAUSTED (18.35M free, needed 24.00M) 20
+            # consecutive times starting at step 2, the first step to hit a
+            # shortfall category. FIX: the backfill now goes into its OWN
+            # bucket positioned where the llm/BCE-only rows already sit (third
+            # concatenation slot, never sliced by pos_logits/neg_logits), so
+            # n_pos_batch/n_neg_batch are invariant on every step regardless of
+            # any category's LLM-pool shortfall -- restoring the FIXED SHAPE
+            # guarantee for the split the smoke test does NOT itself exercise
+            # (the smoke test's synthetic batch has no pos/neg split at all).
             if llm_shortfall > 0:
-                extra_neg_pool = pools.neg_idx[category_id]
-                if len(extra_neg_pool):
-                    extra_neg = rng.choice(extra_neg_pool, size=llm_shortfall, replace=True)
-                    step_neg = np.concatenate([step_neg, extra_neg])
+                backfill_pool = pools.neg_idx[category_id]
+                backfill_idx = rng.choice(backfill_pool, size=llm_shortfall, replace=True) \
+                              if len(backfill_pool) else np.empty(0, dtype=np.int64)
+            else:
+                backfill_idx = np.empty(0, dtype=np.int64)
 
-            all_row_idx = np.concatenate([step_pos, step_neg, llm_step_idx])
+            all_row_idx = np.concatenate([step_pos, step_neg, llm_step_idx, backfill_idx])
             all_scope = np.concatenate([
                 np.zeros(len(step_pos) + len(step_neg), dtype=np.int8),
                 np.ones(len(llm_step_idx), dtype=np.int8),
+                np.zeros(len(backfill_idx), dtype=np.int8),  # human-origin, not llm -- see REAL CRASH #6
             ])
             frame_for_lookup = human_train_frame
             batch_labels_np = np.concatenate([
                 frame_for_lookup["label"][step_pos], frame_for_lookup["label"][step_neg],
                 llm_train_frame["label"][llm_step_idx] if n_llm_step else np.empty(0, dtype=np.float32),
+                frame_for_lookup["label"][backfill_idx],
             ])
             row1 = np.concatenate([
                 frame_for_lookup["row1"][step_pos], frame_for_lookup["row1"][step_neg],
                 llm_train_frame["row1"][llm_step_idx] if n_llm_step else np.empty(0, dtype=np.int64),
+                frame_for_lookup["row1"][backfill_idx],
             ])
             row2 = np.concatenate([
                 frame_for_lookup["row2"][step_pos], frame_for_lookup["row2"][step_neg],
                 llm_train_frame["row2"][llm_step_idx] if n_llm_step else np.empty(0, dtype=np.int64),
+                frame_for_lookup["row2"][backfill_idx],
             ])
             batch = list(zip(all_scope.tolist(), row1.tolist(), row2.tolist(),
                              batch_labels_np.tolist(), [category_id] * len(all_scope)))
             input_ids_np, attention_mask_np, batch_labels_t, _cats, _scope_t = collate_fn(batch)
+
             input_ids = input_ids_np.to(device)
             attention_mask = attention_mask_np.to(device)
             batch_labels = batch_labels_t.to(device)
