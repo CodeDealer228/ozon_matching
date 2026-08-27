@@ -23,7 +23,9 @@ from generate_token_replacement_counterfactuals import (
     append_jsonl,
     load_few_shots,
     materialize,
+    mutate_item,
     read_jsonl,
+    replace_text,
     sha256_file,
 )
 from generate_token_replacement_aggressive_rag import compact_rag_item, semantic_type
@@ -31,8 +33,54 @@ from generate_token_replacement_aggressive_rag import compact_rag_item, semantic
 
 TOOL_NAME = "submit_batched_replacement_decisions"
 CONTEXT_RE = re.compile(r"[A-Za-zА-Яа-я0-9-]{3,}")
-PROMPT_VERSION = 1
-CANDIDATE_BANK_VERSION = 1
+VALUE_RE = re.compile(r"[A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9./_-]{0,63}")
+NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+PROMPT_VERSION = 2
+CANDIDATE_BANK_VERSION = 4
+CONTEXT_STOPWORDS = {
+    "для", "или", "при", "без", "под", "над", "товар", "товара", "набор",
+    "цвет", "размер", "штук", "шт", "арт", "модель", "бренд", "комплект",
+    "the", "and", "with", "from", "black", "white",
+}
+ROLE_KEYWORDS = {
+    "brand": ("бренд", "brand", "производитель", "торговая марка"),
+    "article": (
+        "артик", "партномер", "part number", "модель", "model", "oem", "oe-код",
+        "код товара", "код продукт", "серия", "номер производ",
+    ),
+    "volume": ("объем", "объём", "емкость", "ёмкость", "литраж"),
+    "weight": ("вес", "масса", "фасов"),
+    "count": ("количество", "число штук", "деталей", "предметов"),
+    "length": ("длина",),
+    "width": ("ширина",),
+    "height": ("высота",),
+    "diameter": ("диаметр",),
+    "power": ("мощност",),
+    "resolution": ("разрешение", "dpi"),
+    "format": ("формат",),
+    "size": ("размер", "габарит"),
+}
+NUMERIC_ROLES = {
+    "volume", "weight", "count", "length", "width", "height", "diameter",
+    "power", "resolution", "size",
+}
+UNIT_SUFFIX_ROLES = {
+    "dpi": "resolution",
+    "см": "length",
+    "мм": "length",
+    "мл": "volume",
+    "л": "volume",
+    "г": "weight",
+    "кг": "weight",
+    "шт": "count",
+    "штук": "count",
+    "вт": "power",
+}
+UNIT_TOKEN_RE = re.compile(r"^(\d+(?:[.,]\d+)?)(dpi|см|мм|мл|л|г|кг|шт|штук|вт)$", re.IGNORECASE)
+BAD_BRAND_VALUES = {
+    "нет", "бренда", "без бренда", "noname", "no name", "китай", "россия",
+    "германия", "италия", "франция", "сша", "япония", "корея", "таиланд",
+}
 
 GENERATOR_PROMPT = (
     "Ты выбираешь контрфактуальные замены сразу для пакета положительных пар одинаковых "
@@ -64,7 +112,102 @@ def stable_hash(value: object) -> str:
 
 
 def context_tokens(value: str) -> set[str]:
-    return {token.casefold() for token in CONTEXT_RE.findall(value)}
+    return {
+        token.casefold()
+        for token in CONTEXT_RE.findall(value)
+        if token.casefold() not in CONTEXT_STOPWORDS and not token.isdigit()
+    }
+
+
+def attribute_leaves(value: object, path: tuple[str, ...] = ()) -> Iterable[tuple[str, object]]:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield from attribute_leaves(nested, (*path, str(key)))
+    elif isinstance(value, list):
+        for nested in value:
+            yield from attribute_leaves(nested, path)
+    else:
+        yield " ".join(path).casefold(), value
+
+
+def key_role(key: str) -> str | None:
+    if "страна" in key:
+        return None
+    for role, fragments in ROLE_KEYWORDS.items():
+        if any(fragment in key for fragment in fragments):
+            return role
+    return None
+
+
+def token_roles(attributes: object, token: str) -> set[str]:
+    roles: set[str] = set()
+    for key, value in attribute_leaves(attributes):
+        role = key_role(key)
+        if role is None:
+            continue
+        value_text = str(value).strip()
+        if role == "brand":
+            if value_text.casefold() == token.casefold():
+                roles.add(role)
+        elif replace_text(value_text, token, "__probe__")[1] > 0:
+            roles.add(role)
+    return roles
+
+
+def infer_source_role(left: pd.Series, right: pd.Series, token: str) -> str | None:
+    left_attributes = json.loads(str(left["attributes"]))
+    right_attributes = json.loads(str(right["attributes"]))
+    left_roles = token_roles(left_attributes, token)
+    right_roles = token_roles(right_attributes, token)
+    left_name_count = replace_text(str(left["name"]), token, "__probe__")[1]
+    right_name_count = replace_text(str(right["name"]), token, "__probe__")[1]
+    unit_match = UNIT_TOKEN_RE.fullmatch(token)
+    if unit_match and left_name_count and right_name_count:
+        return UNIT_SUFFIX_ROLES[unit_match.group(2).casefold()]
+    common = left_roles & right_roles
+    for role in (
+        "article", "brand", "volume", "weight", "count", "length", "width",
+        "height", "diameter", "power", "resolution", "format", "size",
+    ):
+        if role in common:
+            return role
+    for role in (
+        "article", "brand", "volume", "weight", "count", "length", "width",
+        "height", "diameter", "power", "resolution", "format", "size",
+    ):
+        if role in left_roles | right_roles and left_name_count and right_name_count:
+            return role
+    if semantic_type(token) == "model" and left_name_count and right_name_count:
+        return "article"
+    if semantic_type(token) == "model" and left_name_count and right_name_count:
+        return "article"
+    return None
+
+
+def role_values(item: dict[str, object], role: str, source_token: str) -> list[str]:
+    values: list[str] = []
+    token_type = semantic_type(source_token)
+    source_unit_match = UNIT_TOKEN_RE.fullmatch(source_token)
+    for key, value in attribute_leaves(item.get("attributes", {})):
+        if key_role(key) != role:
+            continue
+        value_text = str(value).strip()
+        if role == "brand":
+            candidates = [value_text] if len(VALUE_RE.findall(value_text)) == 1 else []
+        else:
+            pattern = NUMBER_RE if role in NUMERIC_ROLES else VALUE_RE
+            candidates = pattern.findall(value_text)
+        for candidate in candidates:
+            candidate = str(candidate).strip(".,;:!?()[]{}\"'")
+            if source_unit_match and candidate and UNIT_TOKEN_RE.fullmatch(candidate) is None:
+                candidate = candidate + source_unit_match.group(2)
+            if (
+                candidate
+                and candidate.casefold() not in BAD_BRAND_VALUES
+                and semantic_type(candidate) == token_type
+            ):
+                values.append(candidate)
+    return values
 
 
 def public_item(item: pd.Series, max_attribute_chars: int = 700) -> dict[str, object]:
@@ -95,15 +238,17 @@ def compact_rag(row: dict[str, object]) -> list[dict[str, object]]:
 class BankEntry:
     token: str
     token_type: str
+    role: str
     context: frozenset[str]
     source_pair_sha256: str
+    evidence_name: str
 
 
 class ReplacementBank:
     def __init__(self, source_rows: list[dict[str, object]], items: pd.DataFrame):
-        self.entries: dict[tuple[str, str], list[BankEntry]] = defaultdict(list)
-        self.postings: dict[tuple[str, str, str], list[int]] = defaultdict(list)
-        self.frequencies: Counter[tuple[str, str, str]] = Counter()
+        self.entries: dict[tuple[str, str, str], list[BankEntry]] = defaultdict(list)
+        self.postings: dict[tuple[str, str, str, str], list[int]] = defaultdict(list)
+        self.frequencies: Counter[tuple[str, str, str, str]] = Counter()
         for row in source_rows:
             category = str(row["category"])
             left = items.loc[row["id1"]]
@@ -114,15 +259,25 @@ class ReplacementBank:
             )
             for token_value in row["offered_tokens"]:
                 token = str(token_value)
+                role = infer_source_role(left, right, token)
+                if role is None:
+                    continue
                 token_type = semantic_type(token)
-                key = (category, token_type)
+                key = (category, role, token_type)
                 index = len(self.entries[key])
                 self.entries[key].append(
-                    BankEntry(token, token_type, context, str(row["source_pair_sha256"]))
+                    BankEntry(
+                        token,
+                        token_type,
+                        role,
+                        context,
+                        str(row["source_pair_sha256"]),
+                        str(left["name"]),
+                    )
                 )
-                self.frequencies[(category, token_type, token.casefold())] += 1
+                self.frequencies[(category, role, token_type, token.casefold())] += 1
                 for word in sorted(context)[:40]:
-                    self.postings[(category, token_type, word)].append(index)
+                    self.postings[(category, role, token_type, word)].append(index)
 
     @staticmethod
     def _format_score(source: str, target: str) -> float:
@@ -148,18 +303,19 @@ class ReplacementBank:
         self,
         category: str,
         source: str,
+        source_role: str,
         context: set[str],
         excluded: set[str],
         limit: int,
     ) -> list[dict[str, object]]:
         token_type = semantic_type(source)
-        key = (category, token_type)
+        key = (category, source_role, token_type)
         entries = self.entries.get(key, [])
         candidate_indices: set[int] = set()
         for word in sorted(context, key=lambda value: (len(value), value), reverse=True)[:12]:
-            candidate_indices.update(self.postings.get((category, token_type, word), [])[:1000])
-        if len(candidate_indices) < limit * 4:
-            candidate_indices.update(range(min(len(entries), 4000)))
+            candidate_indices.update(
+                self.postings.get((category, source_role, token_type, word), [])[:1000]
+            )
         best: dict[str, tuple[float, BankEntry]] = {}
         excluded_folded = {value.casefold() for value in excluded}
         for index in candidate_indices:
@@ -168,7 +324,9 @@ class ReplacementBank:
             if folded in excluded_folded or folded == source.casefold():
                 continue
             overlap = len(context & set(entry.context))
-            frequency = self.frequencies[(category, token_type, folded)]
+            if overlap == 0:
+                continue
+            frequency = self.frequencies[(category, source_role, token_type, folded)]
             score = 1.5 * overlap + math.log1p(frequency) + self._format_score(source, entry.token)
             previous = best.get(folded)
             if previous is None or score > previous[0]:
@@ -177,7 +335,12 @@ class ReplacementBank:
         return [
             {
                 "replacement_token": entry.token,
-                "bank_frequency": self.frequencies[(category, token_type, entry.token.casefold())],
+                "source_role": source_role,
+                "candidate_source": "contextual_human_train_bank",
+                "evidence_name": entry.evidence_name[:240],
+                "bank_frequency": self.frequencies[
+                    (category, source_role, token_type, entry.token.casefold())
+                ],
                 "context_overlap": len(context & set(entry.context)),
             }
             for _, entry in ranked[:limit]
@@ -197,9 +360,54 @@ def build_operations(
     offered = [str(token) for token in row["offered_tokens"][:source_token_limit]]
     operations: list[dict[str, object]] = []
     for source in offered:
-        for candidate in bank.candidates(
-            str(row["category"]), source, context, set(offered), candidates_per_token
+        source_role = infer_source_role(left, right, source)
+        if source_role is None:
+            continue
+        left_name_changes = replace_text(str(left["name"]), source, "__probe__")[1]
+        right_name_changes = replace_text(str(right["name"]), source, "__probe__")[1]
+        if semantic_type(source) in {"model", "size_or_quantity"} and not (
+            left_name_changes and right_name_changes
         ):
+            continue
+        try:
+            mutate_item(left, source, "__probe__", -1)
+            mutate_item(right, source, "__probe__", -2)
+        except ValueError:
+            continue
+        candidates: list[dict[str, object]] = []
+        seen_targets = {value.casefold() for value in offered}
+        for example in row["rag_examples"]:
+            if example["relation"] != "different_product":
+                continue
+            for item_key in ("item_1", "item_2"):
+                evidence_item = example[item_key]
+                for target in role_values(evidence_item, source_role, source):
+                    folded = target.casefold()
+                    if folded in seen_targets:
+                        continue
+                    seen_targets.add(folded)
+                    candidates.append({
+                        "replacement_token": target,
+                        "source_role": source_role,
+                        "candidate_source": "retrieved_hard_negative",
+                        "evidence_name": str(evidence_item.get("name", ""))[:240],
+                        "bank_frequency": 1,
+                        "context_overlap": len(context & context_tokens(str(evidence_item.get("name", "")))),
+                    })
+        for candidate in bank.candidates(
+            str(row["category"]),
+            source,
+            source_role,
+            context,
+            set(offered) | seen_targets,
+            candidates_per_token * 2,
+        ):
+            folded = str(candidate["replacement_token"]).casefold()
+            if folded in seen_targets:
+                continue
+            seen_targets.add(folded)
+            candidates.append(candidate)
+        for candidate in candidates[:candidates_per_token]:
             operations.append({
                 "operation_id": f"op{len(operations)}",
                 "source_token": source,
@@ -263,37 +471,51 @@ def validate_batch_decisions(
         raise ValueError("batch_decision_count_mismatch")
     output: list[dict[str, object] | None] = [None] * len(rows)
     for decision in decisions:
-        if not isinstance(decision, dict) or set(decision) != {
-            "slot", "status", "operation_ids", "skip_reason"
-        }:
+        if not isinstance(decision, dict) or not {"slot", "status", "operation_ids"}.issubset(decision):
             raise ValueError("invalid_batch_decision")
         slot = decision["slot"]
+        if isinstance(slot, str) and slot.isdigit():
+            slot = int(slot)
         if not isinstance(slot, int) or not 0 <= slot < len(rows) or output[slot] is not None:
             raise ValueError("invalid_or_duplicate_slot")
         status = decision["status"]
         operation_ids = decision["operation_ids"]
-        skip_reason = decision["skip_reason"]
+        skip_reason = str(decision.get("skip_reason", ""))
         if status not in {"replace", "skip"} or not isinstance(operation_ids, list) or not isinstance(skip_reason, str):
             raise ValueError("invalid_batch_types")
         allowed = {str(op["operation_id"]): op for op in rows[slot]["candidate_operations"]}
         if status == "skip":
-            if operation_ids or not skip_reason.strip():
+            if operation_ids:
                 raise ValueError("invalid_batch_skip")
-            output[slot] = {"status": "skip", "replacements": [], "skip_reason": skip_reason}
+            output[slot] = {
+                "status": "skip",
+                "replacements": [],
+                "skip_reason": skip_reason.strip() or "model_skip",
+            }
             continue
         if not 1 <= len(operation_ids) <= max_replacements or len(set(operation_ids)) != len(operation_ids):
             raise ValueError("invalid_batch_replacement_count")
         if any(not isinstance(operation_id, str) or operation_id not in allowed for operation_id in operation_ids):
             raise ValueError("operation_not_allowed")
-        replacements = [
-            {
-                "source_token": str(allowed[operation_id]["source_token"]),
-                "replacement_token": str(allowed[operation_id]["replacement_token"]),
+        replacements: list[dict[str, str]] = []
+        seen_sources: set[str] = set()
+        for operation_id in operation_ids:
+            operation = allowed[operation_id]
+            source_token = str(operation["source_token"])
+            if source_token.casefold() in seen_sources:
+                continue
+            seen_sources.add(source_token.casefold())
+            replacements.append({
+                "source_token": source_token,
+                "replacement_token": str(operation["replacement_token"]),
+            })
+        if not replacements:
+            output[slot] = {
+                "status": "skip",
+                "replacements": [],
+                "skip_reason": "duplicate_source_candidates",
             }
-            for operation_id in operation_ids
-        ]
-        if len({row["source_token"] for row in replacements}) != len(replacements):
-            raise ValueError("duplicate_source_token")
+            continue
         output[slot] = {"status": "replace", "replacements": replacements, "skip_reason": skip_reason}
     if any(decision is None for decision in output):
         raise ValueError("missing_slot")
@@ -575,6 +797,46 @@ def flatten_complete(records: list[dict[str, object]]) -> list[dict[str, object]
     ]
 
 
+def filter_locally_applicable(
+    rows: list[dict[str, object]], items: pd.DataFrame
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    filtered: list[dict[str, object]] = []
+    rejected: list[dict[str, object]] = []
+    for original in rows:
+        row = {**original, "decision": {**original["decision"]}}
+        decision = row["decision"]
+        if decision["status"] != "replace":
+            filtered.append(row)
+            continue
+        kept: list[dict[str, str]] = []
+        for operation in decision["replacements"]:
+            source = str(operation["source_token"])
+            target = str(operation["replacement_token"])
+            try:
+                mutate_item(items.loc[row["id1"]], source, target, -1)
+                mutate_item(items.loc[row["id2"]], source, target, -2)
+            except ValueError as exc:
+                rejected.append({
+                    "source_pair_sha256": row["source_pair_sha256"],
+                    "category": row["category"],
+                    "source_token": source,
+                    "replacement_token": target,
+                    "reason": str(exc),
+                })
+                continue
+            kept.append({"source_token": source, "replacement_token": target})
+        if kept:
+            decision["replacements"] = kept
+        else:
+            row["decision"] = {
+                "status": "skip",
+                "replacements": [],
+                "skip_reason": "local_replacement_not_applicable",
+            }
+        filtered.append(row)
+    return filtered, rejected
+
+
 def usage_sum(records: list[dict[str, object]]) -> dict[str, int]:
     totals: Counter[str] = Counter()
     for record in records:
@@ -607,6 +869,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--base-url", default=os.environ.get("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--finalize-only", action="store_true")
     args = parser.parse_args()
     if min(
         args.batch_size,
@@ -637,18 +900,24 @@ def main() -> None:
     source_rows = read_jsonl(args.source_pack)
     items = pd.read_parquet(args.items, columns=["id", "category", "name", "attributes"]).set_index("id", drop=False)
     few_shots = load_few_shots(args.few_shots, args.max_replacements)
-    bank_started = time.perf_counter()
-    bank = ReplacementBank(source_rows, items)
-    bank_seconds = time.perf_counter() - bank_started
-    selected = balanced_sources(source_rows, excluded_sources, args.source_count)
+    bank_seconds = 0.0
     prepared: list[dict[str, object]] = []
-    for row in selected:
-        operations = build_operations(
-            row, items, bank, args.source_token_limit, args.candidates_per_token
-        )
-        if operations:
-            prepared.append({**row, "candidate_operations": operations})
-    batches = make_batches(prepared, args.batch_size)
+    batches: list[list[dict[str, object]]] = []
+    if not args.finalize_only:
+        bank_started = time.perf_counter()
+        bank = ReplacementBank(source_rows, items)
+        bank_seconds = time.perf_counter() - bank_started
+        selection_count = args.source_count * 4 if args.source_count > 0 else 0
+        selected = balanced_sources(source_rows, excluded_sources, selection_count)
+        for row in selected:
+            operations = build_operations(
+                row, items, bank, args.source_token_limit, args.candidates_per_token
+            )
+            if operations:
+                prepared.append({**row, "candidate_operations": operations})
+        if args.source_count > 0:
+            prepared = balanced_sources(prepared, set(), args.source_count)
+        batches = make_batches(prepared, args.batch_size)
     provider_contract = {
         "prompt_version": PROMPT_VERSION,
         "candidate_bank_version": CANDIDATE_BANK_VERSION,
@@ -667,15 +936,34 @@ def main() -> None:
         "secrets_sent": False,
         "provider_fields": ["category", "names", "attributes", "rag_relations", "candidate_operations"],
     }
-    (args.output_dir / "provider_contract.json").write_text(
-        json.dumps(provider_contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    preview_rows = provider_rows(prepared[: min(2, len(prepared))], items)
-    (args.output_dir / "provider_payload_preview.json").write_text(
-        json.dumps({"rows": preview_rows}, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    if not args.finalize_only:
+        (args.output_dir / "provider_contract.json").write_text(
+            json.dumps(provider_contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        preview_rows = provider_rows(prepared[: min(2, len(prepared))], items)
+        (args.output_dir / "provider_payload_preview.json").write_text(
+            json.dumps({"rows": preview_rows}, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        seen_preview_categories: set[str] = set()
+        audit_rows: list[dict[str, object]] = []
+        for row in prepared:
+            category = str(row["category"])
+            if category in seen_preview_categories:
+                continue
+            seen_preview_categories.add(category)
+            audit_rows.append({
+                "category": category,
+                "source_pair_sha256": row["source_pair_sha256"],
+                "name_1": str(items.at[row["id1"], "name"]),
+                "name_2": str(items.at[row["id2"], "name"]),
+                "candidate_operations": row["candidate_operations"],
+            })
+        (args.output_dir / "candidate_bank_audit_preview.json").write_text(
+            json.dumps(audit_rows, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     run_started = time.perf_counter()
     if args.execute and batches:
         from openai import OpenAI
@@ -716,8 +1004,12 @@ def main() -> None:
                 print(json.dumps({"completed_batches": completed_batches, "total_batches": len(batches)}), flush=True)
 
     elapsed = time.perf_counter() - run_started
+    if args.finalize_only and journal.exists():
+        elapsed = max(journal.stat().st_mtime - journal.stat().st_ctime, 1e-9)
     records = read_jsonl(journal)
-    complete_rows = flatten_complete(records)
+    complete_rows, local_rejections = filter_locally_applicable(
+        flatten_complete(records), items
+    )
     synthetic_items, synthetic_pairs = materialize(complete_rows, items)
     outputs: dict[str, dict[str, object]] = {}
     for name, frame in (("synthetic_items.parquet", synthetic_items), ("synthetic_pairs.parquet", synthetic_pairs)):
@@ -779,6 +1071,7 @@ def main() -> None:
         "processed_sources": processed_sources,
         "terminal_sources": terminal_sources,
         "attempted_sources": attempted_sources,
+        "local_rejected_operations": len(local_rejections),
         "terminal_batches": sum(record.get("request_status") == "terminal_error" for record in records),
         "accepted_operations": accepted_operations,
         "operations_by_category": dict(sorted(operations_by_category.items())),
@@ -803,6 +1096,10 @@ def main() -> None:
     }
     (args.output_dir / "benchmark_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (args.output_dir / "local_rejections.json").write_text(
+        json.dumps(local_rejections, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))

@@ -68,3 +68,26 @@ The manifest records:
 
 The ETA is accepted only after a representative output audit. A fast run that emits
 implausible replacements is not considered a successful benchmark.
+
+## Benchmark v2.0 finding and v2.1 correction
+
+The first 200-source batched run proved the speed target but failed the quality gate.
+It finished its API work in 36.85 seconds and produced 154 locally applicable
+operations, but the initial bank matched only broad semantic formats. Manual review
+found cross-product substitutions such as a fishing brand proposed for a radio.
+Those rows are retained only as a diagnostic artifact and are not approved for the
+training dataset.
+
+Version 2.1 keeps the same two batched model calls but tightens candidate construction:
+
+- infer the attribute role (brand, article/model, count, volume, weight, dimensions,
+  power, resolution, format) from both source cards;
+- require the same role for the replacement value;
+- prefer values extracted from the retrieved hard-negative human-train pair;
+- require contextual title overlap for global-bank fallbacks;
+- attach the real evidence product name to every candidate operation;
+- reject partial multi-word brands, country/manufacturer noise and non-applicable
+  numeric fragments locally.
+
+A second disjoint 200-source run is required before using an ETA for the full 12k
+generation.

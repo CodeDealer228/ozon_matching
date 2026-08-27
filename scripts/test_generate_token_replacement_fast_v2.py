@@ -8,8 +8,10 @@ from generate_token_replacement_fast_v2 import (
     ReplacementBank,
     balanced_sources,
     batch_tool,
+    infer_source_role,
     make_batches,
     parse_batch_message,
+    role_values,
     validate_batch_decisions,
 )
 
@@ -46,6 +48,22 @@ message = SimpleNamespace(
 )
 assert parse_batch_message(message, rows, 2) == decisions
 
+tolerant = {
+    "decisions": [
+        {
+            "slot": "0",
+            "status": "replace",
+            "operation_ids": ["op0", "op1"],
+            "skip_reason": "",
+            "extra_explanation": "ignored",
+        },
+        {"slot": 1, "status": "skip", "operation_ids": [], "skip_reason": ""},
+    ]
+}
+tolerant_decisions = validate_batch_decisions(tolerant, rows, 2)
+assert tolerant_decisions[0]["replacements"][0]["source_token"] == "lynxauto"
+assert tolerant_decisions[1]["skip_reason"] == "model_skip"
+
 source_rows = [
     {"category": "A", "source_pair_sha256": "a"},
     {"category": "A", "source_pair_sha256": "b"},
@@ -59,15 +77,35 @@ assert [batch[0]["category"] for batch in batches[:2]] == ["A", "B"]
 
 bank = ReplacementBank.__new__(ReplacementBank)
 bank.entries = {
-    ("A", "model"): [
-        BankEntry("w71295", "model", frozenset({"фильтр", "масляный"}), "x"),
-        BankEntry("ab123", "model", frozenset({"другое"}), "y"),
+    ("A", "article", "model"): [
+        BankEntry("w71295", "model", "article", frozenset({"фильтр", "масляный"}), "x", "фильтр масляный w71295"),
+        BankEntry("ab123", "model", "article", frozenset({"другое"}), "y", "другой товар ab123"),
     ]
 }
 bank.postings = {
-    ("A", "model", "фильтр"): [0],
-    ("A", "model", "масляный"): [0],
+    ("A", "article", "model", "фильтр"): [0],
+    ("A", "article", "model", "масляный"): [0],
 }
-bank.frequencies = {("A", "model", "w71295"): 3, ("A", "model", "ab123"): 1}
-candidate = bank.candidates("A", "sg1909", {"фильтр", "масляный"}, {"sg1909"}, 1)
+bank.frequencies = {
+    ("A", "article", "model", "w71295"): 3,
+    ("A", "article", "model", "ab123"): 1,
+}
+candidate = bank.candidates(
+    "A", "sg1909", "article", {"фильтр", "масляный"}, {"sg1909"}, 1
+)
 assert candidate[0]["replacement_token"] == "w71295"
+
+left = pd.Series({
+    "name": "набор 100штук",
+    "attributes": json.dumps({"количество": "100"}, ensure_ascii=False),
+})
+right = pd.Series({
+    "name": "набор 100штук",
+    "attributes": json.dumps({"количество предметов": "100"}, ensure_ascii=False),
+})
+assert infer_source_role(left, right, "100штук") == "count"
+assert role_values(
+    {"name": "набор 50 штук", "attributes": {"количество": "50"}},
+    "count",
+    "100штук",
+) == ["50штук"]
