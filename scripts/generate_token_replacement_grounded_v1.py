@@ -25,6 +25,7 @@ from judge_token_replacement_grounded_bundles import (
     apply_bundle,
     build_bundle,
     identity_fields,
+    IDENTITY_SIGNAL_RE,
     local_bundle_rejection,
     name_context,
     process_batch,
@@ -147,6 +148,9 @@ def prepare_rows(
         for source_token in [str(value) for value in source_row["offered_tokens"]]:
             role = explicit_identity_role(left, right, source_token)
             if role not in {"brand", "article"}:
+                continue
+            if role == "article" and not IDENTITY_SIGNAL_RE.search(source_token):
+                rejected["article_without_latin_or_digit_signal"] += 1
                 continue
             bundles: list[dict[str, object]] = []
             seen_bundles: set[str] = set()
@@ -323,6 +327,40 @@ def main() -> None:
             source = source_by_hash[str(row["source_pair_sha256"])]
             row["id1"] = int(source["id1"])
             row["id2"] = int(source["id2"])
+            if "source_token" not in row:
+                recovered = next(
+                    (
+                        str(token) for token in source["offered_tokens"]
+                        if stable_hash({
+                            "pipeline": PIPELINE_VERSION,
+                            "source_pair_sha256": str(row["source_pair_sha256"]),
+                            "source_role": str(row["source_role"]),
+                            "source_token": str(token),
+                        }) == str(row["operation_sha256"])
+                    ),
+                    None,
+                )
+                if recovered is None:
+                    raise RuntimeError("prepared_source_token_not_recovered")
+                row["source_token"] = recovered
+            left = items.loc[row["id1"]]
+            right = items.loc[row["id2"]]
+            safe_bundles = []
+            for bundle in row["bundles"]:
+                required = next(
+                    (
+                        mapping for mapping in bundle["mappings"]
+                        if mapping["source_span"].casefold() == str(row["source_token"]).casefold()
+                    ),
+                    None,
+                )
+                if required is None:
+                    continue
+                candidate = {**row, "replacement_token": required["target_span"]}
+                if local_bundle_rejection(candidate, bundle, left, right) is None:
+                    safe_bundles.append(bundle)
+            row["bundles"] = safe_bundles
+        prepared = [row for row in prepared if row["bundles"]]
         deterministic_rejections = Counter({"loaded_from_prepared_input": len(prepared)})
     else:
         prepared, deterministic_rejections = prepare_rows(

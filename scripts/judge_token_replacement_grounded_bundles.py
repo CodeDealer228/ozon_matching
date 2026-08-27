@@ -37,6 +37,7 @@ TOOL_NAME = "select_grounded_identity_bundles"
 PIPELINE_VERSION = 1
 IDENTITY_VALUE_LIMIT = 96
 IDENTITY_KINDS = ("brand", "model", "article")
+IDENTITY_SIGNAL_RE = re.compile(r"[A-Za-z0-9]")
 MODEL_KEY_RE = re.compile(r"(?:^|\s)(?:модель|model|серия|линейка)(?:$|\s)")
 ARTICLE_KEY_RE = re.compile(
     r"артик|партномер|part number|oem|oe-код|код товар|код продукт|номер производ"
@@ -100,7 +101,9 @@ def clean_identity_value(value: object) -> str | None:
 
 
 def identity_fields(item: pd.Series | dict[str, object]) -> dict[str, list[tuple[str, str]]]:
-    attributes = parse_attributes(item["attributes"])
+    attributes = item["attributes"]
+    if isinstance(attributes, str):
+        attributes = parse_attributes(attributes)
     output: dict[str, list[tuple[str, str]]] = defaultdict(list)
     seen: set[tuple[str, str]] = set()
     for key, value in attribute_leaves(attributes):
@@ -207,6 +210,8 @@ def build_bundle(
         for source, replacement in comparable_target(
             source_fields.get(kind, []), target_fields.get(kind, [])
         ):
+            if not IDENTITY_SIGNAL_RE.search(source) or not IDENTITY_SIGNAL_RE.search(replacement):
+                continue
             if source.casefold() == replacement.casefold():
                 continue
             mappings.append({"kind": kind, "source_span": source, "target_span": replacement})
@@ -290,6 +295,13 @@ def local_bundle_rejection(
     target_name = str(bundle["target_card"]["name"])
     if not contains(target_name, replacement):
         return "replacement_missing_from_target_name"
+    source_brands = (
+        brand_values(identity_fields(left)) | brand_values(identity_fields(right))
+    )
+    target_brands = brand_values(identity_fields(bundle["target_card"]))
+    if row["source_role"] == "article" and source_brands:
+        if not (source_brands & target_brands):
+            return "article_target_brand_mismatch"
     source_specs: dict[str, set[str]] = defaultdict(set)
     target_specs: dict[str, set[str]] = defaultdict(set)
     for item, destination in ((left, source_specs), (right, source_specs), (bundle["target_card"], target_specs)):
@@ -303,6 +315,20 @@ def local_bundle_rejection(
     for key in source_specs.keys() & target_specs.keys():
         if source_specs[key].isdisjoint(target_specs[key]):
             return "grounded_target_spec_conflict:" + key
+    preview_folded = f"{bundle['preview_name_1']} {bundle['preview_name_2']}".casefold()
+    target_folded = target_name.casefold()
+    for mapping in bundle["mappings"]:
+        source_tokens = re.findall(r"[A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9+._/-]*", mapping["source_span"])
+        target_tokens = {
+            token.casefold()
+            for token in re.findall(r"[A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9+._/-]*", mapping["target_span"])
+        }
+        for token in source_tokens:
+            folded = token.casefold()
+            if len(folded) < 3 or folded in target_tokens or folded in target_folded:
+                continue
+            if re.search(rf"(?<![A-Za-zА-Яа-я0-9]){re.escape(folded)}(?![A-Za-zА-Яа-я0-9])", preview_folded):
+                return "source_identity_component_remains:" + folded
     if row["source_role"] != "brand":
         return None
     source_brand = latinize(str(row["source_token"]))

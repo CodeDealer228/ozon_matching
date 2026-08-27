@@ -112,6 +112,19 @@ def test_bundle_rejects_grounded_target_spec_conflict() -> None:
     assert local_bundle_rejection(row, bundle, left, right) == "grounded_target_spec_conflict:цвет товара"
 
 
+def test_article_bundle_requires_same_brand() -> None:
+    left = item("ресанта саи160к", {"бренд": "ресанта", "модель": "саи160к"})
+    right = item("сварочный аппарат ресанта саи160к", {"бренд": "ресанта", "модель": "саи160к"})
+    bundle = {
+        "target_card": {"name": "patriot wm260dvt", "attributes": {"бренд": "patriot", "модель": "wm260dvt"}},
+        "mappings": [{"kind": "article", "source_span": "саи160к", "target_span": "wm260dvt"}],
+        "preview_name_1": "ресанта wm260dvt",
+        "preview_name_2": "сварочный аппарат ресанта wm260dvt",
+    }
+    row = {"source_role": "article", "source_token": "саи160к", "replacement_token": "wm260dvt"}
+    assert local_bundle_rejection(row, bundle, left, right) == "article_target_brand_mismatch"
+
+
 if __name__ == "__main__":
     test_identity_kind_excludes_compatibility_model()
     test_apply_bundle_never_changes_specs()
@@ -119,3 +132,4 @@ if __name__ == "__main__":
     test_model_can_only_choose_offered_bundle()
     test_brand_bundle_rejects_old_alias_and_unsupported_line()
     test_bundle_rejects_grounded_target_spec_conflict()
+    test_article_bundle_requires_same_brand()
