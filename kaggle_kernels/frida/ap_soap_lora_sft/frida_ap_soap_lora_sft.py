@@ -878,12 +878,14 @@ def load_shared_data():
     t_phase = time.perf_counter()
     human_cache = load_cache("human")
     log(0, "SETUP", f"human item cache loaded in {time.perf_counter() - t_phase:.1f}s; {mem_info()}")
-    t_phase = time.perf_counter()
-    llm_cache = load_cache("llm")
-    log(0, "SETUP", f"llm item cache loaded in {time.perf_counter() - t_phase:.1f}s; {mem_info()}")
-    if human_cache["pad_id"] != llm_cache["pad_id"]:
-        raise RuntimeError("human/llm v4 caches use different pad ids")
-    caches = [human_cache, llm_cache]
+    # REAL CHANGE (2026-08-27, explicit request): this kernel now trains the
+    # ranking LoRA on human-labeled data ONLY. Previously train_frame
+    # concatenated human_train_frame with a 1,000,000-row LLM soft-label
+    # subset (label = target >= 0.5, bucketed into the SAME per-category
+    # pos/neg pools the human rows use -- see this file's own history for
+    # the full mechanism). No llm_cache load, no llm parquet read, no llm
+    # scope in train_frame -- single scope (0, human) throughout.
+    caches = [human_cache]
 
     t_phase = time.perf_counter()
     human_path = find_file("matches_item_disjoint_70_30_seed42.parquet")
@@ -915,30 +917,11 @@ def load_shared_data():
         f"{mem_info()}")
 
     t_phase = time.perf_counter()
-    llm_path = find_file("llm_train_val_split.parquet")
-    llm = pd.read_parquet(
-        llm_path,
-        columns=["id1", "id2", "label", "target", "category"],
-        filters=[("split", "==", "train"), ("in_original_1m", "==", True)],
-    ).reset_index(drop=True)
-    if len(llm) != EXPECTED_LLM_TRAIN:
-        raise RuntimeError(f"exact original LLM-train subset has {len(llm):,} rows, not 1,000,000")
-    llm_counts = llm.groupby("category", observed=True).size()
-    if set(llm_counts.index) != set(category_vocab) or not np.all(llm_counts.to_numpy() == 50_000):
-        raise RuntimeError(f"original 1M LLM subset is not 50k x 20 categories: {llm_counts.to_dict()}")
-    if not np.array_equal(llm["label"].to_numpy(), (llm["target"].to_numpy() >= 0.5).astype(np.uint8)):
-        raise RuntimeError("LLM binary label is inconsistent with target >= 0.5")
-    log(0, "SETUP", f"llm split loaded+verified in {time.perf_counter() - t_phase:.1f}s: "
-        f"llm_train={len(llm):,}; {mem_info()}")
-
-    t_phase = time.perf_counter()
-    human_train_frame = build_frame(human_train, 0, human_cache, category_to_id)
+    train_frame = build_frame(human_train, 0, human_cache, category_to_id)
     val_frame = build_frame(human_val, 0, human_cache, category_to_id)
-    llm_frame = build_frame(llm, 1, llm_cache, category_to_id)
-    train_frame = concatenate_frames(human_train_frame, llm_frame)
-    del human, human_train, human_val, llm, human_train_frame, llm_frame
+    del human, human_train, human_val
     gc.collect()
-    log(0, "SETUP", f"frames built+concatenated in {time.perf_counter() - t_phase:.1f}s: "
+    log(0, "SETUP", f"frames built in {time.perf_counter() - t_phase:.1f}s: "
         f"train_frame={len(train_frame['label']):,} val_frame={len(val_frame['label']):,}; "
         f"{mem_info()}")
 
@@ -987,7 +970,8 @@ def load_shared_data():
     preflight = dict(
         experiment=EXPERIMENT, status="preflight_complete", source="maxamsecret/frida-format-adapter-v4-188",
         human_train_rows=EXPECTED_HUMAN_TRAIN, human_val_rows=EXPECTED_HUMAN_VAL,
-        llm_train_rows=EXPECTED_LLM_TRAIN, categories=EXPECTED_CATEGORIES,
+        llm_train_rows=0,  # REAL CHANGE (2026-08-27): human-only training, see load_shared_data()
+        categories=EXPECTED_CATEGORIES,
         train_fingerprint=train_fingerprint, plan_fingerprint=plan_fingerprint,
         val_fingerprint=val_fingerprint, total_steps=len(plan), steps_per_category=steps_per_category,
         category_batch_contract="all 8 ranks use the same one category; each core is positive-first 8:8",
