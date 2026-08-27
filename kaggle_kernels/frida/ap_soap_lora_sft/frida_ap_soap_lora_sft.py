@@ -124,7 +124,7 @@ PEAK_LR = 2e-6          # head only -- classifier.out is already trained (loaded
                         # head_path), so it gets the SAME conservative peak used by the
                         # full-SFT sibling kernel (frida_ap_soap_full_sft.py's own
                         # PEAK_LR=2e-6), which fine-tunes this exact head end-to-end.
-LORA_LR = 3e-4          # LoRA adapters only. REAL BUG (2026-08-26/27, run #1+#2,
+LORA_LR = 3e-5          # LoRA adapters only. REAL BUG (2026-08-26/27, run #1+#2,
                         # annkrasnoshchekova): make_optimizer() originally put LoRA's A/B
                         # matrices in the SAME param groups as the head, both driven by
                         # PEAK_LR=2e-6 -- a value copied verbatim from full_sft's own
@@ -144,13 +144,53 @@ LORA_LR = 3e-4          # LoRA adapters only. REAL BUG (2026-08-26/27, run #1+#2
                         # literally 0.0 max|delta| across the entire 8-step grace window
                         # (run #2 log) -- not a timing-window problem (run #1's diagnosis)
                         # but the adapter moving far too slowly for ANY probe window to
-                        # observe, at any width. FIX: give LoRA its own param groups at
-                        # LORA_LR=3e-4 -- the SAME value already validated on this exact
-                        # base architecture with this exact LoRA config (r=16, alpha=32,
-                        # same target_modules) by
+                        # observe, at any width. FIX (run #2): give LoRA its own param
+                        # groups at LORA_LR=3e-4 -- the SAME value already validated on
+                        # this exact base architecture with this exact LoRA config
+                        # (r=16, alpha=32, same target_modules) by
                         # kaggle_kernels/frida/lora/lora-sft-human-only-10-epochs
                         # (confirmed nonzero gradients on all 336 LoRA tensors there).
-                        # The head keeps its own separate, much lower PEAK_LR unchanged.
+                        #
+                        # REAL BUG (2026-08-27, run #3, cron-diagnosed): run #2 (fixed LR
+                        # routing, v3) completed all 19,340 steps with no crash, no NaN,
+                        # every logged health signal clean -- but validated_step019340's
+                        # own run_summary.json shows real_val_mean_pr_auc collapsing from
+                        # baseline_val_mean_pr_auc=0.76164265 (source_init, pre-training)
+                        # to final_val_mean_pr_auc=0.68986397, and best_checkpoint stayed
+                        # "source_init" for the ENTIRE run -- the model never once beat
+                        # its own starting point. Crucially this wasn't a few weak
+                        # categories dragging the mean down: ALL 20/20 categories degraded
+                        # (e.g. Автотовары 0.690->0.604, Обувь 0.488->0.401, Ювелирные
+                        # изделия 0.496->0.439, Хобби и творчество 0.927->0.850) -- a
+                        # uniform, whole-model shift, not selective catastrophic
+                        # forgetting of hard categories. That pattern is the signature of
+                        # an update magnitude too large for how "cooked" this particular
+                        # base already is, not of a LoRA that failed to learn.
+                        # kaggle_kernels/frida/lora/lora-sft-human-only-10-epochs (where
+                        # LORA_LR=3e-4 was validated) trains a FRESH LoRA on top of a
+                        # merely decent base -- a completely different regime from THIS
+                        # kernel, which loads the project's own best full-FT-continued
+                        # FRIDA checkpoint (source_init baseline 0.7616 PR-AUC, in the
+                        # same range as the project's actual best submitted checkpoint,
+                        # ~0.7595 val / 0.48999 test -- see AGENTS.md's results table).
+                        # PEAK_LR=2e-6 for the head was ALREADY chosen deliberately
+                        # conservative for exactly this "near-converged, handle gently"
+                        # reason (see PEAK_LR's own comment); LORA_LR=3e-4 is 150x that,
+                        # a full 2 orders of magnitude of headroom appropriate for a cold
+                        # LoRA start on an undertrained base, but far too large a step for
+                        # nudging a checkpoint already sitting near this project's
+                        # ceiling. No periodic mid-run validation existed in run #2/#3 to
+                        # even show WHEN in training the degradation set in (only
+                        # start-of-run and end-of-run evaluate() calls were ever made,
+                        # both visible in the log) -- so a genuinely better intermediate
+                        # checkpoint may have existed and gone uncaptured. FIX (two
+                        # parts, see EVAL_CHECKPOINT_INTERVAL_SECONDS below for the
+                        # second): cut LORA_LR by 10x to 3e-5 -- still ~15x PEAK_LR
+                        # (keeps LoRA's standard higher-than-full-FT-LR headroom, so the
+                        # run #1/#2 zero-drift failure class cannot recur) but an order
+                        # of magnitude gentler on a base this close to the project
+                        # ceiling. The head keeps its own separate, much lower PEAK_LR
+                        # unchanged.
 MIN_LR_RATIO = 0.20
 WARMUP_RATIO = 0.05
 WEIGHT_DECAY = 0.02
@@ -228,6 +268,34 @@ LOG_EVERY_STEPS = 20
 # ~1 checkpoint's footprint (~6.6GB: encoder.pt 3.29GB fp32 + optimizer.pt ~3.29GB, mostly
 # bf16 moments) instead of growing unbounded across many saves over a long run.
 QUIET_CHECKPOINT_INTERVAL_SECONDS = 25 * 60
+EVAL_CHECKPOINT_INTERVAL_SECONDS = 25 * 60
+# REAL BUG (found 2026-08-27, v3 "complete" run): this file previously ran
+# evaluate() exactly TWICE for the whole run -- once as a pre-training
+# baseline, once after every step of the plan had executed -- with NO
+# periodic evaluation or best-checkpoint selection in between, unlike this
+# project's own rank_sft_a sibling kernel (do_full_checkpoint() every epoch
+# via `improved = m["macro_pr_auc"] > best_val`). v3 "completed" (no crash)
+# but degraded monotonically on EVERY one of the 20 categories: baseline
+# val_mean_pr_auc=0.7616 (the resumed checkpoint, already well-trained full
+# FT) -> final val_mean_pr_auc=0.6899 after the full 19,340-step plan (~9.7
+# equivalent epochs over the 256,006-row human-train set at
+# PER_CORE_TRAIN_BATCH=16 x WORLD_SIZE=8) -- best_checkpoint ended up
+# "source_init", i.e. training never found ANY point better than not
+# training at all, and the only checkpoint actually SAVED to disk was the
+# final (worst-observed) step, because nothing periodic was ever evaluated
+# to compare against. With LORA_LR=3e-4 (a cold-start LoRA magnitude) run
+# for ~9.7 epochs on top of an already-converged checkpoint, degradation
+# this severe is very plausibly overfitting/drift that set in partway
+# through -- but there is no way to know from v3's own log, because no
+# intermediate point was ever measured. This constant adds that missing
+# periodic full validation (using the SAME evaluate() already called for
+# baseline/final) so a mid-run best point can actually be found and saved,
+# instead of only ever knowing the answer after the entire budget is spent.
+# Set coarser than QUIET_CHECKPOINT_INTERVAL_SECONDS (full eval is far more
+# expensive: 109,648 val rows vs. a cheap resume-state dump) but still
+# frequent enough across a ~7.5h budget (STOP_TRAINING_AT_SECONDS) to catch
+# a degradation trend well before the whole budget is spent chasing it.
+FULL_EVAL_INTERVAL_SECONDS = 90 * 60  # this is the EVAL_CHECKPOINT_INTERVAL_SECONDS referenced above
 # Kaggle TPU sessions stop at 9h. Setup, final human validation and final save
 # are included in this clock and get at least 90 minutes of headroom.
 STOP_TRAINING_AT_SECONDS = 27_000
@@ -1366,6 +1434,14 @@ def mp_fn(_index):
     loader = pl_xla.MpDeviceLoader(make_train_loader(rank, start_step), device)
     model.train()
     next_quiet_at = QUIET_CHECKPOINT_INTERVAL_SECONDS
+    # See FULL_EVAL_INTERVAL_SECONDS's own comment: this is the missing
+    # periodic-validation-with-best-checkpoint-selection mechanism (v3's
+    # run_summary.json showed best_checkpoint stuck at "source_init" for an
+    # entire 19,340-step run because nothing but baseline/final was ever
+    # measured). Offset from resume time (not absolute wall-clock 0) so a
+    # resumed run gets a full interval before its own first periodic eval,
+    # same convention as next_quiet_at.
+    next_full_eval_at = FULL_EVAL_INTERVAL_SECONDS
     previous_quiet_dir = None
     final_step = start_step
     first_probe = model.classifier.out.weight.detach().cpu().clone()
@@ -1466,6 +1542,43 @@ def mp_fn(_index):
                 previous_quiet_dir = new_quiet_dir
                 next_quiet_at += QUIET_CHECKPOINT_INTERVAL_SECONDS
                 write_summary(rank, quiet_checkpoint_step=final_step)
+            # REAL BUG fix (see FULL_EVAL_INTERVAL_SECONDS's own comment): the
+            # ONLY two evaluate() calls in the entire previous version of this
+            # function were baseline (pre-training) and final (post-training)
+            # -- v3's own run_summary.json proved that gap let a full
+            # 19,340-step run complete with best_checkpoint stuck at
+            # "source_init", because no intermediate point was ever measured
+            # or compared. This mirrors rank_sft_a's own do_full_checkpoint()
+            # (evaluate + `improved = m > best_val` once per epoch) adapted to
+            # this file's flat step-plan (no epoch boundaries to hook into).
+            full_eval_due = time.perf_counter() - _START >= next_full_eval_at
+            if collective_flag(rank, full_eval_due, device):
+                periodic_metric, periodic_per_category = None, None
+                try:
+                    periodic_metric, periodic_per_category = evaluate(model, device, rank)
+                except Exception as error:
+                    log(rank, "PERIODIC_VAL_FAIL", f"{type(error).__name__}: {error}; "
+                        "training continues, this point is simply unmeasured", force=True)
+                model.train()
+                if periodic_metric is not None:
+                    improved = periodic_metric > best_metric
+                    log(rank, "METRICS", f"periodic: step={final_step:,} "
+                        f"val_mean_pr_auc={periodic_metric:.4f} best={max(best_metric, periodic_metric):.4f} "
+                        f"improved={improved}", force=True)
+                    if improved:
+                        best_metric = periodic_metric
+                        best_checkpoint = f"validated_step{final_step:06d}"
+                        # A genuine improvement is exactly the point future resumes and
+                        # final submission-building should be able to find on disk --
+                        # unlike the quiet checkpoint above (resume-only, no metric, no
+                        # best-tracking), this one is a real, metric-backed validated
+                        # save, using the SAME save_checkpoint() the final save uses.
+                        save_checkpoint(
+                            model, optimizer, ap_loss, final_step, periodic_metric, periodic_per_category,
+                            best_metric, best_checkpoint, best_checkpoint, rank, device,
+                        )
+                    write_summary(rank, best_val_mean_pr_auc=best_metric, best_checkpoint=best_checkpoint)
+                next_full_eval_at += FULL_EVAL_INTERVAL_SECONDS
             stop = time.perf_counter() - _START >= STOP_TRAINING_AT_SECONDS
             if collective_flag(rank, stop, device):
                 log(rank, "CUTOFF", "wall-clock reserve reached; validating and saving exact resume", force=True)
