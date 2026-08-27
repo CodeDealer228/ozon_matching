@@ -280,7 +280,20 @@ LORA_TARGET_MODULES = ["q", "k", "v", "o", "wi_0", "wi_1", "wo"]
 # tensors vs. row/col vectors) -- halved from 20 as the documented starting
 # guess, consistent with this project's "if it OOMs, halve it and relaunch"
 # policy already applied proactively rather than discovered via a crash.
-PER_CORE_TRAIN_BATCH = 10
+#
+# REAL CRASH #6/#7 (2026-08-27): 10 was still too tight -- v6 and v7 both
+# died of TPU HBM RESOURCE_EXHAUSTED (18.35M free, needed 24.00M) at step 2,
+# the first step where a steady-state (post-state-init) xm.optimizer_step
+# graph has to coexist compiled in HBM alongside AdamW's already-substantial
+# state (m+v full fp32 tensors for 823M params, ~6.6GB) and this file's own
+# per-step overhead (grad clipping, the REAL CRASH #4/#5 finite-checks and
+# their own collective, per-step sync). Applying this project's own
+# documented "if it OOMs, halve it and relaunch" policy again, but
+# conservatively (a 20% cut rather than a full halving) since the
+# clip_grad_norm_ foreach=False regression fixed alongside this (see
+# GRAD_CLIP_NORM's own comment below) is the more likely primary cause and a
+# full halving would cost throughput unnecessarily if that fix alone suffices.
+PER_CORE_TRAIN_BATCH = 8
 PER_CORE_EVAL_BATCH = 64
 RANK_CACHE_BATCH = 96             # inference-only (no grad), can run larger
 
@@ -2049,8 +2062,32 @@ def _mp_fn(index):
                 # gets checked, alongside loss, before deciding whether this
                 # step's update is safe to apply.
                 trainable_parameters = [p for group in optimizer.param_groups for p in group["params"]]
+                # REAL CRASH #6/#7 (2026-08-27): foreach=False here (an
+                # unexamined copy from an earlier draft, NOT present in the
+                # postmortem's own reference snippet) forces clip_grad_norm_
+                # into its slow per-parameter Python-loop path instead of the
+                # vectorized torch._foreach_* batched path -- for this
+                # model's 200+ parameter tensors that is 200+ separate small
+                # XLA ops (and their intermediate buffers) added to the graph
+                # on every single training step, instead of one batched op.
+                # Both v6 and v7 died of TPU HBM RESOURCE_EXHAUSTED (18.35M
+                # free, needed 24.00M) at step 2 specifically -- the first
+                # step where BOTH grad computation's own graph AND a
+                # steady-state (post-state-init) xm.optimizer_step's graph
+                # have to coexist compiled in HBM alongside AdamW's already
+                # substantial state (m+v full fp32 tensors for 823M params,
+                # ~6.6GB) -- exactly the tight-budget regime this file's own
+                # PER_CORE_TRAIN_BATCH comment already flagged ("halved from
+                # 20 as the documented starting guess"). foreach=False's
+                # extra per-parameter graph bloat was never present in v4
+                # (which had no gradient clipping at all) or in the
+                # postmortem's own proven fix, so it is the most likely
+                # marginal push over an already-thin HBM budget. FIX: let
+                # clip_grad_norm_ use its default (foreach=True when
+                # available), matching the postmortem's own reference
+                # snippet exactly.
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    trainable_parameters, GRAD_CLIP_NORM, error_if_nonfinite=False, foreach=False)
+                    trainable_parameters, GRAD_CLIP_NORM, error_if_nonfinite=False)
                 # One combined host sync for both scalars (loss AND grad_norm)
                 # instead of two separate .item() calls -- same "small,
                 # frequent, worth it" sync budget this file's SYNC logging
