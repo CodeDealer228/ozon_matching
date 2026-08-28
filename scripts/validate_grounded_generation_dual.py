@@ -207,15 +207,35 @@ def validate_batch(
 
 
 def load_candidates(
-    preview_path: Path, first_journal: Path, synthetic_pairs_path: Path
+    preview_path: Path,
+    first_journal: Path,
+    synthetic_pairs_path: Path,
+    items_path: Path,
 ) -> list[dict[str, object]]:
     preview = json.loads(preview_path.read_text(encoding="utf-8"))
     preview_by_operation = {
         str(row["operation_sha256"]): row for row in preview
     }
-    allowed_bundle_ids = set(
-        pd.read_parquet(synthetic_pairs_path, columns=["bundle_id"])["bundle_id"].astype(str)
+    pair_rows = pd.read_parquet(
+        synthetic_pairs_path,
+        columns=[
+            "bundle_id",
+            "operation_sha256",
+            "source_id1",
+            "source_id2",
+            "source_role",
+        ],
+    ).drop_duplicates("bundle_id")
+    allowed_by_bundle = {
+        str(row.bundle_id): row for row in pair_rows.itertuples(index=False)
+    }
+    source_ids = set(pair_rows["source_id1"].astype(int)) | set(
+        pair_rows["source_id2"].astype(int)
     )
+    items = pd.read_parquet(
+        items_path, columns=["id", "name", "attributes"]
+    ).set_index("id")
+    items = items.loc[list(source_ids)]
     candidates = []
     seen: set[str] = set()
     for record in read_jsonl(first_journal):
@@ -224,22 +244,35 @@ def load_candidates(
         for result in record.get("results", []):
             decision = result.get("decision", {})
             bundle_id = str(decision.get("bundle_id", ""))
-            if decision.get("status") != "choose" or bundle_id not in allowed_bundle_ids:
+            if decision.get("status") != "choose" or bundle_id not in allowed_by_bundle:
                 continue
             if bundle_id in seen:
                 continue
-            source = preview_by_operation[str(result["operation_sha256"])]
-            bundle = next(
-                value for value in source["bundles"] if value["bundle_id"] == bundle_id
-            )
+            pair = allowed_by_bundle[bundle_id]
+            source = preview_by_operation.get(str(result["operation_sha256"]))
+            bundle = result.get("selected_bundle")
+            if bundle is None and source is not None:
+                bundle = next(
+                    value for value in source["bundles"] if value["bundle_id"] == bundle_id
+                )
+            if not isinstance(bundle, dict):
+                raise ValueError(f"missing_selected_bundle:{bundle_id}")
+            left = items.loc[int(pair.source_id1)]
+            right = items.loc[int(pair.source_id2)]
             seen.add(bundle_id)
             candidates.append({
-                "operation_sha256": str(result["operation_sha256"]),
+                "operation_sha256": str(pair.operation_sha256),
                 "bundle_id": bundle_id,
                 "category": str(result["category"]),
-                "source_role": str(result["source_role"]),
-                "item_1": source["item_1"],
-                "item_2": source["item_2"],
+                "source_role": str(pair.source_role),
+                "item_1": {
+                    "name": str(left["name"]),
+                    "attributes": left["attributes"],
+                },
+                "item_2": {
+                    "name": str(right["name"]),
+                    "attributes": right["attributes"],
+                },
                 "bundle": bundle,
             })
     return candidates
@@ -250,6 +283,7 @@ def main() -> None:
     parser.add_argument("--request-preview", type=Path, required=True)
     parser.add_argument("--first-journal", type=Path, required=True)
     parser.add_argument("--synthetic-pairs", type=Path, required=True)
+    parser.add_argument("--items", type=Path, default=Path("data/items_human.parquet"))
     parser.add_argument("--model-registry", type=Path, action="append", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=5)
@@ -264,7 +298,7 @@ def main() -> None:
         raise RuntimeError("DASHSCOPE_API_KEY is not set")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     candidates = load_candidates(
-        args.request_preview, args.first_journal, args.synthetic_pairs
+        args.request_preview, args.first_journal, args.synthetic_pairs, args.items
     )
     (args.output_dir / "validator_preview.json").write_text(
         json.dumps(candidates, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
