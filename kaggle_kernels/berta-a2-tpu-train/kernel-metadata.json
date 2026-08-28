@@ -1,5 +1,5 @@
 {
-  "id": "rvitvitskii/berta-grounded-spec-tpu-train",
+  "id": "rvitvitskii/berta-grounded-spec-tpu-training",
   "title": "BERTA Grounded Spec TPU Training",
   "code_file": "berta_a2_tpu_train.py",
   "language": "python",
