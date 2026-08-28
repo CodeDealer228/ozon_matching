@@ -1,0 +1,63 @@
+{
+  "status": "train_verification_required",
+  "validation_only_research": true,
+  "validation_examples_allowed_as_generation_source": false,
+  "canonical_split": {
+    "path": "data/splits/matches_item_disjoint_70_30_seed42.parquet",
+    "seed": 42,
+    "sha256": "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e",
+    "validation_fingerprint": "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8",
+    "shared_train_validation_items": 0,
+    "unordered_train_validation_pair_overlap": 0
+  },
+  "target_categories": [
+    "Обувь",
+    "Ювелирные изделия",
+    "Одежда",
+    "Галантерея и аксессуары",
+    "Автотовары"
+  ],
+  "a2": {
+    "source": "canonical_human_train_negative_pairs_only",
+    "allowed_categories": [
+      "Обувь",
+      "Ювелирные изделия",
+      "Одежда",
+      "Галантерея и аксессуары",
+      "Автотовары"
+    ],
+    "mutable_fields": ["name"],
+    "immutable_fields": ["attributes", "category", "identity_bearing_facts"],
+    "status": "source_pool_allowed_after_leak_checks"
+  },
+  "c": {
+    "source": "canonical_human_train_only",
+    "global_category_attribute_rules_allowed": false,
+    "replacement_values_source": "same_narrow_family_human_train_only",
+    "hypotheses": [
+      {
+        "category": "Обувь",
+        "context": "exact_model_or_product_family",
+        "candidate_dimension": "size",
+        "status": "train_verification_required"
+      },
+      {
+        "category": "Ювелирные изделия",
+        "context": "exact_design_or_model_family",
+        "candidate_dimension": "item_size_or_size_linked_article_variant",
+        "status": "train_verification_required"
+      },
+      {
+        "category": "Одежда",
+        "context": "exact_model_family",
+        "candidate_dimension": "color_or_size",
+        "status": "train_verification_required"
+      }
+    ]
+  },
+  "preprocessing_followups": [
+    "jewelry_average_weight_visibility",
+    "shoes_size_and_material_visibility",
+    "accessories_watch_dimension_visibility"
+  ]
+}

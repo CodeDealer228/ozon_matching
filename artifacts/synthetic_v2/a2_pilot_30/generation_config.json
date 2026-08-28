@@ -1,0 +1,20 @@
+{
+  "generator_profile": "a2_qwen_safe_async_v3",
+  "model": "qwen3.8-27b",
+  "endpoint_host": "ws-pnm31ryj1wkdgbwl.ap-southeast-1.maas.aliyuncs.com",
+  "source_pool_sha256": "59818385fcf68e678b636318766ba7764d391c7de8498d9cab49d12d46e00bde",
+  "few_shot_sha256": "8476bc915e2129ecc98c2d86a5ffadbac08a5225eaa6cccd4a7e48c4b23b8228",
+  "canonical_split_sha256": "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e",
+  "validation_fingerprint": "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8",
+  "per_category": 6,
+  "seed": 20260823,
+  "timeout_seconds": 300,
+  "workers": 6,
+  "automatic_retries": 0,
+  "enable_thinking": false,
+  "explicit_cache": true,
+  "decoding": {
+    "temperature": 0.25,
+    "max_tokens": 180
+  }
+}

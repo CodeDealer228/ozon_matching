@@ -1,0 +1,82 @@
+{
+  "version": "c_hybrid_prompt_v1",
+  "system": "Ты создаёшь одну естественную карточку маркетплейса для controlled hard negative. Во входе есть реальная исходная карточка и точный fact contract: какие identity-факты заменить и на какие значения. Не выбирай новые значения самостоятельно. Сохрани категорию и все факты, не относящиеся к заявленной операции. Верни status=skip, если согласованная точечная замена невозможна. При status=ok верни естественный synthetic_name и attribute_updates — только изменившиеся существующие ключи исходных attributes. Не возвращай полный attributes, не добавляй новые ключи, не объясняй решение и не упоминай синтетику. Все старые представления изменяемого факта должны исчезнуть из названия и обновляемых атрибутов, все новые значения должны появиться. Зависимые представления того же факта можно синхронно обновить: например, металл, пробу, цвет металла и описание металла; либо марку/модель ТС и артикул, если он содержит старую платформу. Ответь одним JSON без markdown. Схема ok: {\"status\":\"ok\",\"synthetic_name\":\"...\",\"attribute_updates\":{\"существующий ключ\":\"новое значение\"}}. Схема skip: {\"status\":\"skip\",\"reason\":\"короткая причина\"}.",
+  "examples": [
+    {
+      "input": {
+        "category": "Автотовары",
+        "rule_id": "c_auto_part_number",
+        "operation": "replace exact manufacturer article",
+        "source_name": "ремень поликлиновый examplebrand 6pk1520",
+        "source_attributes": {
+          "артикул": "6pk1520",
+          "бренд": "examplebrand",
+          "комплектация": "1 шт",
+          "партномер (артикул производителя)": "6pk1520",
+          "тип": "ремень поликлиновой"
+        },
+        "source_values": {"article": ["6pk1520"]},
+        "replacement_values": {"article": ["4pk1510"]}
+      },
+      "output": {
+        "status": "ok",
+        "synthetic_name": "ремень поликлиновый examplebrand 4pk1510, 1 шт",
+        "attribute_updates": {
+          "артикул": "4pk1510",
+          "партномер (артикул производителя)": "4pk1510"
+        }
+      }
+    },
+    {
+      "input": {
+        "category": "Ювелирные изделия",
+        "rule_id": "c_jewelry_base_metal",
+        "operation": "replace metal and fineness coherently",
+        "source_name": "кольцо из серебра 925 пробы с фианитом",
+        "source_attributes": {
+          "основной материал украшения": "серебро",
+          "проба": "925",
+          "цвет товара": "серебристый",
+          "вставка": "фианит"
+        },
+        "source_values": {"jewelry_material": ["silver"], "metal_fineness": ["925"]},
+        "replacement_values": {"jewelry_material": ["gold"], "metal_fineness": ["585"]}
+      },
+      "output": {
+        "status": "ok",
+        "synthetic_name": "кольцо из золота 585 пробы с фианитом",
+        "attribute_updates": {
+          "основной материал украшения": "золото",
+          "проба": "585",
+          "цвет товара": "золотистый"
+        }
+      }
+    },
+    {
+      "input": {
+        "category": "Автотовары",
+        "rule_id": "c_auto_platform",
+        "operation": "replace target vehicle platform",
+        "source_name": "коврик в багажник examplebrand для mitsubishi lancer 2008-2012",
+        "source_attributes": {
+          "бренд": "examplebrand",
+          "модель тс": "lancer",
+          "марка тс": "mitsubishi",
+          "партномер (артикул производителя)": "mat_mitsubishi_lancer_black",
+          "цвет товара": "чёрный"
+        },
+        "source_values": {"car_make": ["mitsubishi"], "car_model": ["lancer"]},
+        "replacement_values": {"car_make": ["honda"], "car_model": ["civic"]}
+      },
+      "output": {
+        "status": "ok",
+        "synthetic_name": "коврик в багажник examplebrand для honda civic 2008-2012",
+        "attribute_updates": {
+          "модель тс": "civic",
+          "марка тс": "honda",
+          "партномер (артикул производителя)": "mat_honda_civic_black"
+        }
+      }
+    }
+  ]
+}

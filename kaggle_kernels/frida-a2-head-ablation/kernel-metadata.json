@@ -1,0 +1,21 @@
+{
+  "id": "rvitvitskii/frida-a2-head-ablation",
+  "title": "FRIDA A2 Head Ablation",
+  "code_file": "frida_a2_head_ablation.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "machine_shape": "NvidiaTeslaT4",
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/ozon-ecup-2026-matching",
+    "rvitvitskii/frida-item-disjoint-split-seed42",
+    "rvitvitskii/a2-training-set-v1"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

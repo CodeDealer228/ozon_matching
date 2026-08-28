@@ -1,0 +1,24 @@
+{
+  "registry_version": 1,
+  "provider": "Alibaba Cloud Model Studio",
+  "region": "Singapore",
+  "endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+  "maximum_parameter_billions": 32,
+  "selection_rule": "newest suitable non-thinking text model first; rotate only after an exact terminal allocation-quota error",
+  "queried_from_account_models_endpoint_at": "2026-08-25",
+  "models": [
+    {"id": "qwen3.8-27b", "parameter_billions": 27, "rank": 1},
+    {"id": "qwen3.6-27b", "parameter_billions": 27, "rank": 2},
+    {"id": "qwen3.5-27b", "parameter_billions": 27, "rank": 3},
+    {"id": "qwen3-32b", "parameter_billions": 32, "rank": 4},
+    {"id": "qwen3-30b-a3b-instruct-2507", "parameter_billions": 30, "rank": 5},
+    {"id": "qwen3-30b-a3b", "parameter_billions": 30, "rank": 6},
+    {"id": "qwen3-14b", "parameter_billions": 14, "rank": 7},
+    {"id": "qwen3-8b", "parameter_billions": 8, "rank": 8},
+    {"id": "qwen2-7b-instruct", "parameter_billions": 7, "rank": 9}
+  ],
+  "excluded_available_models": [
+    {"id": "qwen3-30b-a3b-thinking-2507", "reason": "thinking-only variant is wasteful for constrained rewriting"},
+    {"id": "qwen3-omni-30b-a3b-captioner", "reason": "captioning model is not a general text rewrite model"}
+  ]
+}

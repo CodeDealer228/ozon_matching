@@ -1,0 +1,16 @@
+{
+  "id": "rvitvitskii/frida-a2-head-ablation-public-validation-results",
+  "title": "FRIDA A2 Head Ablation - Public Validation Results",
+  "code_file": "frida_a2_head_ablation_public_results.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [],
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

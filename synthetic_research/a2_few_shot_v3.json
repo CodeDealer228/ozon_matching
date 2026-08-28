@@ -1,0 +1,186 @@
+{
+  "version": 3,
+  "branch": "A2",
+  "purpose": "policy examples for contract-constrained identity-preserving hardening",
+  "source_scope": "canonical_human_train_only",
+  "validation_examples_used": false,
+  "canonical_split_sha256": "1e3df234d6cdb8685256d5144b25f9a0a3e3a023f1053a0bd5b16c40e3df8d7e",
+  "validation_fingerprint": "847d04d081432cc081c2149b75271547bf5e25b14f9d8a5804704a5be2a4b3c8",
+  "pilot_generation_plan_sha256": "57a4c747c9a122cb1e29279c7c8e4fe5d3c3bc96965cc1890430b5b98483465b",
+  "counts": {
+    "ok": 3,
+    "skip": 3
+  },
+  "examples": [
+    {
+      "kind": "ok",
+      "source_pair_sha256": "9c18cd34c264d8b716dba53d3c882bbd08b5760ff388ccd156a0cad7e8c3cc79",
+      "input": {
+        "category": "Одежда",
+        "a_safe_template": "кардиган мужской <brand_A_ONLY> <product_model_A_ONLY> <product_color_A_ONLY> <manufacturer_size_A_ONLY>",
+        "name2": "кардиган slava zaitsev",
+        "allowed_operations": [
+          {
+            "concept": "gender",
+            "display_value": "мужской",
+            "fact_id": "shared.gender.22d74621b5b2",
+            "operation_id": "insert.shared.gender.22d74621b5b2",
+            "type": "insert_shared_fact"
+          }
+        ],
+        "protected_numeric_mentions": [],
+        "protected_identifiers": []
+      },
+      "output": {
+        "status": "ok",
+        "candidates": [
+          {
+            "name2_prime": "Кардиган мужской Slava Zaitsev",
+            "used_fact_ids": [
+              "shared.gender.22d74621b5b2"
+            ],
+            "applied_operation_ids": [
+              "insert.shared.gender.22d74621b5b2"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "ok",
+      "source_pair_sha256": "d959aa21323a322c076af1cbf964441dbaa87147108ab1d606ff60297795f0ed",
+      "input": {
+        "category": "Обувь",
+        "a_safe_template": "полусапоги женские <brand_A_ONLY> <product_model_A_ONLY> черные <manufacturer_size_A_ONLY>",
+        "name2": "полусапоги schtosen",
+        "allowed_operations": [
+          {
+            "concept": "product_color",
+            "display_value": "черные",
+            "fact_id": "shared.product_color.f2a3f5a6ac7d",
+            "operation_id": "insert.shared.product_color.f2a3f5a6ac7d",
+            "type": "insert_shared_fact"
+          }
+        ],
+        "protected_numeric_mentions": [],
+        "protected_identifiers": []
+      },
+      "output": {
+        "status": "ok",
+        "candidates": [
+          {
+            "name2_prime": "Полусапоги Schtosen, черные",
+            "used_fact_ids": [
+              "shared.product_color.f2a3f5a6ac7d"
+            ],
+            "applied_operation_ids": [
+              "insert.shared.product_color.f2a3f5a6ac7d"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "ok",
+      "source_pair_sha256": "17d4b449eb2a0457f03b7b362d41fd302d6ba0c1008c707e9bef19d0d51827d8",
+      "input": {
+        "category": "Ювелирные изделия",
+        "a_safe_template": "кольцо из желтого золота 585 пробы без вставок (арт. л090116) (<item_size_A_ONLY>)",
+        "name2": "кольцо из желтого золота р. 17,5 delta л090119",
+        "allowed_operations": [
+          {
+            "concept": "main_insert",
+            "display_value": "без вставок",
+            "fact_id": "shared.main_insert.f900b21ea1c0",
+            "operation_id": "insert.shared.main_insert.f900b21ea1c0",
+            "type": "insert_shared_fact"
+          },
+          {
+            "concept": "metal_fineness",
+            "display_value": "585",
+            "fact_id": "shared.metal_fineness.90a822cb73dc",
+            "operation_id": "insert.shared.metal_fineness.90a822cb73dc",
+            "type": "insert_shared_fact"
+          }
+        ],
+        "protected_numeric_mentions": [
+          "17.5"
+        ],
+        "protected_identifiers": [
+          "л090119"
+        ]
+      },
+      "output": {
+        "status": "ok",
+        "candidates": [
+          {
+            "name2_prime": "Кольцо из желтого золота 585 пробы, без вставок, р. 17,5 Delta л090119",
+            "used_fact_ids": [
+              "shared.main_insert.f900b21ea1c0",
+              "shared.metal_fineness.90a822cb73dc"
+            ],
+            "applied_operation_ids": [
+              "insert.shared.main_insert.f900b21ea1c0",
+              "insert.shared.metal_fineness.90a822cb73dc"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "skip",
+      "source_pair_sha256": "07ddab90dff7cb95beb3265ae7a39f8d2093e5303f8cd4eb2274672f09c6ae5b",
+      "input": {
+        "category": "Автотовары",
+        "a_safe_template": "kiwix / штрих корректор/ маркер 2в1 renault trucks 3667 gris 20 мл",
+        "name2": "штрих корректор/ маркер 2в1 renault trucks 2682 gris 20 мл",
+        "allowed_operations": [],
+        "protected_numeric_mentions": [
+          "20ml",
+          "2682"
+        ],
+        "protected_identifiers": [
+          "2в1"
+        ]
+      },
+      "output": {
+        "status": "skip",
+        "reason": "no_safe_nontrivial_operation"
+      }
+    },
+    {
+      "kind": "skip",
+      "source_pair_sha256": "09d12698c996e8b711e39d78eac968e1ed420e1a6568e19ae39eea607732fddf",
+      "input": {
+        "category": "Галантерея и аксессуары",
+        "a_safe_template": "наручные часы omax quartz hsc7735ib92-1",
+        "name2": "omax / наручные часы omax quartz sc7735ib92",
+        "allowed_operations": [],
+        "protected_numeric_mentions": [],
+        "protected_identifiers": [
+          "sc7735ib92"
+        ]
+      },
+      "output": {
+        "status": "skip",
+        "reason": "no_safe_nontrivial_operation"
+      }
+    },
+    {
+      "kind": "skip",
+      "source_pair_sha256": "5452c25124555a116b401f8d126988185aec3643bf343276110632c67bc4e162",
+      "input": {
+        "category": "Обувь",
+        "a_safe_template": "кроссовки kenka",
+        "name2": "кроссовки keen",
+        "allowed_operations": [],
+        "protected_numeric_mentions": [],
+        "protected_identifiers": []
+      },
+      "output": {
+        "status": "skip",
+        "reason": "no_safe_nontrivial_operation"
+      }
+    }
+  ]
+}
