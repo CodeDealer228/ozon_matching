@@ -1,6 +1,6 @@
 {
-  "id": "rvitvitskii/berta-a2-tpu-train",
-  "title": "BERTA A2 TPU Paired Training",
+  "id": "rvitvitskii/berta-grounded-spec-tpu-train",
+  "title": "BERTA Grounded Spec TPU Training",
   "code_file": "berta_a2_tpu_train.py",
   "language": "python",
   "kernel_type": "script",
@@ -10,10 +10,10 @@
   "enable_internet": true,
   "keywords": [],
   "dataset_sources": [
-    "rvitvitskii/berta-a2-replay-v1"
+    "rvitvitskii/berta-grounded-spec-replay-v2"
   ],
   "kernel_sources": [
-    "rvitvitskii/berta-a2-merge-top",
+    "rvitvitskii/berta-a2-merge-top-and-equivalence",
     "maxamsecret/berta-tokenize-llm-256"
   ],
   "competition_sources": [],

@@ -49,18 +49,20 @@ except Exception as exc:
     print(f"[WARN] optional torchao dispatcher patch failed: {exc}", flush=True)
 
 
-ARM = "T1"  # The only intended C1 -> T1 code change between kernel versions.
+ARM = "C1"  # The only intended C1 -> T1 code change between kernel versions.
 START = time.perf_counter()
 WORKING = Path("/kaggle/working")
-OUT = WORKING / f"berta_a2_tpu_{ARM.lower()}"
+OUT = WORKING / f"berta_grounded_spec_tpu_{ARM.lower()}"
 OUT.mkdir(parents=True, exist_ok=True)
-EXPECTED_PAIRED_SHA = "e3ff627896bacd6d0c50438bfd959b11c2a3013878c64be426c95e06fd4eb225"
-EXPECTED_VAL_SHA = "a48993ca6f54d0b7dde7fbe3f6e637a737ee6cb0c55f33b21e4970c40b6e8bb9"
+EXPECTED_PAIRED_SHA = "b8a4b01d158eb3a3d3aafdc3391a231a876b8cd2a50abbd0d79fc8fc81a7d28a"
+EXPECTED_VAL_SHA = "98e783670d63e7e43f493c2801dd82c069adf547fe1057be9cd5c7397c7da47f"
+EXPECTED_SYNTHETIC_ITEMS_SHA = "2af60109cf71e045dd36b4b96c108c74eb0a267b18b602c6b14d875bf690aabd"
 EXPECTED_ADAPTER_SHA = "26b294123b2445fa7bb46e0c36c2ee5ad259c218ea80e357661f49729800cd34"
 EXPECTED_CLASSIFIER_SHA = "70ac231c64ad2f70ac73592afbce76c3ee9f0cb804ecb16e8b0f4258325d43fa"
-EXPECTED_ROWS = 333_312
-EXPECTED_VAL_ROWS = 73_131
-EXPECTED_STEPS = 651
+EXPECTED_ROWS = 304_128
+EXPECTED_VAL_ROWS = 109_648
+EXPECTED_SYNTHETIC_ITEMS = 12_000
+EXPECTED_STEPS = 594
 GLOBAL_BATCH = 512
 PER_CORE_TRAIN_BATCH = 64
 PER_CORE_EVAL_BATCH = 128
@@ -76,7 +78,8 @@ WEIGHT_DECAY, WARMUP_RATIO = 0.04, 0.10
 POS_WEIGHT = 2.894490893598893
 MODEL_INIT_SEED = 1203
 DATA_SEED = 420031
-EVAL_STEPS = [0, 163, 326, 488, 651]
+EVAL_STEPS = [0, 149, 297, 446, 594]
+MAX_NAME_CHARS, MAX_CATEGORY_CHARS, MAX_ATTR_CHARS = 140, 32, 442
 MAX_TRAIN_SECONDS = 28_800
 SAFETY_SAVE_SECONDS = 3_600
 _SHARED = {}
@@ -171,20 +174,28 @@ def load_human_cache():
     }
 
 
-def load_synthetic_cache(merge_root):
-    root = Path(merge_root)
-    meta = json.loads((root / "synthetic_cache_meta.json").read_text(encoding="utf-8"))
-    if meta["status"] != "complete" or meta["rows"] != 10_123 or meta["max_length"] != ITEM_MAX_LENGTH:
-        raise RuntimeError(f"Synthetic cache identity mismatch: {meta}")
-    index = pd.read_parquet(root / "synthetic_cache_index.parquet")
-    tokens = np.load(root / "synthetic_input_ids.npy", mmap_mode="r")
+def load_synthetic_cache(tokenizer):
+    path = find_file("synthetic_items.parquet", EXPECTED_SYNTHETIC_ITEMS_SHA)
+    frame = pd.read_parquet(path)
+    if len(frame) != EXPECTED_SYNTHETIC_ITEMS or frame["id"].nunique() != len(frame):
+        raise RuntimeError("Synthetic item identity mismatch")
+    texts = (
+        "Name: " + frame["name"].fillna("").astype(str).str.slice(0, MAX_NAME_CHARS)
+        + " Category: " + frame["category"].fillna("").astype(str).str.slice(0, MAX_CATEGORY_CHARS)
+        + " Attributes: " + frame["attributes"].fillna("").astype(str).str.slice(0, MAX_ATTR_CHARS)
+    )
+    encoded = tokenizer(
+        [PREFIX + value for value in texts.tolist()], add_special_tokens=False,
+        padding="max_length", truncation=True, max_length=ITEM_MAX_LENGTH,
+        return_tensors="np",
+    )
+    tokens = encoded["input_ids"].astype(np.int32)
+    lengths = encoded["attention_mask"].sum(1).astype(np.int16)
     return {
-        "tokens": tokens,
-        "lengths": np.load(root / "synthetic_lengths.npy", mmap_mode="r"),
-        "cat_start": np.load(root / "synthetic_category_start.npy", mmap_mode="r"),
-        "attr_start": np.load(root / "synthetic_attr_start.npy", mmap_mode="r"),
-        "key_to_row": dict(zip(index["synthetic_key"], index["synthetic_row"])),
-        "index": index,
+        "tokens": tokens, "lengths": lengths,
+        "cat_start": pattern_starts(tokens, CATEGORY_PATTERN),
+        "attr_start": pattern_starts(tokens, ATTR_PATTERN),
+        "id_to_row": {int(value): index for index, value in enumerate(frame["id"])},
     }
 
 
@@ -206,14 +217,15 @@ def allocate_pair_budget(a, b, budget):
 
 
 class PairDataset(Dataset):
-    def __init__(self, row1, row2, synthetic2, labels, weights, categories, valid):
-        self.row1, self.row2, self.synthetic2 = row1, row2, synthetic2
+    def __init__(self, row1, row2, synthetic1, synthetic2, labels, weights, categories, valid):
+        self.row1, self.row2 = row1, row2
+        self.synthetic1, self.synthetic2 = synthetic1, synthetic2
         self.labels, self.weights, self.categories, self.valid = labels, weights, categories, valid
 
     def __len__(self): return len(self.row1)
 
     def __getitem__(self, i):
-        return (self.row1[i], self.row2[i], self.synthetic2[i], self.labels[i],
+        return (self.row1[i], self.row2[i], self.synthetic1[i], self.synthetic2[i], self.labels[i],
                 self.weights[i], self.categories[i], self.valid[i])
 
 
@@ -224,8 +236,8 @@ def collator(human, synthetic, cls_id, sep_id, pad_id):
         mask = np.zeros((bs, PAIR_MAX_LENGTH), dtype=np.int64)
         types = np.zeros((bs, PAIR_MAX_LENGTH), dtype=np.int64)
         labels, weights, categories, valid = [], [], [], []
-        for i, (r1, r2, syn2, label, weight, cat, is_valid) in enumerate(batch):
-            a = compact(human, int(r1))
+        for i, (r1, r2, syn1, syn2, label, weight, cat, is_valid) in enumerate(batch):
+            a = compact(synthetic if syn1 else human, int(r1))
             b = compact(synthetic if syn2 else human, int(r2))
             k1, k2 = allocate_pair_budget(len(a), len(b), PAIR_MAX_LENGTH - 3)
             n1, total = 1 + k1 + 1, 1 + k1 + 1 + k2 + 1
@@ -296,14 +308,26 @@ def make_loaders(rank, world):
     shard = paired.iloc[rank::world].reset_index(drop=True)
     if len(shard) != EXPECTED_STEPS * PER_CORE_TRAIN_BATCH:
         raise RuntimeError(f"Rank {rank} shard length {len(shard)}")
-    r1 = shard["id1"].map(human["id_to_row"]).to_numpy(np.int64)
-    use_syn = (ARM == "T1") & (shard["row_kind"].to_numpy() == "replay")
-    r2 = np.empty(len(shard), dtype=np.int64)
-    real = ~use_syn
-    r2[real] = shard.loc[real, "id2"].map(human["id_to_row"]).to_numpy(np.int64)
-    if use_syn.any():
-        r2[use_syn] = shard.loc[use_syn, "synthetic_key"].map(synthetic["key_to_row"]).to_numpy(np.int64)
-    train_ds = PairDataset(r1, r2, use_syn, shard["label"].to_numpy(np.float32),
+    if ARM == "T1":
+        ids1, ids2 = shard["t1_id1"], shard["t1_id2"]
+        syn1 = shard["t1_syn1"].to_numpy(bool)
+        syn2 = shard["t1_syn2"].to_numpy(bool)
+    else:
+        ids1, ids2 = shard["c1_id1"], shard["c1_id2"]
+        syn1 = np.zeros(len(shard), dtype=bool)
+        syn2 = np.zeros(len(shard), dtype=bool)
+
+    def resolve(values, flags):
+        result = np.empty(len(values), dtype=np.int64)
+        raw = values.to_numpy(np.int64)
+        for is_synthetic, mapping in ((False, human["id_to_row"]), (True, synthetic["id_to_row"])):
+            positions = np.flatnonzero(flags == is_synthetic)
+            if len(positions):
+                result[positions] = [mapping[int(raw[index])] for index in positions]
+        return result
+
+    r1, r2 = resolve(ids1, syn1), resolve(ids2, syn2)
+    train_ds = PairDataset(r1, r2, syn1, syn2, shard["label"].to_numpy(np.float32),
                            shard["sample_weight"].to_numpy(np.float32),
                            np.full(len(shard), -1, dtype=np.int64), np.ones(len(shard), dtype=bool))
     cfn = collator(human, synthetic, _SHARED["cls_id"], _SHARED["sep_id"], _SHARED["pad_id"])
@@ -320,7 +344,8 @@ def make_loaders(rank, world):
         cats = np.concatenate([cats, cats[:pad]]); valid = np.concatenate([np.ones(len(val), bool), np.zeros(pad, bool)])
     else:
         labels = val["label"].to_numpy(np.float32); valid = np.ones(len(val), bool)
-    eval_ds = PairDataset(vr1, vr2, np.zeros(len(vr1), bool), labels, np.ones(len(vr1), np.float32), cats, valid)
+    eval_ds = PairDataset(vr1, vr2, np.zeros(len(vr1), bool), np.zeros(len(vr1), bool),
+                          labels, np.ones(len(vr1), np.float32), cats, valid)
     eval_loader = DataLoader(eval_ds, batch_size=PER_CORE_EVAL_BATCH, shuffle=False,
                              drop_last=True, num_workers=0, collate_fn=cfn)
     return train_loader, eval_loader
@@ -398,11 +423,20 @@ def load_shared():
     if len(paired) != EXPECTED_ROWS or len(val) != EXPECTED_VAL_ROWS: raise RuntimeError("Manifest row mismatch")
     if paired["global_row_index"].tolist() != list(range(EXPECTED_ROWS)): raise RuntimeError("Manifest order mismatch")
     if paired.groupby("global_step_index").size().nunique() != 1: raise RuntimeError("Ragged global batches")
-    human = load_human_cache(); synthetic = load_synthetic_cache(merge_root)
-    missing = set(paired["id1"]).union(paired["id2"]).union(val["id1"]).union(val["id2"]).difference(human["id_to_row"])
-    if missing: raise RuntimeError(f"Human cache misses {len(missing)} ids")
+    human = load_human_cache()
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(Path(merge_root, "merged_encoder"))
+    synthetic = load_synthetic_cache(tokenizer)
+    human_ids = set(paired["c1_id1"]).union(paired["c1_id2"]).union(val["id1"]).union(val["id2"])
+    human_ids.update(paired.loc[~paired["t1_syn1"], "t1_id1"])
+    human_ids.update(paired.loc[~paired["t1_syn2"], "t1_id2"])
+    missing = human_ids.difference(human["id_to_row"])
+    if missing: raise RuntimeError(f"Human cache misses {len(missing)} ids")
+    synthetic_ids = set(paired.loc[paired["t1_syn1"], "t1_id1"]).union(
+        paired.loc[paired["t1_syn2"], "t1_id2"]
+    )
+    if synthetic_ids.difference(synthetic["id_to_row"]):
+        raise RuntimeError("Synthetic cache misses referenced ids")
     _SHARED.update(merge_root=merge_root, paired=paired, val=val, human=human, synthetic=synthetic,
                    cls_id=tokenizer.cls_token_id, sep_id=tokenizer.sep_token_id, pad_id=tokenizer.pad_token_id)
     atomic_json(OUT / "preflight.json", {"status":"complete", "arm":ARM, "paired_sha256":EXPECTED_PAIRED_SHA,
