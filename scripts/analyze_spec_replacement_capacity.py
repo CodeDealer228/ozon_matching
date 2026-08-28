@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -13,8 +14,87 @@ from filter_token_replacement_training_candidates import (
     ALLOWED_SPEC_ROLES,
     mutation_rejection,
 )
-from generate_token_replacement_counterfactuals import read_jsonl
-from generate_token_replacement_fast_v2 import VALUE_RE, infer_source_role
+from generate_token_replacement_counterfactuals import parse_attributes, read_jsonl, replace_text
+from generate_token_replacement_fast_v2 import (
+    NUMERIC_ROLES,
+    VALUE_RE,
+    infer_source_role,
+    token_roles,
+)
+
+
+LETTER_SIZES = {"xxs", "xs", "s", "m", "l", "xl", "xxl", "xxxl"}
+
+
+def strict_spec_token(role: str, token: str) -> bool:
+    if role not in NUMERIC_ROLES:
+        return True
+    if any(char.isdigit() for char in token):
+        return True
+    return role == "size" and token.casefold() in LETTER_SIZES
+
+
+DIMENSION_ROLES = {"length", "width", "height", "diameter", "size"}
+TITLE_CUES = (
+    (re.compile(r"^(?:\s|[-–—,:;(])*(?:мл|литр|oz\b|унци)", re.I), {"volume"}),
+    (re.compile(r"^(?:\s|[-–—,:;(])*(?:mah|мач)", re.I), {"volume"}),
+    (re.compile(r"^(?:\s|[-–—,:;(])*(?:кг|г|грамм)", re.I), {"weight"}),
+    (re.compile(r"^(?:\s|[-–—,:;(])*(?:шт|штук|пар|линз|лист|цвет|детал|элемент|led|ламп)", re.I), {"count"}),
+    (re.compile(r"^(?:\s|[-–—,:;(])*(?:мм|см|метр|м\b)", re.I), DIMENSION_ROLES),
+    (re.compile(r"^(?:\s|[-–—,:;(])*(?:вт|w\b)", re.I), {"power"}),
+    (re.compile(r"^(?:\s|[-–—,:;(])*(?:dpi)", re.I), {"resolution"}),
+)
+
+ROLE_MEASUREMENT_PATTERNS = {
+    "volume": re.compile(r"\d+(?:[.,]\d+)?\s*(?:мл|л\b|литр|oz\b|унци)", re.I),
+    "weight": re.compile(r"\d+(?:[.,]\d+)?\s*(?:кг|г\b|грамм)", re.I),
+    "count": re.compile(r"\d+(?:[.,]\d+)?\s*(?:шт|штук|пар|линз|лист|цвет|детал|элемент|led|ламп)", re.I),
+    "power": re.compile(r"\d+(?:[.,]\d+)?\s*(?:вт|w\b)", re.I),
+}
+
+
+def safe_title_occurrence(name: str, token: str, role: str) -> bool:
+    escaped = re.escape(token)
+    if any(char.isdigit() for char in token):
+        pattern = re.compile(rf"(?<!\d){escaped}(?!\d)", re.I)
+    else:
+        pattern = re.compile(rf"(?<!\w){escaped}(?!\w)", re.I)
+    matches = list(pattern.finditer(name))
+    if len(matches) != 1:
+        return False
+    match = matches[0]
+    before = name[max(0, match.start() - 2):match.start()]
+    after = name[match.end():match.end() + 18]
+    if before and before[-1:] in ".," and len(before) > 1 and before[-2].isdigit():
+        return False
+    if after[:1] in ".," and len(after) > 1 and after[1].isdigit():
+        return False
+    if replace_text(name, token, "__probe__")[1] != 1:
+        return False
+    measurement_pattern = ROLE_MEASUREMENT_PATTERNS.get(role)
+    if measurement_pattern is not None and len(measurement_pattern.findall(name)) != 1:
+        return False
+    for cue, allowed_roles in TITLE_CUES:
+        if cue.search(after):
+            return role in allowed_roles
+    return True
+
+
+def strict_source_role(left: pd.Series, right: pd.Series, token: str) -> str | None:
+    role = infer_source_role(left, right, token)
+    if role not in ALLOWED_SPEC_ROLES or not strict_spec_token(str(role), token):
+        return None
+    if role == "power":
+        return None
+    left_roles = token_roles(parse_attributes(left["attributes"]), token)
+    right_roles = token_roles(parse_attributes(right["attributes"]), token)
+    if left_roles & right_roles != {role}:
+        return None
+    if not safe_title_occurrence(str(left["name"]), token, str(role)):
+        return None
+    if not safe_title_occurrence(str(right["name"]), token, str(role)):
+        return None
+    return str(role)
 
 
 def shared_name_tokens(left: str, right: str) -> list[str]:
@@ -73,8 +153,8 @@ def main() -> None:
         valid = []
         for token_value in row["offered_tokens"]:
             token = str(token_value)
-            role = infer_source_role(left, right, token)
-            if role not in ALLOWED_SPEC_ROLES:
+            role = strict_source_role(left, right, token)
+            if role is None:
                 continue
             _, rejection = mutation_rejection(left, right, token, token)
             if rejection is None:
