@@ -1,0 +1,14 @@
+{
+  "registry_version": 1,
+  "provider": "Alibaba Cloud Model Studio",
+  "region": "Singapore",
+  "selection_rule": "models documented for Alibaba built-in web search via Responses API",
+  "models": [
+    {"id": "qwen3.7-max", "rank": 1},
+    {"id": "qwen3.7-plus", "rank": 2},
+    {"id": "qwen3.6-plus", "rank": 3},
+    {"id": "qwen3.5-plus", "rank": 4},
+    {"id": "qwen3.6-flash", "rank": 5},
+    {"id": "qwen3.5-flash", "rank": 6}
+  ]
+}

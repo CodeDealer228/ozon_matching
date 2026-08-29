@@ -74,6 +74,11 @@ kaggle_kernels/**/pulled/
 # downloaded Kaggle source inspection.
 /.tmp_*
 
+# Private Kaggle dataset payload for the BERTA A2 experiment.  Keep only its
+# metadata in Git; manifests contain non-public item identifiers/titles.
+kaggle_datasets/berta-a2-replay-v1/*.parquet
+kaggle_datasets/berta-a2-replay-v1/replay_manifest.json
+
 # Scratch / local test artifacts (downloaded adapters, extracted zips for
 # testing, sampled parquet files, prediction CSVs from smoke tests).
 artifacts/

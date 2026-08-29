@@ -1,0 +1,106 @@
+"""Sample human pairs and print intersections of normalized fact tokens."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import unicodedata
+from pathlib import Path
+
+import pandas as pd
+
+
+def flatten_values(value: object) -> list[str]:
+    if isinstance(value, dict):
+        return [text for nested in value.values() for text in flatten_values(nested)]
+    if isinstance(value, list):
+        return [text for nested in value for text in flatten_values(nested)]
+    return [] if value is None else [str(value)]
+
+
+def token_set(text: object) -> set[str]:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower().replace("ё", "е")
+    normalized = re.sub(r"(?<=\d),(?=\d)", ".", normalized)
+    return {
+        token
+        for token in normalized.replace("(", " ").replace(")", " ").replace("\n", " ").split(" ")
+        if token
+    }
+
+
+def token_set_without_word_commas(text: object) -> set[str]:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower().replace("ё", "е")
+    normalized = re.sub(r"(?<=\d),(?=\d)", ".", normalized).replace(",", " ")
+    return {
+        token
+        for token in normalized.replace("(", " ").replace(")", " ").replace("\n", " ").split(" ")
+        if token
+    }
+
+
+def token_set_without_quotes(text: object) -> set[str]:
+    return token_set(str(text or "").replace("«", "").replace("»", "").replace('"', ""))
+
+
+def candidate_intersections(left: object, right: object) -> dict[str, list[str]]:
+    tokenizers = {
+        "current": token_set,
+        "without_word_commas": token_set_without_word_commas,
+        "without_quotes": token_set_without_quotes,
+    }
+    return {name: sorted(tokenizer(left) & tokenizer(right)) for name, tokenizer in tokenizers.items()}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--items", type=Path, default=Path("data/items_human.parquet"))
+    parser.add_argument("--pairs", type=Path, default=Path("data/matches.parquet"))
+    parser.add_argument("--count", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=20260825)
+    parser.add_argument("--max-attributes-chars", type=int, default=1000)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+
+    items = pd.read_parquet(args.items, columns=["id", "category", "name", "attributes"]).set_index("id")
+    pairs = pd.read_parquet(args.pairs, columns=["id1", "id2", "target"])
+    pairs = pairs[pairs["target"].eq(1)].sample(frac=1, random_state=args.seed)
+    shown = 0
+    reports: list[str] = []
+    for pair in pairs.itertuples(index=False):
+        if pair.id1 not in items.index or pair.id2 not in items.index:
+            continue
+        left, right = items.loc[pair.id1], items.loc[pair.id2]
+        if any(not isinstance(value, str) or len(value) > args.max_attributes_chars for value in (left["attributes"], right["attributes"])):
+            continue
+        try:
+            left_values = " ".join(flatten_values(json.loads(left["attributes"])))
+            right_values = " ".join(flatten_values(json.loads(right["attributes"])))
+        except json.JSONDecodeError:
+            continue
+        intersections = candidate_intersections(
+            f"{left['name']} {left_values}", f"{right['name']} {right_values}"
+        )
+        reports.append(
+            f"\n{'=' * 80}\ntarget={pair.target}\n"
+            f"id_1={pair.id1} | category_1={left['category']}\nname_1: {left['name']}\nattr_1: {left['attributes']}\n"
+            f"\nid_2={pair.id2} | category_2={right['category']}\nname_2: {right['name']}\nattr_2: {right['attributes']}\n"
+            + "".join(
+                f"\nПересечение {name} ({len(tokens)}): {tokens}"
+                for name, tokens in intersections.items()
+            )
+        )
+        shown += 1
+        if shown == args.count:
+            break
+    if shown != args.count:
+        raise RuntimeError(f"Found only {shown} valid pairs")
+    report = "\n".join(reports)
+    print(report)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(report + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,17 @@
+{
+  "registry_version": 1,
+  "provider": "Alibaba Cloud Model Studio",
+  "region": "Singapore",
+  "selection_rule": "newest suitable non-thinking model first; rotate only on an exact quota or model-not-found response",
+  "models": [
+    {"id": "qwen3.8-27b", "parameter_billions": 27, "rank": 1},
+    {"id": "qwen3.6-27b", "parameter_billions": 27, "rank": 2},
+    {"id": "qwen3.5-27b", "parameter_billions": 27, "rank": 3},
+    {"id": "qwen3-32b", "parameter_billions": 32, "rank": 4},
+    {"id": "qwen3-30b-a3b-instruct-2507", "parameter_billions": 30, "rank": 5},
+    {"id": "qwen3-30b-a3b", "parameter_billions": 30, "rank": 6},
+    {"id": "qwen3-14b", "parameter_billions": 14, "rank": 7},
+    {"id": "qwen3-8b", "parameter_billions": 8, "rank": 8},
+    {"id": "qwen2-7b-instruct", "parameter_billions": 7, "rank": 9}
+  ]
+}

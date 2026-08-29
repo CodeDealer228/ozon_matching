@@ -1,0 +1,24 @@
+{
+  "id": "rvitvitskii/berta-a2-merge-top",
+  "title": "BERTA A2 Merge Top and Equivalence",
+  "code_file": "berta_a2_merge_top.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "maxamsecret/berta-tpu-lora-top-checkpoint",
+    "maxamsecret/ozon-ecup-2026-matching",
+    "rvitvitskii/berta-a2-replay-v1"
+  ],
+  "kernel_sources": [
+    "maxamsecret/berta-merge-lora",
+    "maxamsecret/berta-tokenize-llm-256"
+  ],
+  "competition_sources": [],
+  "model_sources": [],
+  "machine_shape": "NvidiaTeslaT4"
+}

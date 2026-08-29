@@ -1,0 +1,10 @@
+{
+  "registry_version": 1,
+  "provider": "Alibaba Cloud Model Studio",
+  "region": "Singapore",
+  "selection_rule": "previously user-authorized small extension after the <=32B registry is exhausted",
+  "models": [
+    {"id": "qwen3.6-35b-a3b", "parameter_billions": 35, "rank": 1},
+    {"id": "qwen3.5-35b-a3b", "parameter_billions": 35, "rank": 2}
+  ]
+}
